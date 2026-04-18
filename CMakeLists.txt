@@ -46,6 +46,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Bootloader-specific sources (CubeMX does not manage these).
     Core/Src/bl_proto.c
+    Core/Src/bl_isotp.c
 )
 
 # Add include paths
