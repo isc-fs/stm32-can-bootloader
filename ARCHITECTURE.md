@@ -219,6 +219,7 @@ byte is the opcode. The Phase 2 set:
 | `0x01` | `CONNECT`        |    –    | `[major, minor]`                                | `[opcode, major, minor]`                        |
 | `0x02` | `DISCONNECT`     |    –    | –                                              | `[opcode]`                                      |
 | `0x03` | `DISCOVER`       |    –    | – (sent to `dst=0xF`)                           | `[opcode, node_id, major, minor]` — TYPE = `DISCOVER` |
+| `0x04` | `GET_FW_INFO`    |    –    | –                                              | `[opcode, <64-byte __firmware_info record>]` — multi-frame |
 | `0x10` | `FLASH_ERASE`    |   ✔    | `[start_le32, length_le32]`                     | `[opcode]`                                      |
 | `0x11` | `FLASH_WRITE`    |   ✔    | `[addr_le32, data…]` (≤ 256 B data)             | `[opcode]`                                      |
 | `0x12` | `FLASH_READ_CRC` |   ✔    | `[addr_le32, length_le32]`                      | `[opcode, crc32_le32]`                          |
@@ -243,8 +244,75 @@ watchdog timeout also clears it.
 
 **DISCOVER**: sent as `TYPE=DISCOVER` with `dst=0xF`. Each bootloader
 on the bus replies — `TYPE=DISCOVER`, `dst=0x0` (host) — with its node
-ID and protocol version. Additional identity fields (`__firmware_info`,
-WRP status, UID, …) arrive in later phases.
+ID and protocol version. The reply is kept short (SF, 5 bytes
+payload) so a bus scan stays cheap; hosts that want full identity
+follow up with `GET_FW_INFO` on the specific node they care about.
+
+**GET_FW_INFO**: returns the 64-byte `__firmware_info` record the
+**application** (not the bootloader) publishes at a fixed offset. The
+ACK payload is 65 bytes (opcode + record), so it travels as an
+ISO-TP First Frame + nine Consecutive Frames — the first real
+exercise of multi-frame TX from the bootloader. If no valid
+application is installed the host gets `NACK(BL_NACK_NO_VALID_APP)`;
+if the app is valid but lacks a firmware-info record,
+`NACK(BL_NACK_UNSUPPORTED)`. Not session-gated — identity is
+readable anytime.
+
+##### Firmware-info record layout (64 bytes)
+
+Stored at **`BL_APP_BASE + 0x400` = `0x08020400`**. The offset clears
+an H7-sized vector table with margin; app code typically starts at
+`0x500` or later.
+
+| Offset | Size | Field                  | Notes                                               |
+|:------:|:----:|------------------------|-----------------------------------------------------|
+|    0   |   4  | `magic`                | `BL_FWINFO_MAGIC = 0xF14F1B00`                       |
+|    4   |   4  | `record_version`       | `0xMMMMmmmm` — major in high 16 bits, minor in low  |
+|    8   |   4  | `fw_version_major`     | Host-defined                                        |
+|   12   |   4  | `fw_version_minor`     | Host-defined                                        |
+|   16   |   4  | `fw_version_patch`     | Host-defined                                        |
+|   20   |   4  | `mcu_id`               | `DBGMCU->IDCODE` value baked into the image         |
+|   24   |   8  | `git_hash[8]`          | First 8 bytes of the source SHA-1                   |
+|   32   |   8  | `build_timestamp`      | Unix seconds, little-endian 64-bit                  |
+|   40   |  16  | `product_name[16]`     | ASCII, NUL-padded                                   |
+|   56   |   8  | `reserved[2]`          | Zero until future revisions claim them              |
+
+The bootloader accepts any record whose magic matches **and** whose
+major version in `record_version` is ≥ 1 — minor revisions keep the
+layout compatible. Apps express the record in C like this:
+
+```c
+#include "bl_fwinfo.h"   // header from this repo
+
+const bl_fwinfo_t __firmware_info
+    __attribute__((section(".firmware_info"), used)) = {
+    .magic            = BL_FWINFO_MAGIC,
+    .record_version   = BL_FWINFO_RECORD_VERSION,   // 0x00010000 (1.0)
+    .fw_version_major = 1,
+    .fw_version_minor = 2,
+    .fw_version_patch = 3,
+    .mcu_id           = 0x00000450U,                 // STM32H7x3
+    .git_hash         = { 0xAA, 0xBB, 0xCC, 0xDD,
+                          0x11, 0x22, 0x33, 0x44 },   // truncated SHA-1
+    .build_timestamp  = 1734567890ULL,
+    .product_name     = "IFS08-CE-ECU",
+    .reserved         = { 0, 0 },
+};
+```
+
+And their linker script pins the section at the right offset:
+
+```
+.firmware_info 0x08020400 :
+{
+    KEEP(*(.firmware_info))
+} > FLASH
+```
+
+The bootloader never writes to this region — it's owned end-to-end by
+the application. `__firmware_info` lands in the app image alongside
+`.text`, gets flashed by `FLASH_WRITE`, and starts answering
+`GET_FW_INFO` queries the moment the image is in place.
 
 #### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
 

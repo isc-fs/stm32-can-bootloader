@@ -24,6 +24,7 @@
 
 #include "bl_config.h"
 #include "bl_flash.h"
+#include "bl_fwinfo.h"
 #include "bl_isotp.h"
 #include "bl_memmap.h"
 #include "main.h"
@@ -212,9 +213,9 @@ static void handle_disconnect(uint8_t peer, uint16_t args_len)
 }
 
 /* CMD_DISCOVER: no args. Reply as TYPE=DISCOVER with this node's ID
- * and the bootloader's protocol version. Additional identity fields
- * (UID, HW rev, FW version, WRP status, …) arrive as later phases
- * populate them. */
+ * and the bootloader's protocol version. Richer identity (product
+ * name, fw version, build stamp, …) is fetched via CMD_GET_FW_INFO
+ * once a host has picked the node it wants to talk to. */
 static void handle_discover(uint8_t peer)
 {
     uint8_t resp[4] = {
@@ -224,6 +225,37 @@ static void handle_discover(uint8_t peer)
         BL_PROTO_VERSION_MINOR,
     };
     send_message(BL_PROTO_TYPE_DISCOVER, peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_GET_FW_INFO: no args. Returns the 64-byte __firmware_info record
+ * the application publishes at BL_FWINFO_ADDR. The ACK is 65 bytes of
+ * payload (1 opcode + 64 record bytes), so it goes out as an ISO-TP
+ * First Frame plus nine Consecutive Frames — the first real exercise
+ * of multi-frame TX.
+ *
+ * Errors:
+ *   - BL_NACK_NO_VALID_APP   — no valid application is installed
+ *   - BL_NACK_UNSUPPORTED    — app is present but has no firmware-info
+ *                              record (missing / wrong magic / bad
+ *                              record-version). Treated as a host-side
+ *                              "this image pre-dates the convention". */
+static void handle_get_fw_info(uint8_t peer)
+{
+    if (Bootloader_CheckApplication() != 0U) {
+        send_nack(peer, BL_CMD_GET_FW_INFO, BL_NACK_NO_VALID_APP);
+        return;
+    }
+
+    const bl_fwinfo_t *info = bl_fwinfo_get();
+    if (info == (const bl_fwinfo_t *)0) {
+        send_nack(peer, BL_CMD_GET_FW_INFO, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t resp[1U + BL_FWINFO_SIZE];
+    resp[0] = BL_CMD_GET_FW_INFO;
+    memcpy(&resp[1], info, BL_FWINFO_SIZE);
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_RESET: [mode]. Modes:
@@ -498,6 +530,9 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_DISCOVER:
             handle_discover(peer);
+            break;
+        case BL_CMD_GET_FW_INFO:
+            handle_get_fw_info(peer);
             break;
         case BL_CMD_FLASH_ERASE:
             handle_flash_erase(peer, args, args_len);
