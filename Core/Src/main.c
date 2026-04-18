@@ -75,9 +75,10 @@ static void MX_FDCAN2_Init(void);
 static void Bootloader_Init(void);
 static void Bootloader_MainLoop(void);
 static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void);
-static void Bootloader_JumpToApplication(void);
+/* Bootloader_JumpToApplication / Bootloader_CheckApplication are declared
+ * with external linkage in main.h so bl_proto.c can call them for
+ * CMD_RESET (mode=to-app) and CMD_JUMP. */
 static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes);
-static uint8_t  Bootloader_CheckApplication(void);
 static uint8_t  Bootloader_IsBootRequestActive(void);
 
 /* USER CODE END PFP */
@@ -424,7 +425,7 @@ static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void) {
 
 /* ===================== JUMP TO APPLICATION ====================== */
 
-static void Bootloader_JumpToApplication(void) {
+void Bootloader_JumpToApplication(void) {
 	uint32_t appStack = *(__IO uint32_t*) BL_APP_BASE;       // 0x08020000
 	uint32_t appEntry = *(__IO uint32_t*) (BL_APP_BASE + 4U); // 0x08020004
 	pFunction JumpToApp = (pFunction) appEntry;
@@ -490,7 +491,7 @@ static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes) {
 	return crc;
 }
 
-static uint8_t Bootloader_CheckApplication(void) {
+uint8_t Bootloader_CheckApplication(void) {
 	/* Read metadata from flash */
 	uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 

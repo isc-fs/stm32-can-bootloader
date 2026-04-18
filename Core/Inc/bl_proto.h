@@ -47,11 +47,29 @@ typedef enum {
     BL_PROTO_TYPE_DISCOVER = 0x7U,  /* broadcast, discovery ping/response */
 } bl_proto_type_t;
 
-/* ---- NACK error codes — subset used in Phase 2 ---- */
+/* ---- Command opcodes (Phase 2 core set) ---- */
+#define BL_CMD_CONNECT              0x01U  /* start a session, exchange protocol version */
+#define BL_CMD_DISCONNECT           0x02U  /* end the session */
+#define BL_CMD_DISCOVER             0x03U  /* broadcast ping; device returns identity */
+#define BL_CMD_RESET                0x60U  /* reset MCU in one of four modes */
+#define BL_CMD_JUMP                 0x61U  /* jump directly to the installed application */
+
+/* ---- Protocol version advertised in CONNECT / DISCOVER replies ---- */
+#define BL_PROTO_VERSION_MAJOR      0U
+#define BL_PROTO_VERSION_MINOR      1U
+
+/* ---- NACK error codes ----
+ * Codes 0x01..0x08 are allocated by the project's top-level protocol
+ * spec (see host-tool requirements); 0x09..0x7F are reserved for the
+ * bootloader's own extensions; 0xFE..0xFF are generic fallbacks. */
+#define BL_NACK_PROTECTED_ADDR      0x01U  /* write into WRP-protected region */
+#define BL_NACK_OUT_OF_BOUNDS       0x02U  /* address outside allowed region */
 #define BL_NACK_BUSY                0x08U  /* previous operation not complete */
 #define BL_NACK_TRANSPORT_TIMEOUT   0x09U  /* ISO-TP reassembly timed out */
 #define BL_NACK_TRANSPORT_ERROR     0x0AU  /* ISO-TP framing error (bad PCI/seq/overflow) */
-#define BL_NACK_UNSUPPORTED         0xFEU  /* unknown opcode or message type */
+#define BL_NACK_PROTOCOL_VERSION    0x0BU  /* host and device disagree on protocol major */
+#define BL_NACK_NO_VALID_APP        0x0CU  /* tried to jump / reset-to-app but no valid image */
+#define BL_NACK_UNSUPPORTED         0xFEU  /* unknown opcode, unknown arg, or bad arg length */
 
 /* ---- Decoded frame ID ---- */
 typedef struct {
