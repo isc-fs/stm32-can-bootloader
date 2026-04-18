@@ -1,8 +1,8 @@
 ![ISC Logo](http://iscracingteam.com/wp-content/uploads/2022/03/Picture5.jpg)
 
-# IFS08 - DV_AMI
+# IFS08 - STM32 CAN Bootloader
 
-Embedded firmware for the **Autonomous Mission Indicator (AMI)** of the IFS08, developed on STM32H7 with micro-ROS.
+Custom CAN bootloader for the **STM32H733** nodes of the IFS08. Runs from the first 128 KB of flash and exposes a classic FDCAN protocol to erase, program and jump to the application image at `0x08020000`, with CRC32 verification and metadata-based validity checks.
 
 ---
 
@@ -18,8 +18,8 @@ Embedded firmware for the **Autonomous Mission Indicator (AMI)** of the IFS08, d
    - Keep a copy of [GitHub's Git Cheat Sheet](https://services.github.com/kit/downloads/github-git-cheat-sheet.pdf) handy as a reference.
 
 3. Clone this repository to your machine:
-   - SSH: `git@github.com:isc-fs/IFS08-DV_AMI.git`
-   - HTTPS: `https://github.com/isc-fs/IFS08-DV_AMI.git`
+   - SSH: `git@github.com:isc-fs/stm32-can-bootloader.git`
+   - HTTPS: `https://github.com/isc-fs/stm32-can-bootloader.git`
 
 ---
 
