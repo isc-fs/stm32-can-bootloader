@@ -1,0 +1,10 @@
+{
+    // Use vanilla cmake / ninja / arm-none-eabi-gcc from PATH. No
+    // STM32 VS Code Extension dependency so this config works for
+    // anyone with a standard ARM GNU toolchain installed (Homebrew
+    // cask gcc-arm-embedded on macOS, apt-get on Debian, arm.com
+    // tarball on anything else), and for CI runners.
+    "cmake.preferredGenerators": [
+        "Ninja"
+    ]
+}

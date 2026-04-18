@@ -42,52 +42,52 @@ phases:
     title: Protocol rewrite (classic CAN)
     tag: v0.2.0-protocol
     branches:
-      - name: feat/4-frame-layout
+      - name: feat/5-frame-layout
         scope: 11-bit [type|src|dst] IDs + node ID + dispatch
-      - name: feat/5-isotp
+      - name: feat/6-isotp
         scope: ISO-TP-style multi-frame segment / reassemble
-      - name: feat/6-core-opcodes
+      - name: feat/7-core-opcodes
         scope: CONNECT / DISCONNECT / DISCOVER / RESET / JUMP + NACK
-      - name: feat/7-flash-opcodes
+      - name: feat/8-flash-opcodes
         scope: ERASE / WRITE / READ_CRC / VERIFY with sector-aware erase
-      - name: feat/8-session-timeout
+      - name: feat/9-session-timeout
         scope: 30 s bootloader timeout + keepalive + retry budget
 
   - number: 3
     title: Firmware contract & diagnostics
     tag: v0.3.0-diagnostics
     branches:
-      - name: feat/9-firmware-info
+      - name: feat/10-firmware-info
         scope: __firmware_info exposed on CONNECT / DISCOVER
-      - name: feat/10-heartbeat-health
+      - name: feat/11-heartbeat-health
         scope: NOTIFY_HEARTBEAT + reset cause + WRP status + uptime
-      - name: feat/11-dtc
+      - name: feat/12-dtc
         scope: DTC table + NOTIFY_DTC + DTC_READ / DTC_CLEAR
-      - name: feat/12-log-stream
+      - name: feat/13-log-stream
         scope: ring buffer + NOTIFY_LOG + LOG_STREAM_START / STOP
-      - name: feat/13-live-data
+      - name: feat/14-live-data
         scope: LIVE_DATA_START / STOP (packed struct via signal set)
 
   - number: 4
     title: Config & option bytes
     tag: v0.4.0-config
     branches:
-      - name: feat/14-nvm
+      - name: feat/15-nvm
         scope: NVM parameter store + NVM_READ / NVM_WRITE
-      - name: feat/15-wrp-option-bytes
+      - name: feat/16-wrp-option-bytes
         scope: OB_READ + OB_APPLY_WRP + WRP self-check on boot
 
   - number: 5
     title: Security
     tag: v1.0.0
     branches:
-      - name: feat/16-ed25519-sign
+      - name: feat/17-ed25519-sign
         scope: Ed25519 signature verification (__firmware_sig + pubkey)
-      - name: feat/17-replay-counter
+      - name: feat/18-replay-counter
         scope: Monotonic counter with downgrade reject
-      - name: feat/18-challenge-response
+      - name: feat/19-challenge-response
         scope: Session auth (CMD_CHALLENGE / CMD_CHALLENGE_RESP)
-      - name: feat/19-encrypted-transport
+      - name: feat/20-encrypted-transport
         scope: Optional AES-128-CTR (BL_FEATURE_ENCRYPTED_TRANSPORT)
 
 sidequests:
@@ -97,3 +97,4 @@ sidequests:
       - feat/2-autoclose-on-dev-merge
       - fix/1-workflow-titled-branches
       - feat/3-roadmap
+      - feat/4-roadmap-header-config
