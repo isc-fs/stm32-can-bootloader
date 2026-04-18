@@ -62,6 +62,16 @@ typedef enum {
 #define BL_PROTO_VERSION_MAJOR      0U
 #define BL_PROTO_VERSION_MINOR      1U
 
+/* ---- Session watchdog ----
+ * A session that stays silent for this long is considered dead: the
+ * bootloader clears the session latch, resets ISO-TP reassembly state,
+ * and auto-jumps to the installed application if one is valid. The
+ * watchdog only runs while a session is active — idle bootloaders
+ * never time out. */
+#ifndef BL_SESSION_TIMEOUT_MS
+#define BL_SESSION_TIMEOUT_MS       30000U
+#endif
+
 /* ---- NACK error codes ----
  * Codes 0x01..0x08 are allocated by the project's top-level protocol
  * spec (see host-tool requirements); 0x09..0x7F are reserved for the

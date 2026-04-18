@@ -234,9 +234,12 @@ and hand-off opcodes are not.
 
 **CONNECT**: host offers its protocol `(major, minor)`. Bootloader
 rejects a major mismatch with `NACK(BL_NACK_PROTOCOL_VERSION)`. On
-success the bootloader's own `(major, minor)` is echoed back and the
-internal **session latch** goes active. `DISCONNECT` or any MCU reset
-clears the latch.
+success the bootloader's own `(major, minor)` is echoed back, the
+internal **session latch** goes active, and the session watchdog (see
+below) is armed.
+
+**DISCONNECT** clears the session latch explicitly. An MCU reset or a
+watchdog timeout also clears it.
 
 **DISCOVER**: sent as `TYPE=DISCOVER` with `dst=0xF`. Each bootloader
 on the bus replies — `TYPE=DISCOVER`, `dst=0x0` (host) — with its node
@@ -309,6 +312,46 @@ Jumps directly to `addr_le32`. Phase-2 policy: the address must equal
 Out-of-range addresses earn `NACK(BL_NACK_OUT_OF_BOUNDS)`; a corrupt
 or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
 
+### Session watchdog
+
+Once `CONNECT` succeeds the bootloader arms a watchdog timer that
+fires after `BL_SESSION_TIMEOUT_MS` (default **30 000 ms**, override
+with `-DBL_SESSION_TIMEOUT_MS=…`) of silence. Idle bootloaders that
+have never seen a `CONNECT` are not watchdogged.
+
+**What counts as activity.** The last-activity timestamp is refreshed
+on two events:
+
+1. Any addressed frame that passes the FDCAN filter and the TYPE / PCI
+   gate in `bl_proto_dispatch`. Frames that end up NACKed count too —
+   a host that's still transmitting, even unsuccessfully, is still
+   alive.
+2. Every ACK the bootloader transmits. This keeps long synchronous
+   handlers (notably `FLASH_ERASE`, which can block for several
+   seconds inside `HAL_FLASHEx_Erase`) from appearing dead on the
+   first main-loop tick after they finally reply.
+
+**What a timeout does.** On expiry the bootloader clears the session
+latch, resets the ISO-TP reassembler, and then tries to auto-jump to
+the installed application via `Bootloader_CheckApplication` +
+`Bootloader_JumpToApplication`:
+
+- If a valid app is installed → jump to it. The host-abandoned window
+  is treated like a stretched post-boot auto-jump.
+- If the app is corrupt or missing (e.g. host died mid-flash) → stay
+  in listen mode. A fresh `CONNECT` from any host re-arms the session
+  and lets the operation resume.
+
+No NACK or NOTIFY is sent on timeout — the session is silent from the
+bootloader's side too. The host either times out independently or
+reconnects later.
+
+**Keepalive.** The host-side protocol sends a `CMD_CONNECT` every 5 s
+during long operations to keep the watchdog armed. `CMD_CONNECT` was
+chosen over a dedicated keepalive opcode so there's only one session-
+management surface to reason about; the ~10 bytes every 5 s is
+negligible on a 500 kbps bus.
+
 ### NACK codes
 
 | Code   | Name                          | When                                                    |
@@ -337,9 +380,10 @@ or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
 
 Starting with `feat/8-flash-opcodes` the bootloader on `dev` is
 functional end-to-end: a host that speaks the protocol can erase,
-program and verify an application image. `feat/9` will make the
-session robust against a host that stops talking mid-flash. The
-`v0.2.0-protocol` dev→main tag closes Phase 2.
+program and verify an application image. `feat/9-session-timeout`
+adds a 30 s session watchdog so a host that disappears mid-flash
+doesn't leave the bootloader indefinitely wedged. Once `feat/9`
+merges the `v0.2.0-protocol` dev→main tag closes Phase 2.
 
 ---
 
