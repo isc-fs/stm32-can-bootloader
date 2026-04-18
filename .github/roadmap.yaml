@@ -6,15 +6,29 @@
 # the workflow will overwrite any local changes.
 #
 # Schema:
-#   phases: list of phase clusters. Each phase has a number, a title, a
-#           tag applied on dev→main when every branch in the phase has
-#           landed, and a list of planned feat/fix branches. Each branch
-#           has a `name` (exact git branch name) and a short `scope`
-#           sentence used as the commit label in the mermaid diagram.
+#   title:      H1 heading shown at the top of ROADMAP.md. Optional;
+#               falls back to a generic "Project roadmap".
+#   intro:      One-paragraph description shown under the heading.
+#               Optional; falls back to a generic paragraph.
+#   phases:     list of phase clusters. Each phase has a number, a title,
+#               a tag applied on dev→main when every branch in the phase
+#               has landed, and a list of planned feat/fix branches. Each
+#               branch has a `name` (exact git branch name) and a short
+#               `scope` sentence used as the commit label in the mermaid
+#               diagram.
 #   sidequests: off-roadmap branches kept in the diagram for history
 #               (e.g. workflow tooling that doesn't map to a bootloader
 #               phase). Rendered in the table but not in the main diagram
 #               lane.
+
+title: Bootloader roadmap
+
+intro: |
+  Production roadmap for the STM32H733 CAN bootloader. Each phase is a
+  cluster of feat branches cut from `dev`; a milestone tag on `main`
+  closes the phase once every branch in it has merged. Branch status
+  badges (✅ / 🔄 / 🔜) are derived from each branch's tracking issue
+  state in GitHub Issues.
 
 phases:
   - number: 1
