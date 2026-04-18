@@ -1,5 +1,5 @@
 /*
- * bl_proto.c — frame parse/build helpers + dispatch + core opcodes.
+ * bl_proto.c — frame parse/build helpers + dispatch + opcode handlers.
  *
  * Owns the software side of the protocol plumbing:
  *
@@ -7,19 +7,23 @@
  *   - a single in-flight ISO-TP reassembly via bl_isotp
  *   - TX helpers for ACK / NACK / FC, all wrapped in ISO-TP framing
  *   - the reassembly timeout tick
- *   - opcode handlers for the Phase 2 core set:
- *       CONNECT / DISCONNECT / DISCOVER / RESET / JUMP
+ *   - opcode handlers for the Phase 2 set:
+ *       CONNECT / DISCONNECT / DISCOVER          — identity & session
+ *       FLASH_ERASE / FLASH_WRITE /
+ *       FLASH_READ_CRC / FLASH_VERIFY            — programming (via bl_flash)
+ *       RESET / JUMP                              — hand-off
  *   - a session-active latch, set by CONNECT and cleared by DISCONNECT.
- *     feat/8-flash-opcodes will gate the FLASH_* opcodes behind this
- *     flag; the core opcodes landed here are intentionally session-
- *     agnostic so a host can always reach them.
+ *     FLASH_* opcodes refuse to run without it; the remaining opcodes
+ *     are session-agnostic so a host can always reach them.
  *
- * HAL dependencies are confined to this file; bl_isotp is HAL-free.
+ * HAL dependencies are confined to this file and bl_flash; bl_isotp is
+ * HAL-free.
  */
 
 #include "bl_proto.h"
 
 #include "bl_config.h"
+#include "bl_flash.h"
 #include "bl_isotp.h"
 #include "bl_memmap.h"
 #include "main.h"
@@ -247,6 +251,164 @@ static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
     }
 }
 
+/* Small helpers for reading little-endian 32-bit fields out of an
+ * ISO-TP args buffer. */
+static uint32_t read_le32(const uint8_t *p)
+{
+    return (uint32_t)p[0]
+         | ((uint32_t)p[1] << 8)
+         | ((uint32_t)p[2] << 16)
+         | ((uint32_t)p[3] << 24);
+}
+
+/* Map a bl_flash status to an appropriate NACK code. */
+static uint8_t flash_status_to_nack(bl_flash_status_t st)
+{
+    switch (st) {
+        case BL_FLASH_ERR_PROTECTED:     return BL_NACK_PROTECTED_ADDR;
+        case BL_FLASH_ERR_OUT_OF_BOUNDS: return BL_NACK_OUT_OF_BOUNDS;
+        case BL_FLASH_ERR_UNALIGNED:     return BL_NACK_UNSUPPORTED;
+        case BL_FLASH_ERR_HARDWARE:      return BL_NACK_FLASH_HW;
+        default:                          return BL_NACK_UNSUPPORTED;
+    }
+}
+
+/* CMD_FLASH_ERASE: [start_le32, length_le32]. Sector-aligned erase of
+ * the range. Requires an active session. Synchronous: this handler
+ * blocks for the full HAL erase duration (~1..4 s per 128 KB sector)
+ * before replying. */
+static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_FLASH_ERASE, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 8U) {
+        send_nack(peer, BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint32_t start  = read_le32(&args[0]);
+    uint32_t length = read_le32(&args[4]);
+
+    uint32_t sectors = 0U;
+    bl_flash_status_t st = bl_flash_erase(start, length, &sectors);
+    if (st != BL_FLASH_OK) {
+        send_nack(peer, BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_FLASH_ERASE };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_FLASH_WRITE: [addr_le32, data...]. Programs `args_len - 4` bytes
+ * starting at `addr`. `addr` must be FLASHWORD-aligned; trailing
+ * partial FLASHWORD is padded with 0xFF. Requires an active session. */
+static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_FLASH_WRITE, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 5U) {
+        /* Need at least the address plus one data byte. */
+        send_nack(peer, BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint32_t addr = read_le32(&args[0]);
+    const uint8_t *data = &args[4];
+    uint16_t       data_len = (uint16_t)(args_len - 4U);
+
+    bl_flash_status_t st = bl_flash_write(addr, data, data_len);
+    if (st != BL_FLASH_OK) {
+        send_nack(peer, BL_CMD_FLASH_WRITE, flash_status_to_nack(st));
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_FLASH_WRITE };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_FLASH_READ_CRC: [addr_le32, length_le32]. Returns CRC32 over the
+ * range. Read-only but still gated behind the session — "any FLASH_*
+ * requires CONNECT" is a cleaner invariant. */
+static void handle_flash_read_crc(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_FLASH_READ_CRC, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 8U) {
+        send_nack(peer, BL_CMD_FLASH_READ_CRC, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint32_t addr   = read_le32(&args[0]);
+    uint32_t length = read_le32(&args[4]);
+
+    /* CRC is read-only but we still enforce the writable range — a host
+     * CRC'ing the bootloader itself would be a protocol abuse. */
+    if (!bl_flash_range_is_writable(addr, length)) {
+        send_nack(peer, BL_CMD_FLASH_READ_CRC, BL_NACK_OUT_OF_BOUNDS);
+        return;
+    }
+
+    uint32_t crc = bl_flash_crc32(addr, length);
+
+    uint8_t resp[5] = {
+        BL_CMD_FLASH_READ_CRC,
+        (uint8_t)(crc        & 0xFFU),
+        (uint8_t)((crc >>  8) & 0xFFU),
+        (uint8_t)((crc >> 16) & 0xFFU),
+        (uint8_t)((crc >> 24) & 0xFFU),
+    };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_FLASH_VERIFY: [expected_crc_le32, expected_size_le32,
+ *                    expected_version_le32]. Recomputes CRC32 over
+ * [BL_APP_BASE, BL_APP_BASE + expected_size). On match, stamps the
+ * application metadata FLASHWORD so next boot will auto-jump. */
+static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 12U) {
+        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint32_t expected_crc     = read_le32(&args[0]);
+    uint32_t expected_size    = read_le32(&args[4]);
+    uint32_t expected_version = read_le32(&args[8]);
+
+    if (expected_size == 0U || expected_size > BL_APP_SIZE) {
+        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_OUT_OF_BOUNDS);
+        return;
+    }
+
+    uint32_t computed = bl_flash_crc32(BL_APP_BASE, expected_size);
+    if (computed != expected_crc) {
+        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_CRC_MISMATCH);
+        return;
+    }
+
+    bl_flash_status_t st = bl_flash_write_metadata(expected_size,
+                                                    expected_crc,
+                                                    expected_version);
+    if (st != BL_FLASH_OK) {
+        send_nack(peer, BL_CMD_FLASH_VERIFY, flash_status_to_nack(st));
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_FLASH_VERIFY };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
 /* CMD_JUMP: [addr_le32]. Phase-2 policy: the address must equal
  * BL_APP_BASE, and the installed app must pass the integrity check.
  * Host tools with a use for jumping elsewhere will land that in a
@@ -297,6 +459,18 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_DISCOVER:
             handle_discover(peer);
+            break;
+        case BL_CMD_FLASH_ERASE:
+            handle_flash_erase(peer, args, args_len);
+            break;
+        case BL_CMD_FLASH_WRITE:
+            handle_flash_write(peer, args, args_len);
+            break;
+        case BL_CMD_FLASH_READ_CRC:
+            handle_flash_read_crc(peer, args, args_len);
+            break;
+        case BL_CMD_FLASH_VERIFY:
+            handle_flash_verify(peer, args, args_len);
             break;
         case BL_CMD_RESET:
             handle_reset(peer, args, args_len);

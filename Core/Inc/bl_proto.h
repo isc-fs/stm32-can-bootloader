@@ -51,6 +51,10 @@ typedef enum {
 #define BL_CMD_CONNECT              0x01U  /* start a session, exchange protocol version */
 #define BL_CMD_DISCONNECT           0x02U  /* end the session */
 #define BL_CMD_DISCOVER             0x03U  /* broadcast ping; device returns identity */
+#define BL_CMD_FLASH_ERASE          0x10U  /* erase sectors covering [start, start+length) */
+#define BL_CMD_FLASH_WRITE          0x11U  /* program bytes at addr (FLASHWORD-aligned) */
+#define BL_CMD_FLASH_READ_CRC       0x12U  /* CRC32 over [addr, addr+length) */
+#define BL_CMD_FLASH_VERIFY         0x13U  /* verify app + commit metadata record */
 #define BL_CMD_RESET                0x60U  /* reset MCU in one of four modes */
 #define BL_CMD_JUMP                 0x61U  /* jump directly to the installed application */
 
@@ -64,6 +68,9 @@ typedef enum {
  * bootloader's own extensions; 0xFE..0xFF are generic fallbacks. */
 #define BL_NACK_PROTECTED_ADDR      0x01U  /* write into WRP-protected region */
 #define BL_NACK_OUT_OF_BOUNDS       0x02U  /* address outside allowed region */
+#define BL_NACK_CRC_MISMATCH        0x03U  /* FLASH_VERIFY: computed CRC != expected */
+#define BL_NACK_BAD_SESSION         0x06U  /* flash op issued without an active session */
+#define BL_NACK_FLASH_HW            0x07U  /* HAL flash erase / program returned error */
 #define BL_NACK_BUSY                0x08U  /* previous operation not complete */
 #define BL_NACK_TRANSPORT_TIMEOUT   0x09U  /* ISO-TP reassembly timed out */
 #define BL_NACK_TRANSPORT_ERROR     0x0AU  /* ISO-TP framing error (bad PCI/seq/overflow) */
