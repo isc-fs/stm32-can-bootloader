@@ -26,6 +26,8 @@
 #include "stm32h7xx_hal_rcc_ex.h"
 #include "stm32h7xx_hal_pwr_ex.h"
 
+#include "bl_memmap.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -35,15 +37,7 @@ typedef void (*pFunction)(void);
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define BOOT_REQ_MAGIC   0xB00710ADU  /* Magic value to request bootloader on next reset */
-
-#define APP_START_ADDRESS   0x08020000U
-
-#define APP_FLASH_SIZE        0x000DFFE0U
-#define APP_METADATA_ADDRESS  (APP_START_ADDRESS + APP_FLASH_SIZE)  /* 0x080FFFE0 */
-
-#define APP_META_MAGIC        0xB007C0DEU  //valid firmware
-#define BOOT_REQ_MAGIC   0xB00710ADU  /* Magic value to request bootloader on next reset */
+/* Flash layout / magic values come from bl_memmap.h. */
 
 #define CAN_BOOT_RX_ID      0x21U        /* Host -> Bootloader */
 #define CAN_BOOT_TX_ID      0x22U        /* Bootloader -> Host */
@@ -79,7 +73,7 @@ typedef void (*pFunction)(void);
 FDCAN_HandleTypeDef hfdcan2;
 
 /* USER CODE BEGIN PV */
-static uint32_t g_CurrentWriteAddress = APP_START_ADDRESS;
+static uint32_t g_CurrentWriteAddress = BL_APP_BASE;
 
 static uint8_t g_AutoJumpEnabled = 0U;
 static uint32_t g_AutoJumpDeadline = 0U;
@@ -92,7 +86,7 @@ static uint32_t g_ExpectedImageVersion = 0U;
 /* 1 FLASHWORD (32 bytes) buffer for writing to H7 */
 static uint8_t s_FlashBuf[32];
 static uint32_t s_FlashBufIndex = 0;
-static uint32_t s_FlashBufAddress = APP_START_ADDRESS;
+static uint32_t s_FlashBufAddress = BL_APP_BASE;
 
 /* USER CODE END PV */
 
@@ -334,7 +328,7 @@ static void Bootloader_Init(void) {
 	}
 
 	/* Initial write address = start of application area */
-	g_CurrentWriteAddress = APP_START_ADDRESS;
+	g_CurrentWriteAddress = BL_APP_BASE;
 
 	/* Check if application explicitly requested to stay in bootloader */
 	uint8_t bootReq = Bootloader_IsBootRequestActive();
@@ -423,7 +417,7 @@ static void Bootloader_HandleFrame(FDCAN_RxHeaderTypeDef *rxHeader,
 
 	case BL_CMD_ERASE_APP:
 		Bootloader_EraseApplicationArea();
-		g_CurrentWriteAddress = APP_START_ADDRESS;
+		g_CurrentWriteAddress = BL_APP_BASE;
 		Bootloader_SendAck(BL_CMD_ERASE_APP, 0x00);
 		break;
 
@@ -457,7 +451,7 @@ static void Bootloader_HandleFrame(FDCAN_RxHeaderTypeDef *rxHeader,
 			/* Check that size, CRC and version were configured */
 			if ((g_ExpectedImageSize != 0U) && (g_ExpectedImageCrc != 0U)
 					&& (g_ExpectedImageVersion != 0U)) {
-				uint32_t crcCalc = Bootloader_CalcCrc32(APP_START_ADDRESS,
+				uint32_t crcCalc = Bootloader_CalcCrc32(BL_APP_BASE,
 						g_ExpectedImageSize);
 				if (crcCalc != g_ExpectedImageCrc) {
 					status = 0x01; /* CRC mismatch */
@@ -466,10 +460,10 @@ static void Bootloader_HandleFrame(FDCAN_RxHeaderTypeDef *rxHeader,
 					/* CRC is OK: write metadata into reserved flash area */
 					uint32_t meta[8];
 
-					meta[0] = APP_META_MAGIC; /* magic */
+					meta[0] = BL_APP_META_MAGIC; /* magic */
 					meta[1] = g_ExpectedImageSize; /* image size in bytes */
 					meta[2] = g_ExpectedImageCrc; /* image CRC32 */
-					meta[3] = APP_START_ADDRESS; /* application base address */
+					meta[3] = BL_APP_BASE; /* application base address */
 					meta[4] = g_ExpectedImageVersion; /* firmware version */
 					meta[5] = 0U;
 					meta[6] = 0U;
@@ -477,7 +471,7 @@ static void Bootloader_HandleFrame(FDCAN_RxHeaderTypeDef *rxHeader,
 
 					HAL_FLASH_Unlock();
 					st = HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD,
-					APP_METADATA_ADDRESS, (uint32_t) meta);
+					BL_APP_METADATA_ADDR, (uint32_t) meta);
 					HAL_FLASH_Lock();
 
 					if (st != HAL_OK) {
@@ -520,7 +514,7 @@ static void Bootloader_HandleFrame(FDCAN_RxHeaderTypeDef *rxHeader,
 
 		if (status == 0x00U) {
 			/* Read size and version from metadata in flash */
-			uint32_t const *meta = (uint32_t const*) APP_METADATA_ADDRESS;
+			uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 			appSize = meta[1];
 			appVersion = meta[4];
 		}
@@ -606,8 +600,8 @@ static void Bootloader_SendInfoResponse(uint8_t status, uint32_t appSize,
 /* ===================== JUMP TO APPLICATION ====================== */
 
 static void Bootloader_JumpToApplication(void) {
-	uint32_t appStack = *(__IO uint32_t*) APP_START_ADDRESS;       // 0x08020000
-	uint32_t appEntry = *(__IO uint32_t*) (APP_START_ADDRESS + 4U); // 0x08020004
+	uint32_t appStack = *(__IO uint32_t*) BL_APP_BASE;       // 0x08020000
+	uint32_t appEntry = *(__IO uint32_t*) (BL_APP_BASE + 4U); // 0x08020004
 	pFunction JumpToApp = (pFunction) appEntry;
 
 	/* --- Basic healthchecks --- */
@@ -620,7 +614,7 @@ static void Bootloader_JumpToApplication(void) {
 	}
 
 	/* 2) Entry point inside app in FLASH */
-	if (appEntry < APP_START_ADDRESS || appEntry > 0x080FFFFFU) {
+	if (appEntry < BL_APP_BASE || appEntry > BL_APP_END) {
 		LED_ERR_ON();
 		return;
 	}
@@ -638,7 +632,7 @@ static void Bootloader_JumpToApplication(void) {
 	__disable_irq();
 
 	/* App vector table */
-	SCB->VTOR = APP_START_ADDRESS;   // 0x08020000
+	SCB->VTOR = BL_APP_BASE;   // 0x08020000
 
 	/* Application stack */
 	__set_MSP(appStack);
@@ -659,17 +653,10 @@ static void Bootloader_EraseApplicationArea(void) {
 	FLASH_EraseInitTypeDef eraseInit = { 0 };
 	uint32_t pageError = 0;
 
-	const uint32_t FLASH_BASE_ADDR = 0x08000000U;
-	const uint32_t APP_START = 0x08020000U;
-	const uint32_t APP_END = 0x080FFFFFU;
-
-	uint32_t firstSector = (APP_START - FLASH_BASE_ADDR) / FLASH_SECTOR_SIZE; /* 1 */
-	uint32_t lastSector = (APP_END - FLASH_BASE_ADDR) / FLASH_SECTOR_SIZE; /* 7 */
-
 	eraseInit.TypeErase = FLASH_TYPEERASE_SECTORS;
 	eraseInit.Banks = FLASH_BANK_1;
-	eraseInit.Sector = firstSector;
-	eraseInit.NbSectors = (lastSector - firstSector) + 1U;
+	eraseInit.Sector = BL_APP_FIRST_SECTOR;
+	eraseInit.NbSectors = (BL_APP_LAST_SECTOR - BL_APP_FIRST_SECTOR) + 1U;
 
 	HAL_FLASH_Unlock();
 	if (HAL_FLASHEx_Erase(&eraseInit, &pageError) != HAL_OK) {
@@ -679,9 +666,9 @@ static void Bootloader_EraseApplicationArea(void) {
 	HAL_FLASH_Lock();
 
 	/*Reset write pointers*/
-	g_CurrentWriteAddress = APP_START_ADDRESS;
+	g_CurrentWriteAddress = BL_APP_BASE;
 	s_FlashBufIndex = 0;
-	s_FlashBufAddress = APP_START_ADDRESS;
+	s_FlashBufAddress = BL_APP_BASE;
 
 	/*Reset flash image metadata*/
 
@@ -759,18 +746,18 @@ static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes) {
 
 static uint8_t Bootloader_CheckApplication(void) {
 	/* Read metadata from flash */
-	uint32_t const *meta = (uint32_t const*) APP_METADATA_ADDRESS;
+	uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 
 	uint32_t magic = meta[0];
 	uint32_t size = meta[1];
 	uint32_t crc = meta[2];
 	uint32_t appBase = meta[3];
 
-	if (magic != APP_META_MAGIC) {
+	if (magic != BL_APP_META_MAGIC) {
 		return 0x10;  // incorrect magic -> no valid firmware
 	}
 
-	if ((size == 0U) || (size > APP_FLASH_SIZE)) {
+	if ((size == 0U) || (size > BL_APP_SIZE)) {
 		return 0x11;  // invalid size
 	}
 
@@ -778,18 +765,18 @@ static uint8_t Bootloader_CheckApplication(void) {
 		return 0x12;  // Invalid CRC
 	}
 
-	if (appBase != APP_START_ADDRESS) {
+	if (appBase != BL_APP_BASE) {
 		return 0x13;  // metadata does not correspond to this configuration
 	}
 	/* Recalculate CRC on the Flash app to be sure */
-	uint32_t crcCalc = Bootloader_CalcCrc32(APP_START_ADDRESS, size);
+	uint32_t crcCalc = Bootloader_CalcCrc32(BL_APP_BASE, size);
 	if (crcCalc != crc) {
 		return 0x14;  // Calculated CRC does not match stored CRC
 	}
 
 	/* Check vector table (stack pointer and entry) */
-	uint32_t appStack = *(__IO uint32_t*) APP_START_ADDRESS;
-	uint32_t appEntry = *(__IO uint32_t*) (APP_START_ADDRESS + 4U);
+	uint32_t appStack = *(__IO uint32_t*) BL_APP_BASE;
+	uint32_t appEntry = *(__IO uint32_t*) (BL_APP_BASE + 4U);
 
 	/* stack in DTCM o D1 RAM */
 	if (((appStack & 0x2FFE0000U) != 0x20000000U) && /* DTCM */
@@ -799,8 +786,8 @@ static uint8_t Bootloader_CheckApplication(void) {
 	}
 
 	/* entry must be within the app's range */
-	if ((appEntry < APP_START_ADDRESS)
-			|| (appEntry >= (APP_START_ADDRESS + APP_FLASH_SIZE))) {
+	if ((appEntry < BL_APP_BASE)
+			|| (appEntry >= (BL_APP_BASE + BL_APP_SIZE))) {
 		return 0x16;  // entry out of range
 	}
 
@@ -820,7 +807,7 @@ static uint8_t Bootloader_IsBootRequestActive(void) {
 
 	uint32_t val = RTC->BKP0R;
 
-	if (val == BOOT_REQ_MAGIC) {
+	if (val == BL_BOOT_REQ_MAGIC) {
 		/* Clear the flag so we do not stay in bootloader forever */
 		RTC->BKP0R = 0U;
 		return 1U;
