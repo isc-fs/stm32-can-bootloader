@@ -52,12 +52,16 @@ typedef enum {
 #define BL_CMD_DISCONNECT           0x02U  /* end the session */
 #define BL_CMD_DISCOVER             0x03U  /* broadcast ping; device returns short identity */
 #define BL_CMD_GET_FW_INFO          0x04U  /* return the application's __firmware_info record */
+#define BL_CMD_GET_HEALTH           0x05U  /* return the 32-byte health record */
 #define BL_CMD_FLASH_ERASE          0x10U  /* erase sectors covering [start, start+length) */
 #define BL_CMD_FLASH_WRITE          0x11U  /* program bytes at addr (FLASHWORD-aligned) */
 #define BL_CMD_FLASH_READ_CRC       0x12U  /* CRC32 over [addr, addr+length) */
 #define BL_CMD_FLASH_VERIFY         0x13U  /* verify app + commit metadata record */
 #define BL_CMD_RESET                0x60U  /* reset MCU in one of four modes */
 #define BL_CMD_JUMP                 0x61U  /* jump directly to the installed application */
+
+/* ---- Unsolicited notifications (TYPE=NOTIFY, dst=HOST) ---- */
+#define BL_NOTIFY_HEARTBEAT         0xF0U  /* 1 Hz periodic alive-plus-state ping */
 
 /* ---- Protocol version advertised in CONNECT / DISCOVER replies ---- */
 #define BL_PROTO_VERSION_MAJOR      0U
@@ -132,5 +136,17 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
  * reassembly timeout; if an in-flight reassembly expires the peer
  * gets NACK(BL_NACK_TRANSPORT_TIMEOUT) and the state machine resets. */
 void bl_proto_tick(uint32_t now_ms);
+
+/* True while a session is active (between a successful CONNECT and
+ * the next DISCONNECT / watchdog timeout / MCU reset). Exposed so
+ * other modules — e.g. bl_health for heartbeat gating — can read
+ * the latch without owning it. */
+bool bl_proto_session_active(void);
+
+/* Emit an unsolicited TYPE=NOTIFY message to the host (dst=0x0).
+ * Short payloads go as SF, longer as FF+CFs. Does NOT refresh the
+ * session watchdog — notifications are device-initiated and don't
+ * prove the host is still talking. */
+void bl_proto_send_notify(const uint8_t *payload, uint16_t length);
 
 #endif /* BL_PROTO_H */

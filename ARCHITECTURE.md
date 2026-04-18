@@ -220,6 +220,7 @@ byte is the opcode. The Phase 2 set:
 | `0x02` | `DISCONNECT`     |    –    | –                                              | `[opcode]`                                      |
 | `0x03` | `DISCOVER`       |    –    | – (sent to `dst=0xF`)                           | `[opcode, node_id, major, minor]` — TYPE = `DISCOVER` |
 | `0x04` | `GET_FW_INFO`    |    –    | –                                              | `[opcode, <64-byte __firmware_info record>]` — multi-frame |
+| `0x05` | `GET_HEALTH`     |    –    | –                                              | `[opcode, <32-byte health record>]` — multi-frame |
 | `0x10` | `FLASH_ERASE`    |   ✔    | `[start_le32, length_le32]`                     | `[opcode]`                                      |
 | `0x11` | `FLASH_WRITE`    |   ✔    | `[addr_le32, data…]` (≤ 256 B data)             | `[opcode]`                                      |
 | `0x12` | `FLASH_READ_CRC` |   ✔    | `[addr_le32, length_le32]`                      | `[opcode, crc32_le32]`                          |
@@ -313,6 +314,73 @@ The bootloader never writes to this region — it's owned end-to-end by
 the application. `__firmware_info` lands in the app image alongside
 `.text`, gets flashed by `FLASH_WRITE`, and starts answering
 `GET_FW_INFO` queries the moment the image is in place.
+
+#### GET_HEALTH + NOTIFY_HEARTBEAT
+
+The bootloader reports health in two shapes:
+
+- **Unsolicited** `NOTIFY_HEARTBEAT` at **1 Hz while a session is
+  active**. Idle bootloaders stay silent so a multi-node bus isn't
+  flooded with heartbeats going nowhere. The heartbeat is a compact
+  7-byte SF payload:
+
+  | Byte | Field                          |
+  |:---:|--------------------------------|
+  | 0   | opcode = `0xF0` (`NOTIFY_HEARTBEAT`) |
+  | 1   | `node_id`                       |
+  | 2   | `reset_cause` (latched at boot) |
+  | 3   | `flags` low byte                 |
+  | 4–6 | `uptime_le24` (wraps at ~194 days) |
+
+  Emitted with TYPE = `NOTIFY`, dst = `0x0` (host). Host-side CAN
+  traces can filter for this one frame to passively monitor every
+  bootloader on the bus.
+
+- **On demand** via `CMD_GET_HEALTH` (`0x05`). Returns a 32-byte
+  record with the fuller picture:
+
+  | Offset | Size | Field                | Notes                                                  |
+  |:---:|:---:|----------------------|--------------------------------------------------------|
+  |  0  |  4  | `uptime_seconds`     | Full 32-bit, seconds since boot                        |
+  |  4  |  4  | `reset_cause`        | One of the `BL_RESET_*` values below                   |
+  |  8  |  4  | `flags`              | `BL_HEALTH_FLAG_*` bitmask (full 32-bit)               |
+  | 12  |  4  | `flash_write_count`  | Reserved for Phase 4 NVM tracking; `0` today           |
+  | 16  |  4  | `dtc_count`          | Populated by `feat/12-dtc`; `0` today                  |
+  | 20  |  4  | `last_dtc_code`      | Populated by `feat/12-dtc`; `0` today                  |
+  | 24  |  8  | `reserved`           | Zero until future revisions claim bytes                |
+
+  ACK payload is `opcode + record` = 33 bytes, so the reply travels
+  as an ISO-TP FF + 4 CFs. Not session-gated — hosts can poll health
+  any time, even before `CONNECT`, to decide which node to talk to.
+
+##### Reset cause values
+
+Latched once from `RCC->RSR` at the start of `Bootloader_Init`;
+`RCC->RSR` is cleared immediately afterwards so the next reset starts
+clean. Conflict resolution favours fault causes over normal causes so
+rare dual-condition scenarios still surface the more actionable code.
+
+| Value | Name                   | Source                                    |
+|:---:|------------------------|-------------------------------------------|
+| `0x00` | `BL_RESET_UNKNOWN`     | No recognised flag set                    |
+| `0x01` | `BL_RESET_POWER_ON`    | `RCC_RSR_PORRSTF` — fresh power           |
+| `0x02` | `BL_RESET_PIN`         | `RCC_RSR_PINRSTF` — NRST line             |
+| `0x03` | `BL_RESET_SOFTWARE`    | `RCC_RSR_SFTRSTF` — `NVIC_SystemReset()`  |
+| `0x04` | `BL_RESET_IWDG`        | `RCC_RSR_IWDG1RSTF` — independent watchdog |
+| `0x05` | `BL_RESET_WWDG`        | `RCC_RSR_WWDG1RSTF` — window watchdog     |
+| `0x06` | `BL_RESET_LOW_POWER`   | `RCC_RSR_LPWRRSTF`                        |
+| `0x07` | `BL_RESET_BROWNOUT`    | `RCC_RSR_BORRSTF`                         |
+
+##### Flags bitmask
+
+Bits 0–1 are live today. Bits 2–31 are reserved; later phases flip
+them on as WRP status (`feat/15`), pending DTCs (`feat/12`), encrypted
+session (`feat/19`), etc. become real.
+
+| Bit | Name                              | When it's on                                  |
+|:---:|-----------------------------------|-----------------------------------------------|
+|  0  | `BL_HEALTH_FLAG_SESSION_ACTIVE`    | A session is currently established            |
+|  1  | `BL_HEALTH_FLAG_VALID_APP_PRESENT` | `Bootloader_CheckApplication()` passes today |
 
 #### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
 

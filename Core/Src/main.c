@@ -28,6 +28,7 @@
 
 #include "bl_memmap.h"
 #include "bl_config.h"
+#include "bl_health.h"
 #include "bl_proto.h"
 
 /* USER CODE END Includes */
@@ -290,6 +291,11 @@ static void Bootloader_Init(void) {
 	LED_OK_ON();
 	LED_ERR_OFF();
 
+	/* Latch the reset cause before anything else has a chance to clear
+	 * RCC->RSR. Health reporting depends on this surviving the rest of
+	 * the boot sequence. */
+	bl_health_init();
+
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */
 	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
@@ -363,7 +369,9 @@ static void Bootloader_MainLoop(void) {
 
 		/* Protocol tick — drives ISO-TP reassembly timeout. NACKs any
 		 * peer whose multi-frame transfer stalled past BL_ISOTP_TIMEOUT_MS. */
-		bl_proto_tick(HAL_GetTick());
+		uint32_t tick_now = HAL_GetTick();
+		bl_proto_tick(tick_now);
+		bl_health_tick(tick_now);
 
 		/* Auto-jump window: if we booted with a valid app and nobody
 		 * has talked to us before the deadline, hand control over. */
