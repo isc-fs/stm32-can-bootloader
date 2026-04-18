@@ -209,22 +209,83 @@ Single Frame arrives mid-reassembly the in-flight buffer is discarded
 and processing starts fresh with the new frame — consistent with the
 standard's handling of an unexpected SF/FF.
 
-### Current opcode coverage
+### Core opcodes
 
-Phase 2 lands the protocol across five branches:
+Every message a host sends is an ISO-TP-wrapped payload whose first
+byte is the opcode. The Phase 2 core set:
 
-| Branch                      | Adds                                                                 |
-|----------------------------|----------------------------------------------------------------------|
-| `feat/5-frame-layout`      | This document; frame layout, node ID, FDCAN filters, dispatch skeleton |
-| `feat/6-isotp`             | ISO-TP-style multi-frame segmentation / reassembly                    |
-| `feat/7-core-opcodes`      | `CONNECT` / `DISCONNECT` / `DISCOVER` / `RESET` / `JUMP` + NACK codes |
-| `feat/8-flash-opcodes`     | `FLASH_ERASE` / `FLASH_WRITE` / `FLASH_READ_CRC` / `FLASH_VERIFY`     |
-| `feat/9-session-timeout`   | 30 s session watchdog + keepalive + retry budget                     |
+| Opcode | Name         | Request args           | Response (ACK payload)      |
+|--------|--------------|------------------------|-----------------------------|
+| `0x01` | `CONNECT`    | `[major, minor]`        | `[opcode, major, minor]`     |
+| `0x02` | `DISCONNECT` | –                      | `[opcode]`                   |
+| `0x03` | `DISCOVER`   | – (sent to `dst=0xF`)   | `[opcode, node_id, major, minor]` — TYPE = `DISCOVER` |
+| `0x60` | `RESET`      | `[mode]` (0..3)         | `[opcode]` emitted **before** reset |
+| `0x61` | `JUMP`       | `[addr_le32]`           | `[opcode]` emitted **before** jump |
 
-Until `feat/7-core-opcodes` and `feat/8-flash-opcodes` merge, every
-received frame is answered with a generic `NACK(0xFE)` — the bootloader
-on `dev` is intentionally non-flashable during this Phase 2 window. That
-window closes at the `v0.2.0-protocol` dev→main tag.
+All requests and responses in the core set fit in a Single Frame (≤ 7
+payload bytes). Longer payloads (flash writes) are `feat/8` territory.
+
+**CONNECT**: host offers its protocol `(major, minor)`. Bootloader
+rejects a major mismatch with `NACK(BL_NACK_PROTOCOL_VERSION)`. On
+success the bootloader's own `(major, minor)` is echoed back and an
+internal **session latch** goes active. `feat/8-flash-opcodes` will
+refuse flash programming unless the latch is active; the core opcodes
+in this branch are deliberately session-agnostic so a host can always
+reach them.
+
+**DISCOVER**: sent as `TYPE=DISCOVER` with `dst=0xF`. Each bootloader
+on the bus replies — `TYPE=DISCOVER`, `dst=0x0` (host) — with its node
+ID and protocol version. The Phase 2 reply is intentionally minimal;
+later phases will add `__firmware_info`, WRP status, UID, etc. as those
+fields become available.
+
+**RESET**: `mode` byte picks what "reset" means.
+
+| `mode` | Effect                                                      |
+|--------|-------------------------------------------------------------|
+| `0x00` | Hard reset via `NVIC_SystemReset()`                          |
+| `0x01` | Soft reset — identical to 0x00 on this family                |
+| `0x02` | Write `BL_BOOT_REQ_MAGIC` to `RTC->BKP0R`, then reset. The   |
+|        | bootloader handshake at next boot holds in listen mode.      |
+| `0x03` | Direct jump to the installed application (no reset).        |
+
+Mode 3 is validated **before** the ACK — if `Bootloader_CheckApplication`
+rejects the installed image the host gets `NACK(BL_NACK_NO_VALID_APP)`
+and the bootloader stays in listen mode. Modes 0–2 always ACK first,
+then trigger the reset.
+
+**JUMP**: jumps directly to `addr_le32`. Phase-2 policy: the address
+must equal `BL_APP_BASE` and the installed app must pass integrity
+checks. Out-of-range addresses earn `NACK(BL_NACK_OUT_OF_BOUNDS)`; a
+corrupt or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
+
+### NACK codes
+
+| Code   | Name                          | When                                                    |
+|--------|-------------------------------|---------------------------------------------------------|
+| `0x01` | `BL_NACK_PROTECTED_ADDR`       | write into WRP region (reserved for `feat/8`)            |
+| `0x02` | `BL_NACK_OUT_OF_BOUNDS`        | address outside allowed region                          |
+| `0x06` | `BL_NACK_BAD_SESSION`          | reserved — enforced starting `feat/8`                    |
+| `0x08` | `BL_NACK_BUSY`                 | previous op not complete                                |
+| `0x09` | `BL_NACK_TRANSPORT_TIMEOUT`    | ISO-TP reassembly ran past `BL_ISOTP_TIMEOUT_MS`         |
+| `0x0A` | `BL_NACK_TRANSPORT_ERROR`      | ISO-TP PCI / seq / overflow                              |
+| `0x0B` | `BL_NACK_PROTOCOL_VERSION`     | host/device major version disagree                       |
+| `0x0C` | `BL_NACK_NO_VALID_APP`         | jump / reset-to-app with no valid image                 |
+| `0xFE` | `BL_NACK_UNSUPPORTED`          | unknown opcode or bad argument                          |
+
+### Phase 2 branch coverage
+
+| Branch                     | Adds                                                                                 |
+|----------------------------|--------------------------------------------------------------------------------------|
+| `feat/5-frame-layout`      | Frame layout, node ID, FDCAN filters, dispatch skeleton                              |
+| `feat/6-isotp`             | ISO-TP-style multi-frame segmentation / reassembly                                    |
+| `feat/7-core-opcodes`      | `CONNECT` / `DISCONNECT` / `DISCOVER` / `RESET` / `JUMP` (this document)             |
+| `feat/8-flash-opcodes`     | `FLASH_ERASE` / `FLASH_WRITE` / `FLASH_READ_CRC` / `FLASH_VERIFY` + session gating   |
+| `feat/9-session-timeout`   | 30 s session watchdog + keepalive + retry budget                                     |
+
+Until `feat/8-flash-opcodes` merges the bootloader on `dev` is
+intentionally non-flashable — `FLASH_WRITE` et al. don't exist yet.
+That window closes at the `v0.2.0-protocol` dev→main tag.
 
 ---
 

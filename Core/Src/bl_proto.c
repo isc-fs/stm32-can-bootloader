@@ -1,14 +1,18 @@
 /*
- * bl_proto.c — frame parse/build helpers + dispatch.
+ * bl_proto.c — frame parse/build helpers + dispatch + core opcodes.
  *
  * Owns the software side of the protocol plumbing:
  *
  *   - addressed-to-us check (defence in depth behind the FDCAN filters)
  *   - a single in-flight ISO-TP reassembly via bl_isotp
- *   - handoff of completed messages to a single-frame handler (still a
- *     stub in feat/6 — opcode handlers land in feat/7 and feat/8)
- *   - NACK / FC transmitters, both wrapped in ISO-TP SF / FC framing
- *   - periodic tick that fires the reassembly timeout
+ *   - TX helpers for ACK / NACK / FC, all wrapped in ISO-TP framing
+ *   - the reassembly timeout tick
+ *   - opcode handlers for the Phase 2 core set:
+ *       CONNECT / DISCONNECT / DISCOVER / RESET / JUMP
+ *   - a session-active latch, set by CONNECT and cleared by DISCONNECT.
+ *     feat/8-flash-opcodes will gate the FLASH_* opcodes behind this
+ *     flag; the core opcodes landed here are intentionally session-
+ *     agnostic so a host can always reach them.
  *
  * HAL dependencies are confined to this file; bl_isotp is HAL-free.
  */
@@ -17,6 +21,7 @@
 
 #include "bl_config.h"
 #include "bl_isotp.h"
+#include "bl_memmap.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 
@@ -24,10 +29,16 @@
 
 extern FDCAN_HandleTypeDef hfdcan2;
 
-/* ---- Single in-flight reassembly ---- */
+/* ---- State ---- */
+
 static bl_isotp_rx_t g_rx;
 
-/* ---- Internal helpers ---- */
+/* Session latch. Set by CONNECT, cleared by DISCONNECT or bootloader
+ * reset. Flash-programming opcodes (feat/8) will refuse to run unless
+ * this is true. */
+static bool g_session_active = false;
+
+/* ---- Low-level TX plumbing ---- */
 
 bool bl_proto_addressed_to_us(uint8_t dst)
 {
@@ -37,7 +48,6 @@ bool bl_proto_addressed_to_us(uint8_t dst)
 /* Map a 0..8 byte count onto the FDCAN_DLC_BYTES_N encoding. */
 static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
 {
-    /* FDCAN_DLC_BYTES_N is (N << 16) for N in 0..8. */
     uint32_t n = (bytes > 8U) ? 8U : (uint32_t)bytes;
     return n << 16;
 }
@@ -69,9 +79,8 @@ static void send_raw(uint8_t type,
 /* Send a logical message to `dst`. If the payload fits in a single
  * frame (<= 7 bytes) one SF frame is emitted; otherwise an FF followed
  * by CFs. FC-based flow control on the sender side is not implemented
- * — the bootloader emits back-to-back CFs and trusts the host's
- * permissive CTS. That's fine for Phase 2 since the only multi-frame
- * TX path the bootloader takes today is "none". */
+ * yet — the bootloader emits back-to-back CFs and trusts the host's
+ * permissive CTS. */
 static void send_message(bl_proto_type_t type,
                          uint8_t dst,
                          const uint8_t *payload,
@@ -93,6 +102,13 @@ static void send_message(bl_proto_type_t type,
     }
 }
 
+/* Send a positive ack. `payload[0]` is the opcode being acked;
+ * `payload[1..length-1]` is opcode-specific response data. */
+static void send_ack(uint8_t dst, const uint8_t *payload, uint16_t length)
+{
+    send_message(BL_PROTO_TYPE_ACK, dst, payload, length);
+}
+
 /* Send a 2-byte NACK payload wrapped in an ISO-TP SF. */
 static void send_nack(uint8_t dst, uint8_t rejected_opcode, uint8_t code)
 {
@@ -112,17 +128,186 @@ static void send_fc_cts(uint8_t dst)
     send_raw((uint8_t)BL_PROTO_TYPE_DATA, dst, frame, 3U);
 }
 
-/* Phase 2 placeholder: once a complete message has been reassembled
- * this is where opcode dispatch happens. feat/7 replaces the body
- * with real handlers; until then every message gets NACKed. */
+/* ---- Opcode handlers ---- */
+
+/* CMD_CONNECT: [major, minor]. Major must match exactly; minor is a
+ * hint, carried for diagnostics but not validated. On success the
+ * session latch goes high and the bootloader echoes back its own
+ * (major, minor). */
+static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (args_len < 2U) {
+        send_nack(peer, BL_CMD_CONNECT, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t host_major = args[0];
+    /* args[1] is host_minor — unused today, reserved. */
+
+    if (host_major != BL_PROTO_VERSION_MAJOR) {
+        send_nack(peer, BL_CMD_CONNECT, BL_NACK_PROTOCOL_VERSION);
+        return;
+    }
+
+    g_session_active = true;
+
+    uint8_t resp[3] = {
+        BL_CMD_CONNECT,
+        BL_PROTO_VERSION_MAJOR,
+        BL_PROTO_VERSION_MINOR,
+    };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_DISCONNECT: no args. Clears the session latch and acks. */
+static void handle_disconnect(uint8_t peer, uint16_t args_len)
+{
+    (void)args_len;
+    g_session_active = false;
+    uint8_t resp[1] = { BL_CMD_DISCONNECT };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_DISCOVER: no args. Reply as TYPE=DISCOVER with this node's ID
+ * and the bootloader's protocol version. Additional identity fields
+ * (UID, HW rev, FW version, WRP status, …) arrive as later phases
+ * populate them. */
+static void handle_discover(uint8_t peer)
+{
+    uint8_t resp[4] = {
+        BL_CMD_DISCOVER,
+        BL_NODE_ID,
+        BL_PROTO_VERSION_MAJOR,
+        BL_PROTO_VERSION_MINOR,
+    };
+    send_message(BL_PROTO_TYPE_DISCOVER, peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_RESET: [mode]. Modes:
+ *   0 = hard reset via NVIC_SystemReset
+ *   1 = soft reset — same as 0 on this family, no distinction in HW
+ *   2 = reset and re-enter the bootloader listen loop (RTC->BKP0R magic)
+ *   3 = jump directly to the installed application (no reset)
+ *
+ * Mode 3 is validated before ACK: if the installed app fails
+ * Bootloader_CheckApplication the host gets BL_NACK_NO_VALID_APP and
+ * the bootloader stays in listen mode. Modes 0..2 always ACK and then
+ * trigger the reset. */
+static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (args_len < 1U) {
+        send_nack(peer, BL_CMD_RESET, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t mode = args[0];
+    if (mode > 3U) {
+        send_nack(peer, BL_CMD_RESET, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    if (mode == 3U && Bootloader_CheckApplication() != 0U) {
+        send_nack(peer, BL_CMD_RESET, BL_NACK_NO_VALID_APP);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_RESET };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+
+    /* Let the ACK drain onto the wire before we yank the MCU. */
+    HAL_Delay(10U);
+
+    switch (mode) {
+        case 0U:
+        case 1U:
+            NVIC_SystemReset();
+            break;
+
+        case 2U: {
+            /* Set the boot-request magic in backup register 0 so the
+             * next bootloader start-up holds in listen mode instead of
+             * auto-jumping. Mirrors the setup Bootloader_IsBootRequestActive
+             * performs at boot so this works even before the RTC has
+             * been touched. */
+            HAL_PWR_EnableBkUpAccess();
+            if ((RCC->BDCR & RCC_BDCR_RTCEN) == 0U) {
+                __HAL_RCC_RTC_ENABLE();
+            }
+            RTC->BKP0R = BL_BOOT_REQ_MAGIC;
+            NVIC_SystemReset();
+            break;
+        }
+
+        case 3U:
+            Bootloader_JumpToApplication();
+            break;
+
+        default:
+            break;  /* unreachable — guarded above */
+    }
+}
+
+/* CMD_JUMP: [addr_le32]. Phase-2 policy: the address must equal
+ * BL_APP_BASE, and the installed app must pass the integrity check.
+ * Host tools with a use for jumping elsewhere will land that in a
+ * later phase. */
+static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (args_len < 4U) {
+        send_nack(peer, BL_CMD_JUMP, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint32_t addr = (uint32_t)args[0]
+                  | ((uint32_t)args[1] << 8)
+                  | ((uint32_t)args[2] << 16)
+                  | ((uint32_t)args[3] << 24);
+
+    if (addr != BL_APP_BASE) {
+        send_nack(peer, BL_CMD_JUMP, BL_NACK_OUT_OF_BOUNDS);
+        return;
+    }
+
+    if (Bootloader_CheckApplication() != 0U) {
+        send_nack(peer, BL_CMD_JUMP, BL_NACK_NO_VALID_APP);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_JUMP };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+
+    /* Let the ACK drain onto the wire before we deinit peripherals. */
+    HAL_Delay(10U);
+    Bootloader_JumpToApplication();  /* never returns on success */
+}
+
+/* Dispatch a completed ISO-TP message. byte 0 = opcode, remaining bytes
+ * = opcode-specific args. Anything unknown earns NACK(UNSUPPORTED). */
 static void handle_message(uint8_t peer,
                            uint8_t opcode,
                            const uint8_t *args,
                            uint16_t args_len)
 {
-    (void)args;
-    (void)args_len;
-    send_nack(peer, opcode, BL_NACK_UNSUPPORTED);
+    switch (opcode) {
+        case BL_CMD_CONNECT:
+            handle_connect(peer, args, args_len);
+            break;
+        case BL_CMD_DISCONNECT:
+            handle_disconnect(peer, args_len);
+            break;
+        case BL_CMD_DISCOVER:
+            handle_discover(peer);
+            break;
+        case BL_CMD_RESET:
+            handle_reset(peer, args, args_len);
+            break;
+        case BL_CMD_JUMP:
+            handle_jump(peer, args, args_len);
+            break;
+        default:
+            send_nack(peer, opcode, BL_NACK_UNSUPPORTED);
+            break;
+    }
 }
 
 /* ---- Public API ---- */
@@ -135,18 +320,17 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
         return;
     }
 
-    /* Only accept TYPE/PCI combinations the protocol actually uses:
-     *   - CMD + SF : single-frame command
-     *   - CMD + FF : start of a multi-frame command
-     *   - DATA + CF: continuation of an in-flight message
-     *   - DATA + FC: flow-control reply (ignored on RX today)
+    /* Accepted TYPE/PCI combinations:
+     *   - CMD      + SF / FF : host command (single or multi-frame)
+     *   - DISCOVER + SF / FF : broadcast identity request
+     *   - DATA     + CF / FC : continuation / flow control
      * Everything else is silently dropped. */
     uint8_t pci_hi = data[0] & BL_ISOTP_PCI_MASK_HI;
-    bool cmd_initial       = (id->type == BL_PROTO_TYPE_CMD)
-                           && (pci_hi == BL_ISOTP_PCI_SF || pci_hi == BL_ISOTP_PCI_FF);
-    bool data_continuation = (id->type == BL_PROTO_TYPE_DATA)
-                           && (pci_hi == BL_ISOTP_PCI_CF || pci_hi == BL_ISOTP_PCI_FC);
-    if (!cmd_initial && !data_continuation) {
+    bool initial = (id->type == BL_PROTO_TYPE_CMD || id->type == BL_PROTO_TYPE_DISCOVER)
+                 && (pci_hi == BL_ISOTP_PCI_SF || pci_hi == BL_ISOTP_PCI_FF);
+    bool continuation = (id->type == BL_PROTO_TYPE_DATA)
+                     && (pci_hi == BL_ISOTP_PCI_CF || pci_hi == BL_ISOTP_PCI_FC);
+    if (!initial && !continuation) {
         return;
     }
 
@@ -167,7 +351,6 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
 
     switch (st) {
         case BL_ISOTP_MSG_COMPLETE:
-            /* The first byte of the reassembled message is the opcode. */
             if (g_rx.received >= 1U) {
                 handle_message(id->src,
                                g_rx.buf[0],
@@ -180,12 +363,11 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
             break;
 
         case BL_ISOTP_OK:
-            /* Still reassembling — nothing to emit. */
             break;
 
         case BL_ISOTP_ERR_TIMEOUT:
-            /* Only _tick returns this; _feed never does. Still, handle
-             * defensively: the timeout path resets state and NACKs. */
+            /* Only _tick returns this; _feed never does. Handle
+             * defensively anyway. */
             send_nack(id->src, 0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
             bl_isotp_rx_init(&g_rx);
             break;
