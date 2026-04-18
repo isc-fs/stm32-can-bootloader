@@ -1,0 +1,85 @@
+# Source of truth for ROADMAP.md.
+#
+# Edit this file (or close / reopen a tracking issue on GitHub) and the
+# `roadmap.yml` workflow will regenerate ROADMAP.md with updated status
+# badges and a fresh mermaid branch diagram. Do not hand-edit ROADMAP.md —
+# the workflow will overwrite any local changes.
+#
+# Schema:
+#   phases: list of phase clusters. Each phase has a number, a title, a
+#           tag applied on dev→main when every branch in the phase has
+#           landed, and a list of planned feat/fix branches. Each branch
+#           has a `name` (exact git branch name) and a short `scope`
+#           sentence used as the commit label in the mermaid diagram.
+#   sidequests: off-roadmap branches kept in the diagram for history
+#               (e.g. workflow tooling that doesn't map to a bootloader
+#               phase). Rendered in the table but not in the main diagram
+#               lane.
+
+phases:
+  - number: 1
+    title: Memory map & firmware contract
+    tag: v0.1.1-memmap
+    branches:
+      - name: feat/1
+        scope: bl_memmap.h + ARCHITECTURE.md
+
+  - number: 2
+    title: Protocol rewrite (classic CAN)
+    tag: v0.2.0-protocol
+    branches:
+      - name: feat/4-frame-layout
+        scope: 11-bit [type|src|dst] IDs + node ID + dispatch
+      - name: feat/5-isotp
+        scope: ISO-TP-style multi-frame segment / reassemble
+      - name: feat/6-core-opcodes
+        scope: CONNECT / DISCONNECT / DISCOVER / RESET / JUMP + NACK
+      - name: feat/7-flash-opcodes
+        scope: ERASE / WRITE / READ_CRC / VERIFY with sector-aware erase
+      - name: feat/8-session-timeout
+        scope: 30 s bootloader timeout + keepalive + retry budget
+
+  - number: 3
+    title: Firmware contract & diagnostics
+    tag: v0.3.0-diagnostics
+    branches:
+      - name: feat/9-firmware-info
+        scope: __firmware_info exposed on CONNECT / DISCOVER
+      - name: feat/10-heartbeat-health
+        scope: NOTIFY_HEARTBEAT + reset cause + WRP status + uptime
+      - name: feat/11-dtc
+        scope: DTC table + NOTIFY_DTC + DTC_READ / DTC_CLEAR
+      - name: feat/12-log-stream
+        scope: ring buffer + NOTIFY_LOG + LOG_STREAM_START / STOP
+      - name: feat/13-live-data
+        scope: LIVE_DATA_START / STOP (packed struct via signal set)
+
+  - number: 4
+    title: Config & option bytes
+    tag: v0.4.0-config
+    branches:
+      - name: feat/14-nvm
+        scope: NVM parameter store + NVM_READ / NVM_WRITE
+      - name: feat/15-wrp-option-bytes
+        scope: OB_READ + OB_APPLY_WRP + WRP self-check on boot
+
+  - number: 5
+    title: Security
+    tag: v1.0.0
+    branches:
+      - name: feat/16-ed25519-sign
+        scope: Ed25519 signature verification (__firmware_sig + pubkey)
+      - name: feat/17-replay-counter
+        scope: Monotonic counter with downgrade reject
+      - name: feat/18-challenge-response
+        scope: Session auth (CMD_CHALLENGE / CMD_CHALLENGE_RESP)
+      - name: feat/19-encrypted-transport
+        scope: Optional AES-128-CTR (BL_FEATURE_ENCRYPTED_TRANSPORT)
+
+sidequests:
+  - title: Workflow polish
+    note: Not part of the bootloader roadmap. Kept here for branch history.
+    branches:
+      - feat/2-autoclose-on-dev-merge
+      - fix/1-workflow-titled-branches
+      - feat/3-roadmap
