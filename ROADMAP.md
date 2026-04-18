@@ -22,7 +22,7 @@ state in GitHub Issues.
 | 3 | Firmware contract & diagnostics | 🔜 planned `feat/9-firmware-info` · 🔜 planned `feat/10-heartbeat-health` · 🔜 planned `feat/11-dtc` · 🔜 planned `feat/12-log-stream` · 🔜 planned `feat/13-live-data` | `v0.3.0-diagnostics` |
 | 4 | Config & option bytes | 🔜 planned `feat/14-nvm` · 🔜 planned `feat/15-wrp-option-bytes` | `v0.4.0-config` |
 | 5 | Security | 🔜 planned `feat/16-ed25519-sign` · 🔜 planned `feat/17-replay-counter` · 🔜 planned `feat/18-challenge-response` · 🔜 planned `feat/19-encrypted-transport` | `v1.0.0` |
-| — | Workflow polish _(sidequest)_ | ✅ done `feat/2-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` · 🔜 planned `feat/3-roadmap` | — |
+| — | Workflow polish _(sidequest)_ | ✅ done `feat/2-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` · ✅ done `feat/3-roadmap` | — |
 
 ## Branch diagram
 
