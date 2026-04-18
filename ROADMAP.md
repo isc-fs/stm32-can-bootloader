@@ -18,7 +18,7 @@ state in GitHub Issues.
 | Phase | Title | Branches | Milestone tag |
 |:---:|---|---|---|
 | 1 | Memory map & firmware contract | ✅ done `feat/1` | `v0.1.1-memmap` |
-| 2 | Protocol rewrite (classic CAN) | 🔜 planned `feat/5-frame-layout` · 🔜 planned `feat/6-isotp` · 🔜 planned `feat/7-core-opcodes` · 🔜 planned `feat/8-flash-opcodes` · 🔜 planned `feat/9-session-timeout` | `v0.2.0-protocol` |
+| 2 | Protocol rewrite (classic CAN) | ✅ done `feat/5-frame-layout` · 🔜 planned `feat/6-isotp` · 🔜 planned `feat/7-core-opcodes` · 🔜 planned `feat/8-flash-opcodes` · 🔜 planned `feat/9-session-timeout` | `v0.2.0-protocol` |
 | 3 | Firmware contract & diagnostics | 🔜 planned `feat/10-firmware-info` · 🔜 planned `feat/11-heartbeat-health` · 🔜 planned `feat/12-dtc` · 🔜 planned `feat/13-log-stream` · 🔜 planned `feat/14-live-data` | `v0.3.0-diagnostics` |
 | 4 | Config & option bytes | 🔜 planned `feat/15-nvm` · 🔜 planned `feat/16-wrp-option-bytes` | `v0.4.0-config` |
 | 5 | Security | 🔜 planned `feat/17-ed25519-sign` · 🔜 planned `feat/18-replay-counter` · 🔜 planned `feat/19-challenge-response` · 🔜 planned `feat/20-encrypted-transport` | `v1.0.0` |
@@ -45,7 +45,7 @@ gitGraph
 
     %% Phase 2 — Protocol rewrite (classic CAN)
     branch feat/5-frame-layout
-    commit id: "○ 11-bit [type|src|dst] IDs + node ID + dispatch"
+    commit id: "✔ 11-bit [type|src|dst] IDs + node ID + dispatch"
     checkout dev
     merge feat/5-frame-layout
     branch feat/6-isotp
