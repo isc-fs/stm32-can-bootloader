@@ -47,10 +47,11 @@ typedef enum {
     BL_PROTO_TYPE_DISCOVER = 0x7U,  /* broadcast, discovery ping/response */
 } bl_proto_type_t;
 
-/* ---- Command opcodes (Phase 2 core set) ---- */
+/* ---- Command opcodes ---- */
 #define BL_CMD_CONNECT              0x01U  /* start a session, exchange protocol version */
 #define BL_CMD_DISCONNECT           0x02U  /* end the session */
-#define BL_CMD_DISCOVER             0x03U  /* broadcast ping; device returns identity */
+#define BL_CMD_DISCOVER             0x03U  /* broadcast ping; device returns short identity */
+#define BL_CMD_GET_FW_INFO          0x04U  /* return the application's __firmware_info record */
 #define BL_CMD_FLASH_ERASE          0x10U  /* erase sectors covering [start, start+length) */
 #define BL_CMD_FLASH_WRITE          0x11U  /* program bytes at addr (FLASHWORD-aligned) */
 #define BL_CMD_FLASH_READ_CRC       0x12U  /* CRC32 over [addr, addr+length) */
