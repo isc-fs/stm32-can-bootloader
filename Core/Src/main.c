@@ -120,6 +120,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
 	Bootloader_Init();
+	Bootloader_MainLoop();  /* never returns — either auto-jumps to app
+	                           or keeps serving CAN frames forever */
 
   /* USER CODE END 2 */
 

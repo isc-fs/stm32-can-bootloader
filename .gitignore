@@ -54,3 +54,7 @@ dkms.conf
 # STM32CubeIDE build output
 Debug/
 Release/
+
+# CMake build output
+build/
+compile_commands.json
