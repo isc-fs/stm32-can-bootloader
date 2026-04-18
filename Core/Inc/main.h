@@ -54,6 +54,12 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 
+/* Bootloader core entry points exposed for the protocol layer. Declared
+ * here (not in a dedicated header) so they stay inside the USER CODE
+ * region CubeMX preserves on regeneration. */
+void    Bootloader_JumpToApplication(void);
+uint8_t Bootloader_CheckApplication(void);
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
