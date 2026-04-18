@@ -25,6 +25,7 @@
 #include "bl_config.h"
 #include "bl_flash.h"
 #include "bl_fwinfo.h"
+#include "bl_health.h"
 #include "bl_isotp.h"
 #include "bl_memmap.h"
 #include "main.h"
@@ -255,6 +256,21 @@ static void handle_get_fw_info(uint8_t peer)
     uint8_t resp[1U + BL_FWINFO_SIZE];
     resp[0] = BL_CMD_GET_FW_INFO;
     memcpy(&resp[1], info, BL_FWINFO_SIZE);
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_GET_HEALTH: no args. Returns the 32-byte health record built by
+ * bl_health. Not session-gated — hosts should be able to poll health
+ * at any time (e.g. while deciding whether to open a session). ACK
+ * payload is 33 bytes (opcode + record) → one FF + four CFs. */
+static void handle_get_health(uint8_t peer)
+{
+    bl_health_record_t record;
+    bl_health_fill_record(&record);
+
+    uint8_t resp[1U + BL_HEALTH_RECORD_SIZE];
+    resp[0] = BL_CMD_GET_HEALTH;
+    memcpy(&resp[1], &record, BL_HEALTH_RECORD_SIZE);
     send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
@@ -534,6 +550,9 @@ static void handle_message(uint8_t peer,
         case BL_CMD_GET_FW_INFO:
             handle_get_fw_info(peer);
             break;
+        case BL_CMD_GET_HEALTH:
+            handle_get_health(peer);
+            break;
         case BL_CMD_FLASH_ERASE:
             handle_flash_erase(peer, args, args_len);
             break;
@@ -649,4 +668,16 @@ void bl_proto_tick(uint32_t now_ms)
             session_timeout();
         }
     }
+}
+
+bool bl_proto_session_active(void)
+{
+    return g_session_active;
+}
+
+void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
+{
+    /* NOTIFY always goes to the host (node 0x0). Unsolicited — does
+     * not refresh the session watchdog. */
+    send_message(BL_PROTO_TYPE_NOTIFY, BL_PROTO_NODE_HOST, payload, length);
 }

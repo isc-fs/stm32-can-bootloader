@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bl_isotp.c
     Core/Src/bl_flash.c
     Core/Src/bl_fwinfo.c
+    Core/Src/bl_health.c
 )
 
 # Add include paths
