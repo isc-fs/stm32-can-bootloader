@@ -209,37 +209,85 @@ Single Frame arrives mid-reassembly the in-flight buffer is discarded
 and processing starts fresh with the new frame — consistent with the
 standard's handling of an unexpected SF/FF.
 
-### Core opcodes
+### Opcodes
 
 Every message a host sends is an ISO-TP-wrapped payload whose first
-byte is the opcode. The Phase 2 core set:
+byte is the opcode. The Phase 2 set:
 
-| Opcode | Name         | Request args           | Response (ACK payload)      |
-|--------|--------------|------------------------|-----------------------------|
-| `0x01` | `CONNECT`    | `[major, minor]`        | `[opcode, major, minor]`     |
-| `0x02` | `DISCONNECT` | –                      | `[opcode]`                   |
-| `0x03` | `DISCOVER`   | – (sent to `dst=0xF`)   | `[opcode, node_id, major, minor]` — TYPE = `DISCOVER` |
-| `0x60` | `RESET`      | `[mode]` (0..3)         | `[opcode]` emitted **before** reset |
-| `0x61` | `JUMP`       | `[addr_le32]`           | `[opcode]` emitted **before** jump |
+| Opcode | Name             | Session | Request args                                   | Response (ACK payload)                          |
+|--------|------------------|:-------:|------------------------------------------------|-------------------------------------------------|
+| `0x01` | `CONNECT`        |    –    | `[major, minor]`                                | `[opcode, major, minor]`                        |
+| `0x02` | `DISCONNECT`     |    –    | –                                              | `[opcode]`                                      |
+| `0x03` | `DISCOVER`       |    –    | – (sent to `dst=0xF`)                           | `[opcode, node_id, major, minor]` — TYPE = `DISCOVER` |
+| `0x10` | `FLASH_ERASE`    |   ✔    | `[start_le32, length_le32]`                     | `[opcode]`                                      |
+| `0x11` | `FLASH_WRITE`    |   ✔    | `[addr_le32, data…]` (≤ 256 B data)             | `[opcode]`                                      |
+| `0x12` | `FLASH_READ_CRC` |   ✔    | `[addr_le32, length_le32]`                      | `[opcode, crc32_le32]`                          |
+| `0x13` | `FLASH_VERIFY`   |   ✔    | `[expected_crc_le32, expected_size_le32, expected_version_le32]` | `[opcode]` — also writes the metadata word  |
+| `0x60` | `RESET`          |    –    | `[mode]` (0..3)                                 | `[opcode]` emitted **before** reset             |
+| `0x61` | `JUMP`           |    –    | `[addr_le32]`                                   | `[opcode]` emitted **before** jump              |
 
-All requests and responses in the core set fit in a Single Frame (≤ 7
-payload bytes). Longer payloads (flash writes) are `feat/8` territory.
+The "Session" column marks opcodes that refuse to run unless the host
+has issued a successful `CONNECT`. Flash programming is gated; identity
+and hand-off opcodes are not.
+
+#### CONNECT / DISCONNECT / DISCOVER
 
 **CONNECT**: host offers its protocol `(major, minor)`. Bootloader
 rejects a major mismatch with `NACK(BL_NACK_PROTOCOL_VERSION)`. On
-success the bootloader's own `(major, minor)` is echoed back and an
-internal **session latch** goes active. `feat/8-flash-opcodes` will
-refuse flash programming unless the latch is active; the core opcodes
-in this branch are deliberately session-agnostic so a host can always
-reach them.
+success the bootloader's own `(major, minor)` is echoed back and the
+internal **session latch** goes active. `DISCONNECT` or any MCU reset
+clears the latch.
 
 **DISCOVER**: sent as `TYPE=DISCOVER` with `dst=0xF`. Each bootloader
 on the bus replies — `TYPE=DISCOVER`, `dst=0x0` (host) — with its node
-ID and protocol version. The Phase 2 reply is intentionally minimal;
-later phases will add `__firmware_info`, WRP status, UID, etc. as those
-fields become available.
+ID and protocol version. Additional identity fields (`__firmware_info`,
+WRP status, UID, …) arrive in later phases.
 
-**RESET**: `mode` byte picks what "reset" means.
+#### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
+
+All four operate on the writable range `[BL_APP_BASE, BL_APP_METADATA_ADDR)`.
+Any address outside that range earns `NACK(BL_NACK_OUT_OF_BOUNDS)` or
+`NACK(BL_NACK_PROTECTED_ADDR)` depending on whether the target is merely
+out-of-bounds or overlaps the bootloader / metadata. Flash hardware
+errors surface as `NACK(BL_NACK_FLASH_HW)`.
+
+**FLASH_ERASE** requires the range to be sector-aligned — both
+`start` and `length` must be multiples of `BL_FLASH_SECTOR_SIZE`
+(128 KB). It's the first real exercise of ISO-TP First Frame + CF
+segmentation (9 bytes of args don't fit in an SF). The handler is
+**synchronous**: it blocks in `HAL_FLASHEx_Erase` for the full erase
+duration (typically 1–4 s per 128 KB sector on H7) and only ACKs when
+done. CAN frames that arrive during the erase queue in FDCAN FIFO0
+(depth 16) and are drained once the handler returns. A real
+`FC(Wait)` backpressure mechanism is deliberately **not** implemented
+in this phase — the request/response pattern keeps the host from
+needing to send anything during an erase.
+
+**FLASH_WRITE** requires `addr` to be FLASHWORD-aligned (32 bytes).
+Data length can be anything up to the ISO-TP reassembly limit (1024 B)
+minus the 5-byte header, but the host-side spec caps per-message data
+at 256 B to keep error recovery granular. A trailing partial FLASHWORD
+is padded with `0xFF` internally. Each FLASHWORD can only be programmed
+once between erases (H7 ECC constraint) — the host must erase the
+target sectors before writing.
+
+**FLASH_READ_CRC** computes CRC32 over `[addr, addr + length)` and
+returns it in the ACK payload. Read-only but still session-gated: any
+`FLASH_*` opcode requires `CONNECT` first.
+
+**FLASH_VERIFY** recomputes CRC32 over `[BL_APP_BASE, BL_APP_BASE +
+expected_size)`. On match it writes the metadata FLASHWORD at
+`BL_APP_METADATA_ADDR` with `{magic, size, crc, base, version, 0, 0, 0}`
+(see [Application metadata record](#application-metadata-record)).
+On mismatch: `NACK(BL_NACK_CRC_MISMATCH)`; the metadata FLASHWORD
+remains erased so `Bootloader_CheckApplication` will reject the image
+on the next boot. The metadata sector must have been erased previously
+(typically by a `FLASH_ERASE` that covered sector 7); otherwise the
+program call fails with `NACK(BL_NACK_FLASH_HW)`.
+
+#### RESET
+
+`mode` byte picks what "reset" means.
 
 | `mode` | Effect                                                      |
 |--------|-------------------------------------------------------------|
@@ -254,24 +302,28 @@ rejects the installed image the host gets `NACK(BL_NACK_NO_VALID_APP)`
 and the bootloader stays in listen mode. Modes 0–2 always ACK first,
 then trigger the reset.
 
-**JUMP**: jumps directly to `addr_le32`. Phase-2 policy: the address
-must equal `BL_APP_BASE` and the installed app must pass integrity
-checks. Out-of-range addresses earn `NACK(BL_NACK_OUT_OF_BOUNDS)`; a
-corrupt or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
+#### JUMP
+
+Jumps directly to `addr_le32`. Phase-2 policy: the address must equal
+`BL_APP_BASE` and the installed app must pass integrity checks.
+Out-of-range addresses earn `NACK(BL_NACK_OUT_OF_BOUNDS)`; a corrupt
+or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
 
 ### NACK codes
 
 | Code   | Name                          | When                                                    |
 |--------|-------------------------------|---------------------------------------------------------|
-| `0x01` | `BL_NACK_PROTECTED_ADDR`       | write into WRP region (reserved for `feat/8`)            |
-| `0x02` | `BL_NACK_OUT_OF_BOUNDS`        | address outside allowed region                          |
-| `0x06` | `BL_NACK_BAD_SESSION`          | reserved — enforced starting `feat/8`                    |
-| `0x08` | `BL_NACK_BUSY`                 | previous op not complete                                |
+| `0x01` | `BL_NACK_PROTECTED_ADDR`       | write/erase range touches sector 0 or metadata FLASHWORD |
+| `0x02` | `BL_NACK_OUT_OF_BOUNDS`        | address outside the writable region                      |
+| `0x03` | `BL_NACK_CRC_MISMATCH`         | `FLASH_VERIFY`: computed CRC != expected                 |
+| `0x06` | `BL_NACK_BAD_SESSION`          | `FLASH_*` issued without an active session               |
+| `0x07` | `BL_NACK_FLASH_HW`             | HAL flash erase / program returned non-OK                 |
+| `0x08` | `BL_NACK_BUSY`                 | previous op not complete (reserved)                     |
 | `0x09` | `BL_NACK_TRANSPORT_TIMEOUT`    | ISO-TP reassembly ran past `BL_ISOTP_TIMEOUT_MS`         |
 | `0x0A` | `BL_NACK_TRANSPORT_ERROR`      | ISO-TP PCI / seq / overflow                              |
 | `0x0B` | `BL_NACK_PROTOCOL_VERSION`     | host/device major version disagree                       |
 | `0x0C` | `BL_NACK_NO_VALID_APP`         | jump / reset-to-app with no valid image                 |
-| `0xFE` | `BL_NACK_UNSUPPORTED`          | unknown opcode or bad argument                          |
+| `0xFE` | `BL_NACK_UNSUPPORTED`          | unknown opcode, bad arg length, or unaligned address    |
 
 ### Phase 2 branch coverage
 
@@ -279,13 +331,15 @@ corrupt or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
 |----------------------------|--------------------------------------------------------------------------------------|
 | `feat/5-frame-layout`      | Frame layout, node ID, FDCAN filters, dispatch skeleton                              |
 | `feat/6-isotp`             | ISO-TP-style multi-frame segmentation / reassembly                                    |
-| `feat/7-core-opcodes`      | `CONNECT` / `DISCONNECT` / `DISCOVER` / `RESET` / `JUMP` (this document)             |
-| `feat/8-flash-opcodes`     | `FLASH_ERASE` / `FLASH_WRITE` / `FLASH_READ_CRC` / `FLASH_VERIFY` + session gating   |
+| `feat/7-core-opcodes`      | `CONNECT` / `DISCONNECT` / `DISCOVER` / `RESET` / `JUMP`                              |
+| `feat/8-flash-opcodes`     | `FLASH_ERASE` / `FLASH_WRITE` / `FLASH_READ_CRC` / `FLASH_VERIFY`; session gating     |
 | `feat/9-session-timeout`   | 30 s session watchdog + keepalive + retry budget                                     |
 
-Until `feat/8-flash-opcodes` merges the bootloader on `dev` is
-intentionally non-flashable — `FLASH_WRITE` et al. don't exist yet.
-That window closes at the `v0.2.0-protocol` dev→main tag.
+Starting with `feat/8-flash-opcodes` the bootloader on `dev` is
+functional end-to-end: a host that speaks the protocol can erase,
+program and verify an application image. `feat/9` will make the
+session robust against a host that stops talking mid-flash. The
+`v0.2.0-protocol` dev→main tag closes Phase 2.
 
 ---
 
