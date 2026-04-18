@@ -154,6 +154,61 @@ are rejected at the peripheral and never reach software. The software
 dispatcher keeps a defence-in-depth `bl_proto_addressed_to_us` check so any
 future software-routed path stays honest.
 
+### Transport layer (ISO-TP)
+
+Every protocol frame — single- and multi-frame alike — carries a PCI byte
+at byte 0 of its 8-byte payload. The high nibble names the frame kind:
+
+```
+ bit 7 6 5 4 | 3 2 1 0
+ +-----------+---------+
+ |   kind    |  info   |
+ +-----------+---------+
+
+ kind = 0x0  Single Frame    info = payload length (1..7)
+ kind = 0x1  First Frame     info = high nibble of 12-bit total length
+                              byte 1 = low byte of total length
+ kind = 0x2  Consecutive     info = sequence number 0..15 (wraps)
+ kind = 0x3  Flow Control    info = 0 CTS / 1 Wait / 2 Overflow
+                              byte 1 = BlockSize
+                              byte 2 = SeparationTime
+```
+
+TYPE ↔ PCI binding on this bus (matches the spec):
+
+- A message's **First Frame** keeps the original TYPE (e.g. `TYPE=CMD`
+  for a long command).
+- **Consecutive Frames** and the receiver's **Flow Control** reply use
+  `TYPE=DATA`. The bootloader's RX path is state-based and doesn't
+  enforce the TYPE on CFs, but that's the convention the host is
+  expected to follow.
+- **Single Frames** use their own TYPE (`TYPE=CMD` for a short command,
+  `TYPE=NACK` for a negative ack, etc.).
+
+Max reassembled message size: **1024 bytes** (`BL_ISOTP_MAX_MSG` in
+[`Core/Inc/bl_isotp.h`](Core/Inc/bl_isotp.h)). The ISO 15765 32-bit
+escape First Frame is explicitly not supported — any attempt elicits a
+`NACK(BL_NACK_TRANSPORT_ERROR)`.
+
+On receiving a First Frame the bootloader immediately replies with
+**`FC(CTS, BS=0, STmin=0)`**: block size zero tells the host it may send
+every remaining Consecutive Frame without waiting for another FC, and
+STmin zero imposes no inter-frame gap. No real backpressure yet — FC
+throttling during flash erase is `feat/8-flash-opcodes` work.
+
+Reassembly is bounded by a **1 s** total-elapsed timeout between the
+First Frame and completion. If the deadline expires the peer gets
+`NACK(BL_NACK_TRANSPORT_TIMEOUT)` and the reassembler returns to IDLE.
+ISO 15765's separate N_Bs / N_Cr timers are collapsed into this single
+timeout — sufficient for every bootloader use case. Any malformed PCI,
+out-of-order Consecutive Frame, unexpected CF with no FF active, or
+declared length over 1024 bytes produces `NACK(BL_NACK_TRANSPORT_ERROR)`.
+
+Only one reassembly is in flight at a time. If a new First Frame or
+Single Frame arrives mid-reassembly the in-flight buffer is discarded
+and processing starts fresh with the new frame — consistent with the
+standard's handling of an unexpected SF/FF.
+
 ### Current opcode coverage
 
 Phase 2 lands the protocol across five branches:

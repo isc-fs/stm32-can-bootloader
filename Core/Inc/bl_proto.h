@@ -48,8 +48,10 @@ typedef enum {
 } bl_proto_type_t;
 
 /* ---- NACK error codes — subset used in Phase 2 ---- */
-#define BL_NACK_BUSY               0x08U  /* previous operation not complete */
-#define BL_NACK_UNSUPPORTED        0xFEU  /* unknown opcode or message type */
+#define BL_NACK_BUSY                0x08U  /* previous operation not complete */
+#define BL_NACK_TRANSPORT_TIMEOUT   0x09U  /* ISO-TP reassembly timed out */
+#define BL_NACK_TRANSPORT_ERROR     0x0AU  /* ISO-TP framing error (bad PCI/seq/overflow) */
+#define BL_NACK_UNSUPPORTED         0xFEU  /* unknown opcode or message type */
 
 /* ---- Decoded frame ID ---- */
 typedef struct {
@@ -81,10 +83,18 @@ static inline void bl_proto_parse_id(uint32_t id, bl_proto_id_t *out) {
 bool bl_proto_addressed_to_us(uint8_t dst);
 
 /* Dispatch a received frame. `data` must point to `length` bytes of
- * payload (0..8 for classic CAN). Phase 2 placeholder: every frame is
- * answered with a NACK until the handler branches land. */
+ * payload (0..8 for classic CAN). Frames are fed into the ISO-TP
+ * reassembler; a completed message is routed to an internal single-
+ * frame handler that — until the opcode branches land — answers with
+ * NACK(BL_NACK_UNSUPPORTED). ISO-TP framing errors elicit a NACK with
+ * BL_NACK_TRANSPORT_ERROR. */
 void bl_proto_dispatch(const bl_proto_id_t *id,
                        const uint8_t *data,
                        uint8_t length);
+
+/* Periodic tick — call from the main loop. Drives the ISO-TP
+ * reassembly timeout; if an in-flight reassembly expires the peer
+ * gets NACK(BL_NACK_TRANSPORT_TIMEOUT) and the state machine resets. */
+void bl_proto_tick(uint32_t now_ms);
 
 #endif /* BL_PROTO_H */

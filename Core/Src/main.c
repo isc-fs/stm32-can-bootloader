@@ -360,6 +360,10 @@ static void Bootloader_MainLoop(void) {
 			}
 		}
 
+		/* Protocol tick — drives ISO-TP reassembly timeout. NACKs any
+		 * peer whose multi-frame transfer stalled past BL_ISOTP_TIMEOUT_MS. */
+		bl_proto_tick(HAL_GetTick());
+
 		/* Auto-jump window: if we booted with a valid app and nobody
 		 * has talked to us before the deadline, hand control over. */
 		if (g_AutoJumpEnabled) {
