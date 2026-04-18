@@ -98,6 +98,81 @@ one-shot, and disables the auto-jump for that session.
 
 ---
 
+## CAN protocol
+
+The bootloader exposes a classic-CAN protocol on FDCAN2 — 11-bit standard IDs,
+up to 8 bytes of payload per frame. CAN FD is not used by this bootloader.
+Protocol constants live in [`Core/Inc/bl_proto.h`](Core/Inc/bl_proto.h).
+
+### Frame ID layout (11-bit)
+
+```
+ bit 10 9 8 | 7 6 5 4 | 3 2 1 0
+ +---------+---------+---------+
+ | message |  source | dest    |
+ |  type   | node ID | node ID |
+ +---------+---------+---------+
+```
+
+| Field        | Bits | Notes                                                  |
+|--------------|------|--------------------------------------------------------|
+| message type | 10:8 | `bl_proto_type_t`; see table below                     |
+| source       | 7:4  | 4-bit node ID of the transmitter; host is `0x0`        |
+| destination  | 3:0  | 4-bit node ID of the receiver; `0xF` = broadcast       |
+
+### Message types
+
+| Value | Name       | Direction              | Description                       |
+|-------|------------|------------------------|-----------------------------------|
+| `0x0` | `CMD`      | host → device           | Command frame                     |
+| `0x1` | `ACK`      | device → host           | Positive acknowledgement          |
+| `0x2` | `NACK`     | device → host           | Negative acknowledgement + code   |
+| `0x3` | `DATA`     | bidirectional           | Multi-frame payload continuation  |
+| `0x4` | `NOTIFY`   | device → host           | Unsolicited event (log, DTC, …)   |
+| `0x7` | `DISCOVER` | broadcast               | Discovery ping / response         |
+
+### Node ID provisioning
+
+Each board's 4-bit node ID is a compile-time constant, `BL_NODE_ID`, defined
+in [`Core/Inc/bl_config.h`](Core/Inc/bl_config.h) and overridden per board via
+the toolchain's `-DBL_NODE_ID=0x…` flag. Values `0x0` (host) and `0xF`
+(broadcast) are reserved; valid bootloader IDs are `0x1..0xE`.
+
+The compile-time approach is intentionally simple for Phase 2. An NVM-backed
+override is planned for Phase 4 so the same firmware image can be provisioned
+to different nodes without rebuilding.
+
+### FDCAN hardware filtering
+
+Two classic-mask filters are installed on FIFO0 during `Bootloader_Init`:
+
+1. `dst == BL_NODE_ID` — unicast to this board
+2. `dst == 0xF`       — broadcast to every bootloader on the bus
+
+Non-matching standard IDs, non-matching extended IDs and all remote frames
+are rejected at the peripheral and never reach software. The software
+dispatcher keeps a defence-in-depth `bl_proto_addressed_to_us` check so any
+future software-routed path stays honest.
+
+### Current opcode coverage
+
+Phase 2 lands the protocol across five branches:
+
+| Branch                      | Adds                                                                 |
+|----------------------------|----------------------------------------------------------------------|
+| `feat/5-frame-layout`      | This document; frame layout, node ID, FDCAN filters, dispatch skeleton |
+| `feat/6-isotp`             | ISO-TP-style multi-frame segmentation / reassembly                    |
+| `feat/7-core-opcodes`      | `CONNECT` / `DISCONNECT` / `DISCOVER` / `RESET` / `JUMP` + NACK codes |
+| `feat/8-flash-opcodes`     | `FLASH_ERASE` / `FLASH_WRITE` / `FLASH_READ_CRC` / `FLASH_VERIFY`     |
+| `feat/9-session-timeout`   | 30 s session watchdog + keepalive + retry budget                     |
+
+Until `feat/7-core-opcodes` and `feat/8-flash-opcodes` merge, every
+received frame is answered with a generic `NACK(0xFE)` — the bootloader
+on `dev` is intentionally non-flashable during this Phase 2 window. That
+window closes at the `v0.2.0-protocol` dev→main tag.
+
+---
+
 ## RAM usage (bootloader)
 
 | Region   | Range                     | Used for                          |
