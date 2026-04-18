@@ -37,10 +37,45 @@ extern FDCAN_HandleTypeDef hfdcan2;
 
 static bl_isotp_rx_t g_rx;
 
-/* Session latch. Set by CONNECT, cleared by DISCONNECT or bootloader
- * reset. Flash-programming opcodes (feat/8) will refuse to run unless
- * this is true. */
+/* Session latch. Set by CONNECT, cleared by DISCONNECT, by an MCU
+ * reset, or by the session watchdog. FLASH_* opcodes require this to
+ * be true. */
 static bool g_session_active = false;
+
+/* Session watchdog. The last-activity timestamp is updated on two
+ * kinds of event:
+ *
+ *   - every addressed frame that passes the FDCAN filter + TYPE/PCI
+ *     check (bl_proto_dispatch), so host-side retries and even
+ *     rejected commands count as "still alive"
+ *   - every ACK we transmit (send_ack), so a multi-second blocking
+ *     handler like FLASH_ERASE re-arms the watchdog once it finally
+ *     ACKs. Without this, any operation longer than
+ *     BL_SESSION_TIMEOUT_MS would trip the watchdog on the very next
+ *     main-loop iteration.
+ *
+ * The value is only consulted while g_session_active; idle bootloaders
+ * are not watchdogged. */
+static uint32_t g_session_last_activity_ms = 0U;
+
+static void session_touch_activity(void)
+{
+    g_session_last_activity_ms = HAL_GetTick();
+}
+
+static void session_timeout(void)
+{
+    g_session_active = false;
+    bl_isotp_rx_init(&g_rx);
+
+    /* Host abandoned us. If a valid application is installed, hand
+     * control over; otherwise stay in listen mode for a future
+     * reconnect. No NACK is emitted — silence matches what the host
+     * has been doing. */
+    if (Bootloader_CheckApplication() == 0U) {
+        Bootloader_JumpToApplication();
+    }
+}
 
 /* ---- Low-level TX plumbing ---- */
 
@@ -107,10 +142,13 @@ static void send_message(bl_proto_type_t type,
 }
 
 /* Send a positive ack. `payload[0]` is the opcode being acked;
- * `payload[1..length-1]` is opcode-specific response data. */
+ * `payload[1..length-1]` is opcode-specific response data. Re-arms
+ * the session watchdog so long blocking handlers (FLASH_ERASE) don't
+ * appear dead the instant they finally ACK. */
 static void send_ack(uint8_t dst, const uint8_t *payload, uint16_t length)
 {
     send_message(BL_PROTO_TYPE_ACK, dst, payload, length);
+    session_touch_activity();
 }
 
 /* Send a 2-byte NACK payload wrapped in an ISO-TP SF. */
@@ -154,6 +192,7 @@ static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
     }
 
     g_session_active = true;
+    session_touch_activity();  /* arm the watchdog starting now */
 
     uint8_t resp[3] = {
         BL_CMD_CONNECT,
@@ -508,6 +547,11 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
         return;
     }
 
+    /* Any frame that made it through the TYPE/PCI gate counts as session
+     * activity — including frames that end up getting NACKed. A host
+     * that's still transmitting, even unsuccessfully, is still alive. */
+    session_touch_activity();
+
     bool                 send_fc = false;
     bl_isotp_rx_status_t st      = bl_isotp_rx_feed(&g_rx,
                                                      (uint8_t)id->type,
@@ -558,5 +602,16 @@ void bl_proto_tick(uint32_t now_ms)
     uint8_t peer = 0U;
     if (bl_isotp_rx_tick(&g_rx, now_ms, &peer)) {
         send_nack(peer, 0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
+    }
+
+    /* Session watchdog — only runs while a session is active. Unsigned
+     * subtraction wraps around the 32-bit HAL_GetTick roll-over
+     * correctly: it measures elapsed milliseconds since the last
+     * activity, not an absolute deadline. */
+    if (g_session_active) {
+        uint32_t elapsed = now_ms - g_session_last_activity_ms;
+        if (elapsed >= BL_SESSION_TIMEOUT_MS) {
+            session_timeout();
+        }
     }
 }
