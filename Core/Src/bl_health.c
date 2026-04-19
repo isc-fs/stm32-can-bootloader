@@ -10,6 +10,7 @@
 #include "bl_health.h"
 
 #include "bl_config.h"
+#include "bl_dtc.h"
 #include "bl_proto.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
@@ -79,9 +80,9 @@ void bl_health_fill_record(bl_health_record_t *out)
     out->uptime_seconds    = bl_health_uptime_seconds();
     out->reset_cause       = (uint32_t)g_reset_cause;
     out->flags             = bl_health_flags();
-    out->flash_write_count = 0U;  /* populated once Phase 4 NVM lands */
-    out->dtc_count         = 0U;  /* populated in feat/12-dtc         */
-    out->last_dtc_code     = 0U;  /* populated in feat/12-dtc         */
+    out->flash_write_count = 0U;                     /* populated once Phase 4 NVM lands */
+    out->dtc_count         = (uint32_t)bl_dtc_count();
+    out->last_dtc_code     = (uint32_t)bl_dtc_last_code();
     out->reserved[0]       = 0U;
     out->reserved[1]       = 0U;
 }

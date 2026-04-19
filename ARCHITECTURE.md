@@ -225,6 +225,8 @@ byte is the opcode. The Phase 2 set:
 | `0x11` | `FLASH_WRITE`    |   ✔    | `[addr_le32, data…]` (≤ 256 B data)             | `[opcode]`                                      |
 | `0x12` | `FLASH_READ_CRC` |   ✔    | `[addr_le32, length_le32]`                      | `[opcode, crc32_le32]`                          |
 | `0x13` | `FLASH_VERIFY`   |   ✔    | `[expected_crc_le32, expected_size_le32, expected_version_le32]` | `[opcode]` — also writes the metadata word  |
+| `0x40` | `DTC_READ`       |    –    | –                                              | `[opcode, count_le16, entry_0, entry_1, …]` — multi-frame |
+| `0x41` | `DTC_CLEAR`      |   ✔    | –                                              | `[opcode]` — table is empty after this         |
 | `0x60` | `RESET`          |    –    | `[mode]` (0..3)                                 | `[opcode]` emitted **before** reset             |
 | `0x61` | `JUMP`           |    –    | `[addr_le32]`                                   | `[opcode]` emitted **before** jump              |
 
@@ -381,6 +383,71 @@ session (`feat/19`), etc. become real.
 |:---:|-----------------------------------|-----------------------------------------------|
 |  0  | `BL_HEALTH_FLAG_SESSION_ACTIVE`    | A session is currently established            |
 |  1  | `BL_HEALTH_FLAG_VALID_APP_PRESENT` | `Bootloader_CheckApplication()` passes today |
+
+#### DTC table (DTC_READ, DTC_CLEAR, NOTIFY_DTC)
+
+Diagnostic trouble codes live in a dedicated table in **Backup SRAM**
+at `0x38800000`. Backup SRAM survives soft resets and watchdog fires —
+the exact situations where the DTC that caused a crash is most
+valuable — but is lost on power loss unless the board has a coin
+cell on `V_BAT`. Capacity: 32 entries × 20 bytes + 16-byte header =
+656 bytes, leaving ~3.4 KB of BKPSRAM for later phases to claim.
+
+**Why BKPSRAM** (not flash): DTCs are "faults seen since last clear",
+not a permanent audit log. No flash wear, no rotating-sector
+bookkeeping. A permanent audit log is a separate Phase 5+ concern.
+
+##### Entry layout (20 bytes)
+
+| Offset | Size | Field                          |
+|:---:|:---:|---------------------------------|
+|  0  |  2  | `code` — vendor-defined fault code |
+|  2  |  1  | `severity` (0 info / 1 warn / 2 error / 3 fatal) |
+|  3  |  1  | `occurrence_count` (saturates at 255) |
+|  4  |  4  | `first_seen_uptime_seconds`    |
+|  8  |  4  | `last_seen_uptime_seconds`     |
+| 12  |  4  | `context_data` — e.g. failing flash address |
+| 16  |  4  | `reserved` — zero                |
+
+##### Dedup + eviction
+
+Logging an already-present `code` bumps its `occurrence_count` (saturating
+at 255) and updates `last_seen_uptime_seconds`. No `NOTIFY_DTC` is emitted
+on dedupes — a chatty persistent fault would otherwise flood the bus.
+When a 33rd distinct code arrives the oldest entry (slot 0) is evicted
+and the rest shift down.
+
+##### Well-known codes
+
+Codes the bootloader emits itself. Apps / future phases are free to
+allocate their own codes above `0x0100`.
+
+| Code    | Name                        | Severity | `context_data`                |
+|---------|-----------------------------|:--------:|-------------------------------|
+| `0x0010` | `BL_DTC_FLASH_HW`           | error   | Failing flash address          |
+| `0x0020` | `BL_DTC_SESSION_TIMEOUT`    | warn    | 0                              |
+
+##### Wire surfaces
+
+- **`CMD_DTC_READ` (`0x40`)** — not session-gated. Returns the whole
+  table in one ACK: `[opcode, count_le16, entry_0, entry_1, …]`. Worst
+  case 643 bytes, comfortably inside the 1024 B reassembly limit. Host
+  gets all fault history regardless of session state.
+- **`CMD_DTC_CLEAR` (`0x41`)** — session-gated (destructive).
+  `NACK(BL_NACK_BAD_SESSION)` without a prior `CONNECT`. ACK
+  `[opcode]` on success; the table is empty after this.
+- **`NOTIFY_DTC` (`0xF1`)** — unsolicited 5-byte SF emitted when a
+  *new* code appears: `[opcode, code_le16, severity, occurrence_count=1]`.
+  Silent on dedupes.
+
+##### Persistence across the BL → app jump
+
+BKPSRAM is not cleared when the bootloader jumps to the application.
+The app doesn't touch the DTC region today (it's bootloader-owned),
+so on the next entry into the bootloader the table is recovered as-
+is and `DTC_READ` returns the full history. The only things that
+clear the table are `DTC_CLEAR` and a power cycle (without backup
+battery).
 
 #### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
 
