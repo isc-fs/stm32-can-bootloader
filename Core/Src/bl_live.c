@@ -17,6 +17,7 @@
 #include "bl_dtc.h"
 #include "bl_health.h"
 #include "bl_log.h"
+#include "bl_obyte.h"
 #include "bl_proto.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
@@ -124,6 +125,9 @@ void bl_live_fill_snapshot(bl_live_t *out)
     }
     if (g_streaming) {
         flags |= BL_LIVE_FLAG_LIVEDATA_STREAMING;
+    }
+    if (bl_obyte_is_sector_wrp_protected(0U)) {
+        flags |= BL_LIVE_FLAG_WRP_PROTECTED;
     }
     out->flags             = flags;
     out->last_opcode       = g_last_opcode;
