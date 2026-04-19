@@ -28,6 +28,7 @@
 #include "bl_fwinfo.h"
 #include "bl_health.h"
 #include "bl_isotp.h"
+#include "bl_log.h"
 #include "bl_memmap.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
@@ -73,6 +74,7 @@ static void session_timeout(void)
      * timeline in the health record and any NOTIFY_DTC carries the
      * right "was in session" semantics. */
     bl_dtc_log(BL_DTC_SESSION_TIMEOUT, BL_DTC_SEV_WARN, 0U);
+    bl_log_warn("session timeout, tearing down");
 
     g_session_active = false;
     bl_isotp_rx_init(&g_rx);
@@ -203,6 +205,11 @@ static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
     g_session_active = true;
     session_touch_activity();  /* arm the watchdog starting now */
 
+    bl_log_info("CONNECT from 0x%X (host proto %u.%u)",
+                (unsigned int)peer,
+                (unsigned int)host_major,
+                (unsigned int)args[1]);
+
     uint8_t resp[3] = {
         BL_CMD_CONNECT,
         BL_PROTO_VERSION_MAJOR,
@@ -278,6 +285,36 @@ static void handle_get_health(uint8_t peer)
     uint8_t resp[1U + BL_HEALTH_RECORD_SIZE];
     resp[0] = BL_CMD_GET_HEALTH;
     memcpy(&resp[1], &record, BL_HEALTH_RECORD_SIZE);
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LOG_STREAM_START: [min_severity]. Session-gated — log streams
+ * are push-y and want session discipline. `min_severity` filters out
+ * lower-priority entries at the drain boundary. */
+static void handle_log_stream_start(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LOG_STREAM_START, BL_NACK_BAD_SESSION);
+        return;
+    }
+    uint8_t min_severity = (args_len >= 1U) ? args[0] : BL_LOG_SEV_INFO;
+    bl_log_stream_start(min_severity);
+
+    uint8_t resp[1] = { BL_CMD_LOG_STREAM_START };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LOG_STREAM_STOP: no args. Session-gated. The ring contents are
+ * left intact — a subsequent START replays whatever is still buffered. */
+static void handle_log_stream_stop(uint8_t peer)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LOG_STREAM_STOP, BL_NACK_BAD_SESSION);
+        return;
+    }
+    bl_log_stream_stop();
+
+    uint8_t resp[1] = { BL_CMD_LOG_STREAM_STOP };
     send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
@@ -416,14 +453,20 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
     uint32_t length = read_le32(&args[4]);
 
     uint32_t sectors = 0U;
+    bl_log_info("FLASH_ERASE start=0x%08X len=0x%X",
+                (unsigned int)start, (unsigned int)length);
     bl_flash_status_t st = bl_flash_erase(start, length, &sectors);
     if (st != BL_FLASH_OK) {
         if (st == BL_FLASH_ERR_HARDWARE) {
             bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, start);
+            bl_log_error("FLASH_ERASE hw fail at 0x%08X", (unsigned int)start);
+        } else {
+            bl_log_warn("FLASH_ERASE rejected (status=%d)", (int)st);
         }
         send_nack(peer, BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
         return;
     }
+    bl_log_info("FLASH_ERASE ok (%u sectors)", (unsigned int)sectors);
 
     uint8_t resp[1] = { BL_CMD_FLASH_ERASE };
     send_ack(peer, resp, (uint16_t)sizeof(resp));
@@ -610,6 +653,12 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_FLASH_VERIFY:
             handle_flash_verify(peer, args, args_len);
+            break;
+        case BL_CMD_LOG_STREAM_START:
+            handle_log_stream_start(peer, args, args_len);
+            break;
+        case BL_CMD_LOG_STREAM_STOP:
+            handle_log_stream_stop(peer);
             break;
         case BL_CMD_DTC_READ:
             handle_dtc_read(peer);

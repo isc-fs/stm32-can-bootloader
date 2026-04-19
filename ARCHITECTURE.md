@@ -225,6 +225,8 @@ byte is the opcode. The Phase 2 set:
 | `0x11` | `FLASH_WRITE`    |   ✔    | `[addr_le32, data…]` (≤ 256 B data)             | `[opcode]`                                      |
 | `0x12` | `FLASH_READ_CRC` |   ✔    | `[addr_le32, length_le32]`                      | `[opcode, crc32_le32]`                          |
 | `0x13` | `FLASH_VERIFY`   |   ✔    | `[expected_crc_le32, expected_size_le32, expected_version_le32]` | `[opcode]` — also writes the metadata word  |
+| `0x30` | `LOG_STREAM_START` | ✔  | `[min_severity]`                                 | `[opcode]`; `NOTIFY_LOG` frames start flowing  |
+| `0x31` | `LOG_STREAM_STOP`  | ✔  | –                                              | `[opcode]`; ring contents preserved             |
 | `0x40` | `DTC_READ`       |    –    | –                                              | `[opcode, count_le16, entry_0, entry_1, …]` — multi-frame |
 | `0x41` | `DTC_CLEAR`      |   ✔    | –                                              | `[opcode]` — table is empty after this         |
 | `0x60` | `RESET`          |    –    | `[mode]` (0..3)                                 | `[opcode]` emitted **before** reset             |
@@ -448,6 +450,92 @@ so on the next entry into the bootloader the table is recovered as-
 is and `DTC_READ` returns the full history. The only things that
 clear the table are `DTC_CLEAR` and a power cycle (without backup
 battery).
+
+#### Log streaming (LOG_STREAM_START, LOG_STREAM_STOP, NOTIFY_LOG)
+
+The bootloader keeps a 1 KB printf-style log ring in Backup SRAM at
+`0x38800400` (right after the DTC table). Ring contents survive soft
+resets and watchdog fires: a host that reconnects after a crash can
+`LOG_STREAM_START` and replay the last ~1 KB of bootloader log
+leading up to the reboot.
+
+##### Entry format
+
+Same shape in the ring and on the wire inside `NOTIFY_LOG` payloads:
+
+| Offset | Size | Field                                              |
+|:---:|:---:|-----------------------------------------------------|
+|  0  |  1  | `len_u8`          — length of `text`                |
+|  1  |  1  | `severity_u8`     — `BL_LOG_SEV_*` (info/warn/error/fatal) |
+| 2–5 |  4  | `uptime_le32`     — seconds since boot              |
+| 6…  | `len` | `text`          — UTF-8, not NUL-terminated on the wire |
+
+6-byte header + up to 120 bytes of text per entry. Entries are packed
+back-to-back in the ring; a single entry can straddle the end-of-buffer
+boundary.
+
+##### Overflow policy
+
+When a new entry doesn't fit, the **oldest entries are evicted** one at
+a time until there's room. A running counter of evicted bytes is kept
+and, on the next drain, a **synthetic marker entry** is prepended to
+the output:
+
+```
+<LOG_OVERFLOW N bytes dropped>   severity=warn
+```
+
+The marker never lives in the ring itself — it's formatted on the fly
+when draining — so the host always sees a breadcrumb for lost data.
+
+##### Drain / emit
+
+`bl_log_tick` runs every main-loop iteration. If streaming is active,
+the ring has data, and at least `BL_LOG_MIN_EMIT_INTERVAL_MS`
+(default 50 ms) has elapsed since the last emission, up to
+`BL_LOG_DRAIN_BUDGET` bytes (default 256) are pulled from the ring
+and shipped as one `NOTIFY_LOG` message — a single ISO-TP FF + CFs.
+The rate limit caps log traffic at ~20 frames/s ≈ 5 KB/s even when
+the ring is full; everything else stays buffered.
+
+##### Severity filter
+
+`LOG_STREAM_START` carries a `min_severity` byte. Entries below that
+threshold are **consumed from the ring but not emitted** — once you
+pick a verbosity, anything below it is gone for good. The intent is
+that log verbosity is a host-side choice, applied as the ring is
+drained. A noisy INFO stream can be filtered to WARN without changing
+any bootloader behaviour.
+
+##### Wire surfaces
+
+- **`CMD_LOG_STREAM_START` (`0x30`)** — session-gated. 1-byte arg
+  `min_severity`. Bootloader starts emitting `NOTIFY_LOG` on the next
+  tick; current ring contents are replayed first, then new entries as
+  they land. ACK `[opcode]`.
+- **`CMD_LOG_STREAM_STOP` (`0x31`)** — session-gated. No args.
+  Streaming halts immediately; ring contents are left intact for a
+  future START. ACK `[opcode]`.
+- **`NOTIFY_LOG` (`0xF2`)** — unsolicited. `[opcode, <entries…>]`.
+  One or more entries packed back-to-back; host parses entry-by-entry
+  using the length prefix in each header.
+
+##### Persistence across the BL → app jump
+
+Same as `bl_dtc`: BKPSRAM survives the jump. The app doesn't touch
+this region today, so the ring is preserved and the host can stream
+it out on the next visit to the bootloader.
+
+##### Bootloader-side call sites wired in this branch
+
+- `bl_log_info` on boot-up (with the latched reset cause)
+- `bl_log_info` on `CONNECT` (records the host protocol version)
+- `bl_log_info` / `bl_log_warn` / `bl_log_error` bracketing
+  `FLASH_ERASE` (scope, success, HW failure, rejection)
+- `bl_log_warn` on session watchdog timeout
+
+More call sites accrue in later branches as more code paths become
+interesting to observe.
 
 #### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
 

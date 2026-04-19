@@ -57,6 +57,8 @@ typedef enum {
 #define BL_CMD_FLASH_WRITE          0x11U  /* program bytes at addr (FLASHWORD-aligned) */
 #define BL_CMD_FLASH_READ_CRC       0x12U  /* CRC32 over [addr, addr+length) */
 #define BL_CMD_FLASH_VERIFY         0x13U  /* verify app + commit metadata record */
+#define BL_CMD_LOG_STREAM_START     0x30U  /* start emitting NOTIFY_LOG frames */
+#define BL_CMD_LOG_STREAM_STOP      0x31U  /* stop emitting NOTIFY_LOG frames */
 #define BL_CMD_DTC_READ             0x40U  /* return the full DTC table */
 #define BL_CMD_DTC_CLEAR            0x41U  /* erase every DTC entry */
 #define BL_CMD_RESET                0x60U  /* reset MCU in one of four modes */
@@ -65,6 +67,7 @@ typedef enum {
 /* ---- Unsolicited notifications (TYPE=NOTIFY, dst=HOST) ---- */
 #define BL_NOTIFY_HEARTBEAT         0xF0U  /* 1 Hz periodic alive-plus-state ping */
 #define BL_NOTIFY_DTC               0xF1U  /* new DTC recorded; not emitted on dedupe */
+#define BL_NOTIFY_LOG               0xF2U  /* batched log entries from the bl_log ring */
 
 /* ---- Protocol version advertised in CONNECT / DISCOVER replies ---- */
 #define BL_PROTO_VERSION_MAJOR      0U
