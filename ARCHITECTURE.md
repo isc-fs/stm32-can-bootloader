@@ -235,6 +235,8 @@ byte is the opcode. The Phase 2 set:
 | `0x33` | `LIVE_DATA_STOP`   | ✔  | –                                              | `[opcode]`; emitter paused                      |
 | `0x40` | `DTC_READ`       |    –    | –                                              | `[opcode, count_le16, entry_0, entry_1, …]` — multi-frame |
 | `0x41` | `DTC_CLEAR`      |   ✔    | –                                              | `[opcode]` — table is empty after this         |
+| `0x50` | `OB_READ`        |    –    | –                                              | `[opcode, <16-byte OB status record>]` — multi-frame |
+| `0x51` | `OB_APPLY_WRP`   |   ✔    | `[token_le32, sector_bitmap_le32?]`              | `[opcode]` emitted **before** reset (MCU resets on success) |
 | `0x60` | `RESET`          |    –    | `[mode]` (0..3)                                 | `[opcode]` emitted **before** reset             |
 | `0x61` | `JUMP`           |    –    | `[addr_le32]`                                   | `[opcode]` emitted **before** jump              |
 | `0x80` | `NVM_READ`       |   ✔    | `[key_le16]`                                    | `[opcode, len, value…]` on hit, NACK(NVM_NOT_FOUND) on miss |
@@ -385,14 +387,15 @@ rare dual-condition scenarios still surface the more actionable code.
 
 ##### Flags bitmask
 
-Bits 0–1 are live today. Bits 2–31 are reserved; later phases flip
-them on as WRP status (`feat/15`), pending DTCs (`feat/12`), encrypted
-session (`feat/19`), etc. become real.
+Bits 0–1 and 4 are live today. Bits 2–3 and 5–31 are reserved; later
+phases flip them on as pending DTCs (`feat/12`), encrypted session
+(`feat/19`), etc. become real.
 
 | Bit | Name                              | When it's on                                  |
 |:---:|-----------------------------------|-----------------------------------------------|
 |  0  | `BL_HEALTH_FLAG_SESSION_ACTIVE`    | A session is currently established            |
 |  1  | `BL_HEALTH_FLAG_VALID_APP_PRESENT` | `Bootloader_CheckApplication()` passes today |
+|  4  | `BL_HEALTH_FLAG_WRP_PROTECTED`     | Sector 0 (bootloader) is WRP-protected        |
 
 #### DTC table (DTC_READ, DTC_CLEAR, NOTIFY_DTC)
 
@@ -578,6 +581,7 @@ Flags bits (byte 14):
 |  1  | `BL_LIVE_FLAG_VALID_APP_PRESENT`    |
 |  2  | `BL_LIVE_FLAG_LOG_STREAMING`        |
 |  3  | `BL_LIVE_FLAG_LIVEDATA_STREAMING`   |
+|  4  | `BL_LIVE_FLAG_WRP_PROTECTED`        |
 
 ##### Rate
 
@@ -752,6 +756,76 @@ keys should start at `0x1000` to stay clear of the reserved range.
   Underlying flash HW failures log `BL_DTC_FLASH_HW` and return
   `NACK(BL_NACK_FLASH_HW)`. `value_len == 0` is a tombstone.
 
+#### Option bytes (OB_READ, OB_APPLY_WRP)
+
+Option bytes on the H7 control write-protection (WRP), read-protection
+level (RDP), brown-out reset (BOR) level, and a handful of user-config
+flags (IWDG mode, independent watchdog in stop / standby, etc.). The
+bootloader owns two opcodes over this surface: a read for host-side
+provisioning UIs, and a token-gated WRP apply.
+
+##### Status record layout (16 bytes, LE)
+
+| Off | Len | Field              | Meaning                                              |
+|:---:|:---:|--------------------|------------------------------------------------------|
+|  0  |  4  | `wrp_sector_mask`  | Bit N set = sector N currently WRP-protected         |
+|  4  |  4  | `user_config`      | Raw H7 user-config word (`FLASH_OPTSR_CUR.USERCONFIG`)|
+|  8  |  1  | `rdp_level`        | Raw `OB_RDP_LEVEL_*` byte                            |
+|  9  |  1  | `bor_level`        | Raw `OB_BOR_LEVEL_*` byte                            |
+| 10  |  2  | `reserved[2]`      | Zero                                                  |
+| 12  |  4  | `reserved_ext`     | Zero                                                  |
+
+The mask follows the **HAL convention** (bit set = protected), not the
+underlying `FLASH_WPSN_CUR1R` register (bit clear = protected). The
+bootloader converts on the way out so host tooling doesn't need to
+know about the inversion.
+
+##### OB_READ (0x50)
+
+Not session-gated — hosts call this before deciding whether to open a
+session, so a provisioning UI can decide up-front whether to issue
+`OB_APPLY_WRP`. ACK payload is 17 bytes (opcode + 16-byte record) →
+one FF + two CFs. HAL errors surface as `NACK(BL_NACK_FLASH_HW)`.
+
+##### OB_APPLY_WRP (0x51)
+
+Session-gated **and** token-gated. The first 4 bytes of the args must
+be the ASCII-LE token `BL_OB_APPLY_TOKEN = 0x00505257` ("WRP\0"). A
+missing or mismatched token produces `NACK(BL_NACK_OB_WRONG_TOKEN)` —
+no side effects. The token is a deliberate safety belt: on recent H7
+silicon WRP can only be cleared via a full chip erase through an
+external debugger, so an accidental apply during development would
+brick the part until it can be put on a programmer.
+
+Optional bytes 4..7 carry a little-endian `sector_bitmap`; when the
+host omits it, the handler defaults to `0x01` — protect sector 0 (the
+bootloader) only. Bit N maps to sector N (H7x3 single bank, 8
+sectors).
+
+On a valid request the handler:
+
+1. ACKs synchronously.
+2. Sleeps 10 ms so the ACK drains onto the wire.
+3. Calls `bl_obyte_apply_wrp()`, which unlocks the OB area, programs
+   the new WRP mask, and calls `HAL_FLASH_OB_Launch()` — the launch
+   itself resets the MCU, so the handler does not return on success.
+
+If the launch ever returns (a documented edge case on some families)
+the handler logs a `BL_DTC_FLASH_HW` DTC and emits
+`NACK(BL_NACK_FLASH_HW)` so the host isn't left waiting.
+
+##### Boot-time self-check
+
+After `bl_nvm_init`, `Bootloader_Init` checks
+`bl_obyte_is_sector_wrp_protected(0)`. If sector 0 isn't WRP-protected
+a warning line goes into the log ring:
+
+> `WRP: bootloader sector 0 not write-protected; run OB_APPLY_WRP to latch`
+
+The same check drives `BL_HEALTH_FLAG_WRP_PROTECTED` and
+`BL_LIVE_FLAG_WRP_PROTECTED`, so a host can gate its own apply
+decision on the flag without having to poll `OB_READ` first.
+
 ### Session watchdog
 
 Once `CONNECT` succeeds the bootloader arms a watchdog timer that
@@ -808,6 +882,7 @@ negligible on a 500 kbps bus.
 | `0x0C` | `BL_NACK_NO_VALID_APP`         | jump / reset-to-app with no valid image                 |
 | `0x0D` | `BL_NACK_NVM_NOT_FOUND`        | `NVM_READ` for a key with no live value                  |
 | `0x0E` | `BL_NACK_NVM_FULL`             | `NVM_WRITE` can't fit even after compaction              |
+| `0x0F` | `BL_NACK_OB_WRONG_TOKEN`       | `OB_APPLY_WRP` missing / wrong confirmation token        |
 | `0xFE` | `BL_NACK_UNSUPPORTED`          | unknown opcode, bad arg length, or unaligned address    |
 
 ### Protocol branch coverage
@@ -862,9 +937,6 @@ time and will be extended as new SRAM regions come into use.
 
 ## Future work (not implemented)
 
-- Option-byte read and `WRP` self-apply over the CAN protocol
-- NVM parameter region
-- DTC / audit log
 - Rollback slots (A/B)
 - Ed25519 signed firmware and replay counter
 - Session authentication and optional AES-CTR transport

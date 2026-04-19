@@ -35,6 +35,7 @@
 #define BL_LIVE_FLAG_VALID_APP_PRESENT    (1U << 1)
 #define BL_LIVE_FLAG_LOG_STREAMING        (1U << 2)
 #define BL_LIVE_FLAG_LIVEDATA_STREAMING   (1U << 3)
+#define BL_LIVE_FLAG_WRP_PROTECTED        (1U << 4)  /* sector 0 WRP'd in option bytes */
 
 /* ---- The snapshot (32 bytes, natural alignment) ---- */
 typedef struct {

@@ -11,6 +11,8 @@
 
 #include "bl_config.h"
 #include "bl_dtc.h"
+#include "bl_memmap.h"
+#include "bl_obyte.h"
 #include "bl_proto.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
@@ -71,6 +73,12 @@ uint32_t bl_health_flags(void)
     }
     if (Bootloader_CheckApplication() == 0U) {
         flags |= BL_HEALTH_FLAG_VALID_APP_PRESENT;
+    }
+    /* Report whether the bootloader's own sector is WRP'd. The host
+     * uses this to decide whether to issue OB_APPLY_WRP during
+     * provisioning. */
+    if (bl_obyte_is_sector_wrp_protected(0U)) {
+        flags |= BL_HEALTH_FLAG_WRP_PROTECTED;
     }
     return flags;
 }
