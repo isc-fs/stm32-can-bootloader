@@ -6,6 +6,33 @@ must honour to be flashed and launched by this bootloader.
 
 ---
 
+## Scope and security model
+
+The bootloader is shipped as an **internal tool** for closed-harness use
+— lab benches, development vehicles, and private test rigs where
+physical access to the CAN bus already implies authorisation. At
+`v1.0.0` the threat model is:
+
+- **In scope**: accidental corruption of the installed image (caught by
+  `FLASH_VERIFY`'s CRC32), accidental bootloader overwrite (prevented
+  by WRP once `OB_APPLY_WRP` has been issued), session stalls on a
+  crashed host (caught by the 30 s session watchdog), and observable
+  fault history for post-mortem (DTC table, log ring).
+- **Out of scope**: an attacker already on the CAN bus pushing
+  arbitrary firmware. There is no cryptographic signature on the image,
+  no session authentication, and no transport encryption. `CONNECT` is
+  open to anyone speaking the protocol.
+
+Cryptographic hardening was originally planned as Phase 5 of the
+roadmap (Ed25519 image signing, monotonic replay counter, challenge-
+response session auth, optional AES-CTR transport). It is **deferred
+at `v1.0.0`** and can be reactivated if the deployment model ever
+changes — e.g. if the bootloader ships on a public bus, a shared
+harness, or in a regulated market (UN-R155, ISO/SAE 21434). See
+[ROADMAP.md](ROADMAP.md) for the planned Phase 5 branch layout.
+
+---
+
 ## Target hardware
 
 - **MCU**: STM32H733ZGT6
@@ -937,9 +964,28 @@ time and will be extended as new SRAM regions come into use.
 
 ## Future work (not implemented)
 
-- Rollback slots (A/B)
-- Ed25519 signed firmware and replay counter
-- Session authentication and optional AES-CTR transport
+**Phase 5 — security (deferred at `v1.0.0`).** Planned branches live
+in [ROADMAP.md](ROADMAP.md); they stay on the roadmap with a
+`⏸ deferred` badge so the on-ramp is preserved. Summary of what each
+would add:
 
-Each of these will carve its own region from the current app space and will be
-documented here as it lands.
+- `feat/17-ed25519-sign` — Ed25519 image signing: a 64-byte signature
+  record in a dedicated FLASHWORD near `0x080FFF00`, boot-time verify
+  against a bootloader-embedded public key, `BL_NACK_SIGNATURE_INVALID`
+  on mismatch.
+- `feat/18-replay-counter` — monotonic `min_fw_version` stored in NVM
+  (reserved key `0x0003`); `FLASH_VERIFY` rejects downgrades.
+- `feat/19-challenge-response` — session authentication via a nonce
+  in the `CONNECT` ACK + a new `CMD_AUTH` opcode carrying a
+  Blake2b-MAC over the nonce.
+- `feat/20-encrypted-transport` — optional AES-128-CTR wrapping of
+  ISO-TP payloads behind a build-time feature flag.
+
+**Other deferred work.**
+
+- Rollback slots (A/B) — a second app region for safe-update semantics;
+  would require re-sizing sector 7 NVM or reclaiming flash from the
+  existing app region.
+
+Each item will carve (or reclaim) its own region from the current
+memory map and will be documented here as it lands.

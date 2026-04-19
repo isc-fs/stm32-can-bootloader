@@ -24,9 +24,10 @@ YAML_PATH = ROOT / ".github" / "roadmap.yaml"
 OUT_PATH = ROOT / "ROADMAP.md"
 
 BADGE = {
-    "closed": "✅ done",
-    "open":   "🔄 active",
-    None:     "🔜 planned",
+    "closed":   "✅ done",
+    "open":     "🔄 active",
+    "deferred": "⏸ deferred",
+    None:       "🔜 planned",
 }
 
 
@@ -74,12 +75,23 @@ def render_table(phases: list, sidequests: list, states: dict[str, str]) -> str:
         "|:---:|---|---|---|",
     ]
     for phase in phases:
-        items = [
-            f"{badge(states.get(b['name']))} `{b['name']}`"
-            for b in phase["branches"]
-        ]
+        is_deferred = bool(phase.get("deferred"))
+        items = []
+        for b in phase["branches"]:
+            # Deferred phases override per-branch tracking state so the
+            # badge column reads `⏸ deferred` uniformly — the intent
+            # ("this work is paused") matters more than the state of any
+            # individual tracking issue.
+            state = "deferred" if is_deferred else states.get(b["name"])
+            items.append(f"{badge(state)} `{b['name']}`")
+        title = phase["title"]
+        if is_deferred:
+            title += " _(deferred)_"
+        row_note = phase.get("note")
+        if row_note:
+            title += f"<br><sub>{row_note}</sub>"
         lines.append(
-            f"| {phase['number']} | {phase['title']} | "
+            f"| {phase['number']} | {title} | "
             f"{' · '.join(items)} | `{phase.get('tag', '—')}` |"
         )
     for sq in sidequests or []:
@@ -115,6 +127,11 @@ def render_mermaid(phases: list, states: dict[str, str]) -> str:
         "",
     ]
     for phase in phases:
+        # Deferred phases don't belong in the branch-flow diagram — they
+        # haven't been cut and aren't on the trajectory to the next tag.
+        # The table above already makes the deferred status explicit.
+        if phase.get("deferred"):
+            continue
         out.append(f"    %% Phase {phase['number']} — {phase['title']}")
         for b in phase["branches"]:
             name = b["name"]
