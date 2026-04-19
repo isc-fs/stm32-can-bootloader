@@ -32,6 +32,7 @@
 #include "bl_health.h"
 #include "bl_live.h"
 #include "bl_log.h"
+#include "bl_nvm.h"
 #include "bl_proto.h"
 
 /* USER CODE END Includes */
@@ -316,6 +317,12 @@ static void Bootloader_Init(void) {
 	 * demand in bl_live_tick, so no persistent state needs initialising
 	 * beyond this. */
 	bl_live_init();
+
+	/* Scan the NVM sector to find the append point and the current
+	 * highest seq. Safe to call even when sector 7 is fully erased —
+	 * in that case g_write_pos lands at 0 and future writes grow the
+	 * log from scratch. */
+	bl_nvm_init();
 
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */

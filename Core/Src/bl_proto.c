@@ -31,6 +31,7 @@
 #include "bl_live.h"
 #include "bl_log.h"
 #include "bl_memmap.h"
+#include "bl_nvm.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 
@@ -391,6 +392,84 @@ static void handle_dtc_clear(uint8_t peer)
     send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
+/* CMD_NVM_READ: [key_le16]. Session-gated — NVM is bootloader
+ * administration, not something random hosts should poke. Replies
+ * ACK [opcode, len, value…] on hit, NACK(NVM_NOT_FOUND) otherwise. */
+static void handle_nvm_read(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 2U) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint16_t key = (uint16_t)args[0] | ((uint16_t)args[1] << 8);
+
+    uint8_t value[BL_NVM_MAX_VALUE_LEN];
+    uint8_t value_len = 0U;
+    bl_nvm_status_t st = bl_nvm_read(key, value, sizeof(value), &value_len);
+    if (st == BL_NVM_NOT_FOUND) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_NVM_NOT_FOUND);
+        return;
+    }
+    if (st != BL_NVM_OK) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    /* Reply layout: [opcode, len, value…] */
+    uint8_t resp[2U + BL_NVM_MAX_VALUE_LEN];
+    resp[0] = BL_CMD_NVM_READ;
+    resp[1] = value_len;
+    memcpy(&resp[2], value, value_len);
+    send_ack(peer, resp, (uint16_t)(2U + value_len));
+}
+
+/* CMD_NVM_WRITE: [key_le16, value…]. Session-gated. `len == 0` (no
+ * value bytes) is a tombstone — subsequent NVM_READs for `key`
+ * return NVM_NOT_FOUND. Flash hardware errors are logged as a DTC
+ * so host-side dashboards catch the trend. */
+static void handle_nvm_write(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 2U) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint16_t key = (uint16_t)args[0] | ((uint16_t)args[1] << 8);
+    uint16_t value_len = (uint16_t)(args_len - 2U);
+    if (value_len > BL_NVM_MAX_VALUE_LEN) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    bl_nvm_status_t st = bl_nvm_write(key, &args[2], (uint8_t)value_len);
+    if (st == BL_NVM_FULL) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_NVM_FULL);
+        return;
+    }
+    if (st == BL_NVM_HARDWARE) {
+        bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_NVM_BASE);
+        bl_log_error("NVM write hw fail key=0x%04X", (unsigned int)key);
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_FLASH_HW);
+        return;
+    }
+    if (st != BL_NVM_OK) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_NVM_WRITE };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
 /* CMD_RESET: [mode]. Modes:
  *   0 = hard reset via NVIC_SystemReset
  *   1 = soft reset — same as 0 on this family, no distinction in HW
@@ -718,6 +797,12 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_DTC_CLEAR:
             handle_dtc_clear(peer);
+            break;
+        case BL_CMD_NVM_READ:
+            handle_nvm_read(peer, args, args_len);
+            break;
+        case BL_CMD_NVM_WRITE:
+            handle_nvm_write(peer, args, args_len);
             break;
         case BL_CMD_RESET:
             handle_reset(peer, args, args_len);
