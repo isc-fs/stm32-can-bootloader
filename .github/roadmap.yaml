@@ -15,7 +15,19 @@
 #               has landed, and a list of planned feat/fix branches. Each
 #               branch has a `name` (exact git branch name) and a short
 #               `scope` sentence used as the commit label in the mermaid
-#               diagram.
+#               diagram. Two optional phase-level fields:
+#                 deferred: true  — mark the phase as paused. The table
+#                                   shows `⏸ deferred` for every branch
+#                                   in the phase (regardless of tracking
+#                                   issue state) and appends `(deferred)`
+#                                   to the phase title. The mermaid
+#                                   diagram skips the phase entirely so
+#                                   the branch flow reads cleanly through
+#                                   the last active phase.
+#                 note: "..."     — free-form one-liner rendered as a
+#                                   sub-line under the phase title in the
+#                                   roadmap table. Useful alongside
+#                                   `deferred: true` to explain why.
 #   sidequests: off-roadmap branches kept in the diagram for history
 #               (e.g. workflow tooling that doesn't map to a bootloader
 #               phase). Rendered in the table but not in the main diagram
@@ -29,6 +41,13 @@ intro: |
   closes the phase once every branch in it has merged. Branch status
   badges (✅ / 🔄 / 🔜) are derived from each branch's tracking issue
   state in GitHub Issues.
+
+  **v1.0.0** is tagged at the end of Phase 4 — the bootloader is
+  feature-complete for its intended use (internal tool, closed
+  harness). Phase 5 (security) is deferred behind the `⏸ deferred`
+  badge; it'll be picked up if scope ever expands to shipping on a
+  public or shared network. The planned branch layout for Phase 5 is
+  kept below as the on-ramp for when that day comes.
 
 phases:
   - number: 1
@@ -79,7 +98,9 @@ phases:
 
   - number: 5
     title: Security
-    tag: v1.0.0
+    tag: '—'
+    deferred: true
+    note: "paused — internal tool, physical-perimeter security is sufficient for current scope; reactivate if deployment model changes"
     branches:
       - name: feat/17-ed25519-sign
         scope: Ed25519 signature verification (__firmware_sig + pubkey)

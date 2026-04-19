@@ -13,6 +13,13 @@ closes the phase once every branch in it has merged. Branch status
 badges (✅ / 🔄 / 🔜) are derived from each branch's tracking issue
 state in GitHub Issues.
 
+**v1.0.0** is tagged at the end of Phase 4 — the bootloader is
+feature-complete for its intended use (internal tool, closed
+harness). Phase 5 (security) is deferred behind the `⏸ deferred`
+badge; it'll be picked up if scope ever expands to shipping on a
+public or shared network. The planned branch layout for Phase 5 is
+kept below as the on-ramp for when that day comes.
+
 ## Phase summary
 
 | Phase | Title | Branches | Milestone tag |
@@ -21,7 +28,7 @@ state in GitHub Issues.
 | 2 | Protocol rewrite (classic CAN) | ✅ done `feat/5-frame-layout` · ✅ done `feat/6-isotp` · ✅ done `feat/7-core-opcodes` · ✅ done `feat/8-flash-opcodes` · ✅ done `feat/9-session-timeout` | `v0.2.0-protocol` |
 | 3 | Firmware contract & diagnostics | ✅ done `feat/10-firmware-info` · ✅ done `feat/11-heartbeat-health` · ✅ done `feat/12-dtc` · ✅ done `feat/13-log-stream` · ✅ done `feat/14-live-data` | `v0.3.0-diagnostics` |
 | 4 | Config & option bytes | ✅ done `feat/15-nvm` · ✅ done `feat/16-wrp-option-bytes` | `v0.4.0-config` |
-| 5 | Security | 🔜 planned `feat/17-ed25519-sign` · 🔜 planned `feat/18-replay-counter` · 🔜 planned `feat/19-challenge-response` · 🔜 planned `feat/20-encrypted-transport` | `v1.0.0` |
+| 5 | Security _(deferred)_<br><sub>paused — internal tool, physical-perimeter security is sufficient for current scope; reactivate if deployment model changes</sub> | ⏸ deferred `feat/17-ed25519-sign` · ⏸ deferred `feat/18-replay-counter` · ⏸ deferred `feat/19-challenge-response` · ⏸ deferred `feat/20-encrypted-transport` | `—` |
 | — | Workflow polish _(sidequest)_ | ✅ done `feat/2-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` · ✅ done `feat/3-roadmap` · ✅ done `feat/4-roadmap-header-config` | — |
 
 ## Branch diagram
@@ -104,27 +111,6 @@ gitGraph
     merge feat/16-wrp-option-bytes
     checkout main
     merge dev tag: "v0.4.0-config"
-    checkout dev
-
-    %% Phase 5 — Security
-    branch feat/17-ed25519-sign
-    commit id: "○ Ed25519 signature verification (__firmware_sig + pubkey)"
-    checkout dev
-    merge feat/17-ed25519-sign
-    branch feat/18-replay-counter
-    commit id: "○ Monotonic counter with downgrade reject"
-    checkout dev
-    merge feat/18-replay-counter
-    branch feat/19-challenge-response
-    commit id: "○ Session auth (CMD_CHALLENGE / CMD_CHALLENGE_RESP)"
-    checkout dev
-    merge feat/19-challenge-response
-    branch feat/20-encrypted-transport
-    commit id: "○ Optional AES-128-CTR (BL_FEATURE_ENCRYPTED_TRANSPORT)"
-    checkout dev
-    merge feat/20-encrypted-transport
-    checkout main
-    merge dev tag: "v1.0.0"
     checkout dev
 
 ```
