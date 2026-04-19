@@ -19,8 +19,9 @@
 /* ---- Internal helpers ---- */
 
 /* True when [start, start + length) lies within the writable app range
- * [BL_APP_BASE, BL_APP_METADATA_ADDR). Zero-length ranges and overflow
- * are rejected. */
+ * [BL_APP_BASE, BL_APP_END + 1). Zero-length ranges and overflow are
+ * rejected. This excludes sector 0 (bootloader, WRP), sector 7 (NVM +
+ * metadata — bl_nvm owns that), and anything outside the flash map. */
 bool bl_flash_range_is_writable(uint32_t start, uint32_t length)
 {
     if (length == 0U) {
@@ -30,23 +31,25 @@ bool bl_flash_range_is_writable(uint32_t start, uint32_t length)
     if (end < start) {  /* overflow */
         return false;
     }
-    return (start >= BL_APP_BASE) && (end <= BL_APP_METADATA_ADDR);
+    return (start >= BL_APP_BASE) && (end <= (BL_APP_END + 1U));
 }
 
 /* Classify a range error — returns the right status when the caller
  * already knows the range isn't writable. Separates "protected because
- * it touches the BL / metadata" from "just plain out of range". */
+ * it touches the BL / NVM / metadata" from "just plain out of range". */
 static bl_flash_status_t classify_range_error(uint32_t start, uint32_t length)
 {
-    /* Fully outside the whole app region → out of bounds. */
+    /* Fully outside the whole flash (or zero-length / overflow) →
+     * out of bounds. */
     uint32_t end = start + length;
     if (length == 0U || end < start
-        || start < BL_APP_BASE
-        || end > (BL_APP_BASE + BL_APP_SIZE + BL_APP_METADATA_SIZE)) {
+        || start < BL_FLASH_BASE
+        || end > (BL_FLASH_BASE + BL_FLASH_SIZE)) {
         return BL_FLASH_ERR_OUT_OF_BOUNDS;
     }
-    /* Overlaps sector 0 (bootloader) or the metadata FLASHWORD — the
-     * writable-range check rejects both; callers see this as protected. */
+    /* Overlaps sector 0 (bootloader) or sector 7 (NVM + metadata) —
+     * either way, the app-writable range check rejected it. Callers
+     * see this as protected. */
     return BL_FLASH_ERR_PROTECTED;
 }
 
