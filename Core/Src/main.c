@@ -30,6 +30,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_health.h"
+#include "bl_log.h"
 #include "bl_proto.h"
 
 /* USER CODE END Includes */
@@ -302,6 +303,14 @@ static void Bootloader_Init(void) {
 	 * the magic so a power-cycled BKPSRAM starts from a clean slate. */
 	bl_dtc_init();
 
+	/* Bring up the log ring in Backup SRAM (adjacent to the DTC table).
+	 * Same persistence semantics — a host that reconnects after a crash
+	 * can replay the last ~1 KB of bootloader log by issuing
+	 * LOG_STREAM_START. */
+	bl_log_init();
+	bl_log_info("bootloader up (reset_cause=%u)",
+	            (unsigned int)bl_health_reset_cause());
+
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */
 	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
@@ -378,6 +387,7 @@ static void Bootloader_MainLoop(void) {
 		uint32_t tick_now = HAL_GetTick();
 		bl_proto_tick(tick_now);
 		bl_health_tick(tick_now);
+		bl_log_tick(tick_now);
 
 		/* Auto-jump window: if we booted with a valid app and nobody
 		 * has talked to us before the deadline, hand control over. */
