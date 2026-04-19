@@ -28,6 +28,7 @@
 
 #include "bl_memmap.h"
 #include "bl_config.h"
+#include "bl_dtc.h"
 #include "bl_health.h"
 #include "bl_proto.h"
 
@@ -295,6 +296,11 @@ static void Bootloader_Init(void) {
 	 * RCC->RSR. Health reporting depends on this surviving the rest of
 	 * the boot sequence. */
 	bl_health_init();
+
+	/* Bring up the DTC table in Backup SRAM. Runs after bl_health_init
+	 * so bl_dtc_log can timestamp entries against uptime. Also validates
+	 * the magic so a power-cycled BKPSRAM starts from a clean slate. */
+	bl_dtc_init();
 
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */

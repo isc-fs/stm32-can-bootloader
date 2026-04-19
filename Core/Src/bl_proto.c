@@ -23,6 +23,7 @@
 #include "bl_proto.h"
 
 #include "bl_config.h"
+#include "bl_dtc.h"
 #include "bl_flash.h"
 #include "bl_fwinfo.h"
 #include "bl_health.h"
@@ -67,6 +68,12 @@ static void session_touch_activity(void)
 
 static void session_timeout(void)
 {
+    /* Record the event before tearing the session down — bl_dtc_log
+     * reads the current session state (via bl_health_flags) so the
+     * timeline in the health record and any NOTIFY_DTC carries the
+     * right "was in session" semantics. */
+    bl_dtc_log(BL_DTC_SESSION_TIMEOUT, BL_DTC_SEV_WARN, 0U);
+
     g_session_active = false;
     bl_isotp_rx_init(&g_rx);
 
@@ -274,6 +281,36 @@ static void handle_get_health(uint8_t peer)
     send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
+/* CMD_DTC_READ: no args. Returns the full DTC table as
+ *   [opcode, count_le16, entry_0, entry_1, …]
+ * Up to 32 entries × 20 bytes + 3 bytes of header = 643 bytes worst
+ * case, well inside the 1024 B reassembly buffer. Not session-gated —
+ * diagnostic reads should always be possible, even before CONNECT. */
+static void handle_dtc_read(uint8_t peer)
+{
+    uint8_t resp[1U + 2U + BL_DTC_MAX_ENTRIES * sizeof(bl_dtc_entry_t)];
+    resp[0] = BL_CMD_DTC_READ;
+
+    uint16_t payload_len = 0U;
+    bl_dtc_serialize(&resp[1], &payload_len);
+
+    send_ack(peer, resp, (uint16_t)(1U + payload_len));
+}
+
+/* CMD_DTC_CLEAR: no args. Wipes the DTC table. Session-gated because
+ * erasing fault history is destructive. */
+static void handle_dtc_clear(uint8_t peer)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_DTC_CLEAR, BL_NACK_BAD_SESSION);
+        return;
+    }
+    bl_dtc_clear();
+
+    uint8_t resp[1] = { BL_CMD_DTC_CLEAR };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
 /* CMD_RESET: [mode]. Modes:
  *   0 = hard reset via NVIC_SystemReset
  *   1 = soft reset — same as 0 on this family, no distinction in HW
@@ -381,6 +418,9 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
     uint32_t sectors = 0U;
     bl_flash_status_t st = bl_flash_erase(start, length, &sectors);
     if (st != BL_FLASH_OK) {
+        if (st == BL_FLASH_ERR_HARDWARE) {
+            bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, start);
+        }
         send_nack(peer, BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
         return;
     }
@@ -410,6 +450,9 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
 
     bl_flash_status_t st = bl_flash_write(addr, data, data_len);
     if (st != BL_FLASH_OK) {
+        if (st == BL_FLASH_ERR_HARDWARE) {
+            bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, addr);
+        }
         send_nack(peer, BL_CMD_FLASH_WRITE, flash_status_to_nack(st));
         return;
     }
@@ -488,6 +531,9 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
                                                     expected_crc,
                                                     expected_version);
     if (st != BL_FLASH_OK) {
+        if (st == BL_FLASH_ERR_HARDWARE) {
+            bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_APP_METADATA_ADDR);
+        }
         send_nack(peer, BL_CMD_FLASH_VERIFY, flash_status_to_nack(st));
         return;
     }
@@ -564,6 +610,12 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_FLASH_VERIFY:
             handle_flash_verify(peer, args, args_len);
+            break;
+        case BL_CMD_DTC_READ:
+            handle_dtc_read(peer);
+            break;
+        case BL_CMD_DTC_CLEAR:
+            handle_dtc_clear(peer);
             break;
         case BL_CMD_RESET:
             handle_reset(peer, args, args_len);
