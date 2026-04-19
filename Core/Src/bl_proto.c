@@ -31,6 +31,8 @@
 #include "bl_live.h"
 #include "bl_log.h"
 #include "bl_memmap.h"
+#include "bl_nvm.h"
+#include "bl_obyte.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 
@@ -391,6 +393,84 @@ static void handle_dtc_clear(uint8_t peer)
     send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
+/* CMD_NVM_READ: [key_le16]. Session-gated — NVM is bootloader
+ * administration, not something random hosts should poke. Replies
+ * ACK [opcode, len, value…] on hit, NACK(NVM_NOT_FOUND) otherwise. */
+static void handle_nvm_read(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 2U) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint16_t key = (uint16_t)args[0] | ((uint16_t)args[1] << 8);
+
+    uint8_t value[BL_NVM_MAX_VALUE_LEN];
+    uint8_t value_len = 0U;
+    bl_nvm_status_t st = bl_nvm_read(key, value, sizeof(value), &value_len);
+    if (st == BL_NVM_NOT_FOUND) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_NVM_NOT_FOUND);
+        return;
+    }
+    if (st != BL_NVM_OK) {
+        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    /* Reply layout: [opcode, len, value…] */
+    uint8_t resp[2U + BL_NVM_MAX_VALUE_LEN];
+    resp[0] = BL_CMD_NVM_READ;
+    resp[1] = value_len;
+    memcpy(&resp[2], value, value_len);
+    send_ack(peer, resp, (uint16_t)(2U + value_len));
+}
+
+/* CMD_NVM_WRITE: [key_le16, value…]. Session-gated. `len == 0` (no
+ * value bytes) is a tombstone — subsequent NVM_READs for `key`
+ * return NVM_NOT_FOUND. Flash hardware errors are logged as a DTC
+ * so host-side dashboards catch the trend. */
+static void handle_nvm_write(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 2U) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint16_t key = (uint16_t)args[0] | ((uint16_t)args[1] << 8);
+    uint16_t value_len = (uint16_t)(args_len - 2U);
+    if (value_len > BL_NVM_MAX_VALUE_LEN) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    bl_nvm_status_t st = bl_nvm_write(key, &args[2], (uint8_t)value_len);
+    if (st == BL_NVM_FULL) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_NVM_FULL);
+        return;
+    }
+    if (st == BL_NVM_HARDWARE) {
+        bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_NVM_BASE);
+        bl_log_error("NVM write hw fail key=0x%04X", (unsigned int)key);
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_FLASH_HW);
+        return;
+    }
+    if (st != BL_NVM_OK) {
+        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_NVM_WRITE };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
 /* CMD_RESET: [mode]. Modes:
  *   0 = hard reset via NVIC_SystemReset
  *   1 = soft reset — same as 0 on this family, no distinction in HW
@@ -664,6 +744,82 @@ static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
     Bootloader_JumpToApplication();  /* never returns on success */
 }
 
+/* CMD_OB_READ: no args. Returns a 16-byte bl_ob_status_t snapshot. Not
+ * session-gated — hosts need to be able to probe the current WRP mask
+ * before opening a session so the provisioning UI can decide whether
+ * OB_APPLY_WRP is needed. ACK payload is 17 bytes (opcode + record) →
+ * one FF + two CFs over ISO-TP. */
+static void handle_ob_read(uint8_t peer)
+{
+    bl_ob_status_t status;
+    if (bl_obyte_read(&status) != BL_OB_OK) {
+        send_nack(peer, BL_CMD_OB_READ, BL_NACK_FLASH_HW);
+        return;
+    }
+
+    uint8_t resp[1U + BL_OB_STATUS_SIZE];
+    resp[0] = BL_CMD_OB_READ;
+    memcpy(&resp[1], &status, BL_OB_STATUS_SIZE);
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_OB_APPLY_WRP: [token_le32, sector_bitmap_le32?]. Session-gated.
+ *
+ * This is a destructive, non-reversible operation on recent H7 silicon
+ * (WRP is cleared only by a full chip erase via external debugger) so
+ * the handler insists on the 4-byte BL_OB_APPLY_TOKEN confirmation
+ * prefix. A stray frame without the token earns NACK(OB_WRONG_TOKEN),
+ * never causes an accidental brick.
+ *
+ * The sector bitmap is optional. When omitted, the default is 0x01 —
+ * protect the bootloader's own sector only, which is the common case
+ * during provisioning. Bit N maps to sector N (H7x3 single-bank, 8
+ * sectors).
+ *
+ * On success bl_obyte_apply_wrp calls HAL_FLASH_OB_Launch which resets
+ * the MCU and never returns. The ACK is sent first with a short drain
+ * delay; if the launch ever does return (documented edge case) we emit
+ * NACK(FLASH_HW) so the host isn't left waiting. */
+static void handle_ob_apply_wrp(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 4U) {
+        send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_OB_WRONG_TOKEN);
+        return;
+    }
+
+    uint32_t token = read_le32(&args[0]);
+    if (token != BL_OB_APPLY_TOKEN) {
+        bl_log_warn("OB_APPLY_WRP bad token 0x%08X", (unsigned int)token);
+        send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_OB_WRONG_TOKEN);
+        return;
+    }
+
+    uint32_t sector_bitmap = 0x01U;  /* default: protect bootloader sector */
+    if (args_len >= 8U) {
+        sector_bitmap = read_le32(&args[4]);
+    }
+
+    bl_log_warn("OB_APPLY_WRP committing mask=0x%08X (reset imminent)",
+                (unsigned int)sector_bitmap);
+
+    uint8_t resp[1] = { BL_CMD_OB_APPLY_WRP };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+
+    /* Drain the ACK before HAL_FLASH_OB_Launch yanks the MCU. */
+    HAL_Delay(10U);
+
+    bl_ob_rc_t rc = bl_obyte_apply_wrp(sector_bitmap);
+    /* Only reachable if OB_Launch didn't reset — HAL flagged a program
+     * failure. The session is gone either way; flag it to the host. */
+    bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, (uint32_t)rc);
+    bl_log_error("OB_APPLY_WRP HAL failure rc=%d", (int)rc);
+    send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_FLASH_HW);
+}
+
 /* Dispatch a completed ISO-TP message. byte 0 = opcode, remaining bytes
  * = opcode-specific args. Anything unknown earns NACK(UNSUPPORTED). */
 static void handle_message(uint8_t peer,
@@ -718,6 +874,18 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_DTC_CLEAR:
             handle_dtc_clear(peer);
+            break;
+        case BL_CMD_NVM_READ:
+            handle_nvm_read(peer, args, args_len);
+            break;
+        case BL_CMD_NVM_WRITE:
+            handle_nvm_write(peer, args, args_len);
+            break;
+        case BL_CMD_OB_READ:
+            handle_ob_read(peer);
+            break;
+        case BL_CMD_OB_APPLY_WRP:
+            handle_ob_apply_wrp(peer, args, args_len);
             break;
         case BL_CMD_RESET:
             handle_reset(peer, args, args_len);

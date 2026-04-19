@@ -42,7 +42,8 @@
  * 32-bit health record. Higher bits reserved for later phases.  ---- */
 #define BL_HEALTH_FLAG_SESSION_ACTIVE       (1U << 0)
 #define BL_HEALTH_FLAG_VALID_APP_PRESENT    (1U << 1)
-/* bits 2..31: reserved (WRP status, pending DTC, encrypted session, …) */
+#define BL_HEALTH_FLAG_WRP_PROTECTED        (1U << 4)  /* sector 0 WRP'd in option bytes */
+/* bits 2..3, 5..31: reserved (pending DTC, encrypted session, …) */
 
 /* ---- Health record returned by CMD_GET_HEALTH (32 bytes) ---- */
 #define BL_HEALTH_RECORD_SIZE   32U

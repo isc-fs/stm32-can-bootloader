@@ -32,6 +32,8 @@
 #include "bl_health.h"
 #include "bl_live.h"
 #include "bl_log.h"
+#include "bl_nvm.h"
+#include "bl_obyte.h"
 #include "bl_proto.h"
 
 /* USER CODE END Includes */
@@ -316,6 +318,22 @@ static void Bootloader_Init(void) {
 	 * demand in bl_live_tick, so no persistent state needs initialising
 	 * beyond this. */
 	bl_live_init();
+
+	/* Scan the NVM sector to find the append point and the current
+	 * highest seq. Safe to call even when sector 7 is fully erased —
+	 * in that case g_write_pos lands at 0 and future writes grow the
+	 * log from scratch. */
+	bl_nvm_init();
+
+	/* Boot-time WRP self-check. Production-provisioned units are
+	 * expected to have sector 0 (the bootloader) WRP-protected; a
+	 * missing latch is not fatal but it earns a WARN log line so the
+	 * host's log stream flags it on connect. The WRP_PROTECTED flag in
+	 * both health and live-data reflects this same check, so a host
+	 * can gate OB_APPLY_WRP on the flag. */
+	if (!bl_obyte_is_sector_wrp_protected(0U)) {
+		bl_log_warn("WRP: bootloader sector 0 not write-protected; run OB_APPLY_WRP to latch");
+	}
 
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */

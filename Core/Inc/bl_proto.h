@@ -63,8 +63,12 @@ typedef enum {
 #define BL_CMD_LIVE_DATA_STOP       0x33U  /* stop NOTIFY_LIVE_DATA stream */
 #define BL_CMD_DTC_READ             0x40U  /* return the full DTC table */
 #define BL_CMD_DTC_CLEAR            0x41U  /* erase every DTC entry */
+#define BL_CMD_OB_READ              0x50U  /* read current option-byte snapshot */
+#define BL_CMD_OB_APPLY_WRP         0x51U  /* apply WRP; triggers system reset */
 #define BL_CMD_RESET                0x60U  /* reset MCU in one of four modes */
 #define BL_CMD_JUMP                 0x61U  /* jump directly to the installed application */
+#define BL_CMD_NVM_READ             0x80U  /* read a value from the NVM store */
+#define BL_CMD_NVM_WRITE            0x81U  /* append/update/tombstone a value in the NVM store */
 
 /* ---- Unsolicited notifications (TYPE=NOTIFY, dst=HOST) ---- */
 #define BL_NOTIFY_HEARTBEAT         0xF0U  /* 1 Hz periodic alive-plus-state ping */
@@ -100,6 +104,9 @@ typedef enum {
 #define BL_NACK_TRANSPORT_ERROR     0x0AU  /* ISO-TP framing error (bad PCI/seq/overflow) */
 #define BL_NACK_PROTOCOL_VERSION    0x0BU  /* host and device disagree on protocol major */
 #define BL_NACK_NO_VALID_APP        0x0CU  /* tried to jump / reset-to-app but no valid image */
+#define BL_NACK_NVM_NOT_FOUND       0x0DU  /* NVM_READ for a key with no live value */
+#define BL_NACK_NVM_FULL            0x0EU  /* NVM store can't accept another write (post-compaction) */
+#define BL_NACK_OB_WRONG_TOKEN      0x0FU  /* OB_APPLY_WRP missing/incorrect confirmation token */
 #define BL_NACK_UNSUPPORTED         0xFEU  /* unknown opcode, unknown arg, or bad arg length */
 
 /* ---- Decoded frame ID ---- */

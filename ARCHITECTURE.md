@@ -21,21 +21,25 @@ must honour to be flashed and launched by this bootloader.
 
 All addresses are expressed in the STM32 flash alias `0x0800_0000`.
 
-| Sector | Start       | End         | Size   | Purpose                              |
-|:------:|-------------|-------------|:------:|--------------------------------------|
-| 0      | `0x08000000`| `0x0801FFFF`| 128 KB | **Bootloader** — WRP-protected       |
-| 1–7    | `0x08020000`| `0x080FFFFF`| 896 KB | **Application**                      |
+| Sector | Start        | End          | Size   | Purpose                                  |
+|:------:|--------------|--------------|:------:|------------------------------------------|
+|   0    | `0x08000000` | `0x0801FFFF` | 128 KB | **Bootloader** — WRP-protected            |
+|  1–6   | `0x08020000` | `0x080DFFFF` | 768 KB | **Application**                           |
+|   7    | `0x080E0000` | `0x080FFFDF` | ≈128 KB – 32 B | **NVM** — log-structured key-value store |
+|        | `0x080FFFE0` | `0x080FFFFF` | 32 B   | Application metadata FLASHWORD            |
 
-The last 32 bytes of the application region, `0x080FFFE0`–`0x080FFFFF`, hold a single
-FLASHWORD with the application metadata record (see below).
-
-Regions for NVM parameters, DTC storage and option-byte staging are intentionally
-**not** carved out yet — they will be defined when Phases 3–4 of the roadmap are
-reached. Until then, the whole span `0x08020000`–`0x080FFFE0` is available to the
-application image.
+DTC storage and the log ring live in Backup SRAM (`0x38800000`), not
+flash — see the DTC and Log-streaming subsections under the CAN
+protocol heading. Option-byte staging lives in the H7's option-byte
+region and is still to come in `feat/16-wrp-option-bytes`.
 
 All flash constants used by the bootloader live in
 [`Core/Inc/bl_memmap.h`](Core/Inc/bl_memmap.h); C code must never re-declare them.
+
+**Breaking change in Phase 4**: carving sector 7 for NVM reduced the
+maximum application image size from 896 KB to 768 KB. Host tools and
+app linker scripts that assumed the larger range need updating; apps
+that fit comfortably below 768 KB continue to flash unchanged.
 
 ---
 
@@ -231,8 +235,12 @@ byte is the opcode. The Phase 2 set:
 | `0x33` | `LIVE_DATA_STOP`   | ✔  | –                                              | `[opcode]`; emitter paused                      |
 | `0x40` | `DTC_READ`       |    –    | –                                              | `[opcode, count_le16, entry_0, entry_1, …]` — multi-frame |
 | `0x41` | `DTC_CLEAR`      |   ✔    | –                                              | `[opcode]` — table is empty after this         |
+| `0x50` | `OB_READ`        |    –    | –                                              | `[opcode, <16-byte OB status record>]` — multi-frame |
+| `0x51` | `OB_APPLY_WRP`   |   ✔    | `[token_le32, sector_bitmap_le32?]`              | `[opcode]` emitted **before** reset (MCU resets on success) |
 | `0x60` | `RESET`          |    –    | `[mode]` (0..3)                                 | `[opcode]` emitted **before** reset             |
 | `0x61` | `JUMP`           |    –    | `[addr_le32]`                                   | `[opcode]` emitted **before** jump              |
+| `0x80` | `NVM_READ`       |   ✔    | `[key_le16]`                                    | `[opcode, len, value…]` on hit, NACK(NVM_NOT_FOUND) on miss |
+| `0x81` | `NVM_WRITE`      |   ✔    | `[key_le16, value…]` (≤ 20 B value)              | `[opcode]`; `value_len == 0` is a tombstone    |
 
 The "Session" column marks opcodes that refuse to run unless the host
 has issued a successful `CONNECT`. Flash programming is gated; identity
@@ -379,14 +387,15 @@ rare dual-condition scenarios still surface the more actionable code.
 
 ##### Flags bitmask
 
-Bits 0–1 are live today. Bits 2–31 are reserved; later phases flip
-them on as WRP status (`feat/15`), pending DTCs (`feat/12`), encrypted
-session (`feat/19`), etc. become real.
+Bits 0–1 and 4 are live today. Bits 2–3 and 5–31 are reserved; later
+phases flip them on as pending DTCs (`feat/12`), encrypted session
+(`feat/19`), etc. become real.
 
 | Bit | Name                              | When it's on                                  |
 |:---:|-----------------------------------|-----------------------------------------------|
 |  0  | `BL_HEALTH_FLAG_SESSION_ACTIVE`    | A session is currently established            |
 |  1  | `BL_HEALTH_FLAG_VALID_APP_PRESENT` | `Bootloader_CheckApplication()` passes today |
+|  4  | `BL_HEALTH_FLAG_WRP_PROTECTED`     | Sector 0 (bootloader) is WRP-protected        |
 
 #### DTC table (DTC_READ, DTC_CLEAR, NOTIFY_DTC)
 
@@ -572,6 +581,7 @@ Flags bits (byte 14):
 |  1  | `BL_LIVE_FLAG_VALID_APP_PRESENT`    |
 |  2  | `BL_LIVE_FLAG_LOG_STREAMING`        |
 |  3  | `BL_LIVE_FLAG_LIVEDATA_STREAMING`   |
+|  4  | `BL_LIVE_FLAG_WRP_PROTECTED`        |
 
 ##### Rate
 
@@ -608,11 +618,12 @@ proxies on a separate opcode, so the two streams don't interleave.
 
 #### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
 
-All four operate on the writable range `[BL_APP_BASE, BL_APP_METADATA_ADDR)`.
-Any address outside that range earns `NACK(BL_NACK_OUT_OF_BOUNDS)` or
-`NACK(BL_NACK_PROTECTED_ADDR)` depending on whether the target is merely
-out-of-bounds or overlaps the bootloader / metadata. Flash hardware
-errors surface as `NACK(BL_NACK_FLASH_HW)`.
+All four operate on the writable app range `[BL_APP_BASE, BL_APP_END + 1)`
+= `[0x08020000, 0x080E0000)` (sectors 1–6 after Phase 4). Any address
+outside that range earns `NACK(BL_NACK_OUT_OF_BOUNDS)` or
+`NACK(BL_NACK_PROTECTED_ADDR)` depending on whether the target is
+merely out-of-bounds or overlaps the bootloader / NVM / metadata.
+Flash hardware errors surface as `NACK(BL_NACK_FLASH_HW)`.
 
 **FLASH_ERASE** requires the range to be sector-aligned — both
 `start` and `length` must be multiples of `BL_FLASH_SECTOR_SIZE`
@@ -672,6 +683,149 @@ Jumps directly to `addr_le32`. Phase-2 policy: the address must equal
 Out-of-range addresses earn `NACK(BL_NACK_OUT_OF_BOUNDS)`; a corrupt
 or missing app earns `NACK(BL_NACK_NO_VALID_APP)`.
 
+#### NVM store (NVM_READ, NVM_WRITE)
+
+The bootloader keeps a log-structured key-value store in flash sector
+7, starting at `0x080E0000` and running up to (but not including) the
+32-byte application metadata FLASHWORD at `0x080FFFE0`. That leaves
+`BL_NVM_SIZE` = 128 KB − 32 B of usable space, enough for ≈4095
+entries before needing compaction. Both opcodes are **session-gated**:
+NVM is bootloader administration, not something random hosts should
+poke.
+
+##### Entry layout (32 bytes, one FLASHWORD)
+
+| Offset | Size | Field         | Notes                                                  |
+|:---:|:---:|----------------|--------------------------------------------------------|
+|  0  |  2  | `magic`        | `BL_NVM_ENTRY_MAGIC = 0xABCD` for live entries          |
+|  2  |  2  | `key`          | 16-bit vendor identifier                                |
+|  4  |  1  | `len`          | 0..20; `len == 0` is a logical tombstone                |
+|  5  |  3  | `reserved`     | Zero                                                    |
+|  8  |  4  | `seq`          | Monotonic; highest-seq wins per key                    |
+| 12  | 20  | `value`        | Up to 20 bytes                                          |
+
+##### Write model
+
+Writes are **append-only**: a new value programs one fresh FLASHWORD at
+the next empty slot, tagged with `seq = max_seen + 1`. Reads are a
+linear scan of the sector that returns the value of the highest-seq
+entry for a given key, or `NVM_NOT_FOUND` when the latest entry is a
+tombstone. Each FLASHWORD can be programmed only once between erases
+(the H7 ECC constraint), so the append approach is the natural fit.
+
+##### Compaction
+
+When the sector fills (~4095 writes), the next `bl_nvm_write` triggers
+**in-place compaction**:
+
+1. Scan the sector, dedup to the latest live entry per key in a RAM
+   buffer (capped at `BL_NVM_MAX_LIVE_ENTRIES` = 128 unique keys).
+2. Snapshot the app metadata FLASHWORD into RAM.
+3. Erase sector 7.
+4. Program the live entries at the head of the sector with fresh
+   `seq` values (1..N).
+5. Program the new incoming write as entry N+1.
+6. Program the app metadata FLASHWORD back to `0x080FFFE0`.
+
+If step 6 fails (or power is lost between steps 3 and 6), the app
+metadata is left erased and `Bootloader_CheckApplication` rejects the
+app on the next boot — recoverable by re-flashing the app via the
+host. The NVM contents themselves are lost in the worst case. A
+ping-pong two-sector scheme could eliminate that window if stronger
+guarantees become a requirement.
+
+##### Reserved keys
+
+Well-known keys the bootloader claims for its own use. User / app
+keys should start at `0x1000` to stay clear of the reserved range.
+
+| Key      | Name                      | Notes                                          |
+|:---:|-----------------------------|-----------------------------------------------|
+| `0x0001` | `BL_NVM_KEY_NODE_ID`       | 1-byte override for compile-time `BL_NODE_ID`; consumed by a future follow-up branch |
+| `0x0002` | `BL_NVM_KEY_CAN_BITRATE`   | Reserved — future CAN bitrate preference        |
+
+##### Wire surfaces
+
+- **`CMD_NVM_READ` (`0x80`)** — args `[key_le16]`. Session-gated.
+  On hit: ACK `[opcode, len, value…]`. On miss (key never written,
+  latest write is a tombstone, or value longer than the caller's
+  buffer): `NACK(BL_NACK_NVM_NOT_FOUND)`.
+- **`CMD_NVM_WRITE` (`0x81`)** — args `[key_le16, value…]`. Session-
+  gated. `value_len > BL_NVM_MAX_VALUE_LEN` (20 B): `NACK(UNSUPPORTED)`.
+  Sector full even after compaction: `NACK(BL_NACK_NVM_FULL)`.
+  Underlying flash HW failures log `BL_DTC_FLASH_HW` and return
+  `NACK(BL_NACK_FLASH_HW)`. `value_len == 0` is a tombstone.
+
+#### Option bytes (OB_READ, OB_APPLY_WRP)
+
+Option bytes on the H7 control write-protection (WRP), read-protection
+level (RDP), brown-out reset (BOR) level, and a handful of user-config
+flags (IWDG mode, independent watchdog in stop / standby, etc.). The
+bootloader owns two opcodes over this surface: a read for host-side
+provisioning UIs, and a token-gated WRP apply.
+
+##### Status record layout (16 bytes, LE)
+
+| Off | Len | Field              | Meaning                                              |
+|:---:|:---:|--------------------|------------------------------------------------------|
+|  0  |  4  | `wrp_sector_mask`  | Bit N set = sector N currently WRP-protected         |
+|  4  |  4  | `user_config`      | Raw H7 user-config word (`FLASH_OPTSR_CUR.USERCONFIG`)|
+|  8  |  1  | `rdp_level`        | Raw `OB_RDP_LEVEL_*` byte                            |
+|  9  |  1  | `bor_level`        | Raw `OB_BOR_LEVEL_*` byte                            |
+| 10  |  2  | `reserved[2]`      | Zero                                                  |
+| 12  |  4  | `reserved_ext`     | Zero                                                  |
+
+The mask follows the **HAL convention** (bit set = protected), not the
+underlying `FLASH_WPSN_CUR1R` register (bit clear = protected). The
+bootloader converts on the way out so host tooling doesn't need to
+know about the inversion.
+
+##### OB_READ (0x50)
+
+Not session-gated — hosts call this before deciding whether to open a
+session, so a provisioning UI can decide up-front whether to issue
+`OB_APPLY_WRP`. ACK payload is 17 bytes (opcode + 16-byte record) →
+one FF + two CFs. HAL errors surface as `NACK(BL_NACK_FLASH_HW)`.
+
+##### OB_APPLY_WRP (0x51)
+
+Session-gated **and** token-gated. The first 4 bytes of the args must
+be the ASCII-LE token `BL_OB_APPLY_TOKEN = 0x00505257` ("WRP\0"). A
+missing or mismatched token produces `NACK(BL_NACK_OB_WRONG_TOKEN)` —
+no side effects. The token is a deliberate safety belt: on recent H7
+silicon WRP can only be cleared via a full chip erase through an
+external debugger, so an accidental apply during development would
+brick the part until it can be put on a programmer.
+
+Optional bytes 4..7 carry a little-endian `sector_bitmap`; when the
+host omits it, the handler defaults to `0x01` — protect sector 0 (the
+bootloader) only. Bit N maps to sector N (H7x3 single bank, 8
+sectors).
+
+On a valid request the handler:
+
+1. ACKs synchronously.
+2. Sleeps 10 ms so the ACK drains onto the wire.
+3. Calls `bl_obyte_apply_wrp()`, which unlocks the OB area, programs
+   the new WRP mask, and calls `HAL_FLASH_OB_Launch()` — the launch
+   itself resets the MCU, so the handler does not return on success.
+
+If the launch ever returns (a documented edge case on some families)
+the handler logs a `BL_DTC_FLASH_HW` DTC and emits
+`NACK(BL_NACK_FLASH_HW)` so the host isn't left waiting.
+
+##### Boot-time self-check
+
+After `bl_nvm_init`, `Bootloader_Init` checks
+`bl_obyte_is_sector_wrp_protected(0)`. If sector 0 isn't WRP-protected
+a warning line goes into the log ring:
+
+> `WRP: bootloader sector 0 not write-protected; run OB_APPLY_WRP to latch`
+
+The same check drives `BL_HEALTH_FLAG_WRP_PROTECTED` and
+`BL_LIVE_FLAG_WRP_PROTECTED`, so a host can gate its own apply
+decision on the flag without having to poll `OB_READ` first.
+
 ### Session watchdog
 
 Once `CONNECT` succeeds the bootloader arms a watchdog timer that
@@ -726,6 +880,9 @@ negligible on a 500 kbps bus.
 | `0x0A` | `BL_NACK_TRANSPORT_ERROR`      | ISO-TP PCI / seq / overflow                              |
 | `0x0B` | `BL_NACK_PROTOCOL_VERSION`     | host/device major version disagree                       |
 | `0x0C` | `BL_NACK_NO_VALID_APP`         | jump / reset-to-app with no valid image                 |
+| `0x0D` | `BL_NACK_NVM_NOT_FOUND`        | `NVM_READ` for a key with no live value                  |
+| `0x0E` | `BL_NACK_NVM_FULL`             | `NVM_WRITE` can't fit even after compaction              |
+| `0x0F` | `BL_NACK_OB_WRONG_TOKEN`       | `OB_APPLY_WRP` missing / wrong confirmation token        |
 | `0xFE` | `BL_NACK_UNSUPPORTED`          | unknown opcode, bad arg length, or unaligned address    |
 
 ### Protocol branch coverage
@@ -756,6 +913,13 @@ inspect fault history (`DTC_READ`), tail its log (`LOG_STREAM_START`)
 and plot its counters in real time (`LIVE_DATA_START`). The
 `v0.3.0-diagnostics` dev→main tag closes the phase.
 
+**Phase 4** — config + option bytes, closes at `v0.4.0-config`:
+
+| Branch                    | Adds                                                                                  |
+|---------------------------|---------------------------------------------------------------------------------------|
+| `feat/15-nvm`             | Log-structured NVM in sector 7 + `NVM_READ` / `NVM_WRITE` + app-region shrink to 768 KB |
+| `feat/16-wrp-option-bytes`| `OB_READ` / `OB_APPLY_WRP` + WRP self-check on boot                                   |
+
 ---
 
 ## RAM usage (bootloader)
@@ -773,9 +937,6 @@ time and will be extended as new SRAM regions come into use.
 
 ## Future work (not implemented)
 
-- Option-byte read and `WRP` self-apply over the CAN protocol
-- NVM parameter region
-- DTC / audit log
 - Rollback slots (A/B)
 - Ed25519 signed firmware and replay counter
 - Session authentication and optional AES-CTR transport
