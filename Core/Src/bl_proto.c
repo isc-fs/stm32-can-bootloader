@@ -28,6 +28,7 @@
 #include "bl_fwinfo.h"
 #include "bl_health.h"
 #include "bl_isotp.h"
+#include "bl_live.h"
 #include "bl_log.h"
 #include "bl_memmap.h"
 #include "main.h"
@@ -123,6 +124,11 @@ static void send_raw(uint8_t type,
     tx.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
     tx.MessageMarker       = 0;
 
+    /* Count every outgoing CAN frame for live-data telemetry. If the
+     * HAL call fails the frame isn't actually on the wire — but we
+     * still count the attempt; the host sees the attempt rate. */
+    bl_live_frame_tx();
+
     (void)HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data);
 }
 
@@ -166,6 +172,7 @@ static void send_ack(uint8_t dst, const uint8_t *payload, uint16_t length)
 static void send_nack(uint8_t dst, uint8_t rejected_opcode, uint8_t code)
 {
     uint8_t payload[2] = { rejected_opcode, code };
+    bl_live_nack_sent();
     send_message(BL_PROTO_TYPE_NACK, dst, payload, (uint16_t)sizeof(payload));
 }
 
@@ -318,6 +325,42 @@ static void handle_log_stream_stop(uint8_t peer)
     send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
+/* CMD_LIVE_DATA_START: [rate_hz]. Session-gated. Validates the rate
+ * against BL_LIVE_{MIN,MAX}_RATE_HZ; out-of-range earns
+ * NACK(UNSUPPORTED). On success the bl_live_tick emitter starts
+ * shipping NOTIFY_LIVE_DATA at the chosen cadence. */
+static void handle_live_data_start(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 1U) {
+        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
+        return;
+    }
+    if (!bl_live_stream_start(args[0])) {
+        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_LIVE_DATA_START };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LIVE_DATA_STOP: no args. Session-gated. */
+static void handle_live_data_stop(uint8_t peer)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LIVE_DATA_STOP, BL_NACK_BAD_SESSION);
+        return;
+    }
+    bl_live_stream_stop();
+
+    uint8_t resp[1] = { BL_CMD_LIVE_DATA_STOP };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
 /* CMD_DTC_READ: no args. Returns the full DTC table as
  *   [opcode, count_le16, entry_0, entry_1, …]
  * Up to 32 entries × 20 bytes + 3 bytes of header = 643 bytes worst
@@ -451,6 +494,7 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
 
     uint32_t start  = read_le32(&args[0]);
     uint32_t length = read_le32(&args[4]);
+    bl_live_note_flash_addr(start);
 
     uint32_t sectors = 0U;
     bl_log_info("FLASH_ERASE start=0x%08X len=0x%X",
@@ -490,6 +534,7 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
     uint32_t addr = read_le32(&args[0]);
     const uint8_t *data = &args[4];
     uint16_t       data_len = (uint16_t)(args_len - 4U);
+    bl_live_note_flash_addr(addr);
 
     bl_flash_status_t st = bl_flash_write(addr, data, data_len);
     if (st != BL_FLASH_OK) {
@@ -626,6 +671,8 @@ static void handle_message(uint8_t peer,
                            const uint8_t *args,
                            uint16_t args_len)
 {
+    bl_live_note_opcode(opcode);
+
     switch (opcode) {
         case BL_CMD_CONNECT:
             handle_connect(peer, args, args_len);
@@ -659,6 +706,12 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_LOG_STREAM_STOP:
             handle_log_stream_stop(peer);
+            break;
+        case BL_CMD_LIVE_DATA_START:
+            handle_live_data_start(peer, args, args_len);
+            break;
+        case BL_CMD_LIVE_DATA_STOP:
+            handle_live_data_stop(peer);
             break;
         case BL_CMD_DTC_READ:
             handle_dtc_read(peer);
@@ -706,6 +759,7 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
      * activity — including frames that end up getting NACKed. A host
      * that's still transmitting, even unsuccessfully, is still alive. */
     session_touch_activity();
+    bl_live_frame_rx();
 
     bool                 send_fc = false;
     bl_isotp_rx_status_t st      = bl_isotp_rx_feed(&g_rx,
@@ -781,4 +835,17 @@ void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
     /* NOTIFY always goes to the host (node 0x0). Unsolicited — does
      * not refresh the session watchdog. */
     send_message(BL_PROTO_TYPE_NOTIFY, BL_PROTO_NODE_HOST, payload, length);
+}
+
+uint32_t bl_proto_session_age_ms(uint32_t now_ms)
+{
+    if (!g_session_active) {
+        return 0U;
+    }
+    return now_ms - g_session_last_activity_ms;
+}
+
+uint16_t bl_proto_isotp_rx_progress(void)
+{
+    return (g_rx.state == BL_ISOTP_STATE_WAIT_CF) ? (uint16_t)g_rx.received : 0U;
 }

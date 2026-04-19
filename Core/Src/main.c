@@ -30,6 +30,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_health.h"
+#include "bl_live.h"
 #include "bl_log.h"
 #include "bl_proto.h"
 
@@ -311,6 +312,11 @@ static void Bootloader_Init(void) {
 	bl_log_info("bootloader up (reset_cause=%u)",
 	            (unsigned int)bl_health_reset_cause());
 
+	/* Zero the live-data counters. The snapshot is pulled together on
+	 * demand in bl_live_tick, so no persistent state needs initialising
+	 * beyond this. */
+	bl_live_init();
+
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */
 	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
@@ -388,6 +394,7 @@ static void Bootloader_MainLoop(void) {
 		bl_proto_tick(tick_now);
 		bl_health_tick(tick_now);
 		bl_log_tick(tick_now);
+		bl_live_tick(tick_now);
 
 		/* Auto-jump window: if we booted with a valid app and nobody
 		 * has talked to us before the deadline, hand control over. */

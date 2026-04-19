@@ -227,6 +227,8 @@ byte is the opcode. The Phase 2 set:
 | `0x13` | `FLASH_VERIFY`   |   ✔    | `[expected_crc_le32, expected_size_le32, expected_version_le32]` | `[opcode]` — also writes the metadata word  |
 | `0x30` | `LOG_STREAM_START` | ✔  | `[min_severity]`                                 | `[opcode]`; `NOTIFY_LOG` frames start flowing  |
 | `0x31` | `LOG_STREAM_STOP`  | ✔  | –                                              | `[opcode]`; ring contents preserved             |
+| `0x32` | `LIVE_DATA_START`  | ✔  | `[rate_hz]` (1..50)                              | `[opcode]`; `NOTIFY_LIVE_DATA` frames start flowing |
+| `0x33` | `LIVE_DATA_STOP`   | ✔  | –                                              | `[opcode]`; emitter paused                      |
 | `0x40` | `DTC_READ`       |    –    | –                                              | `[opcode, count_le16, entry_0, entry_1, …]` — multi-frame |
 | `0x41` | `DTC_CLEAR`      |   ✔    | –                                              | `[opcode]` — table is empty after this         |
 | `0x60` | `RESET`          |    –    | `[mode]` (0..3)                                 | `[opcode]` emitted **before** reset             |
@@ -537,6 +539,73 @@ it out on the next visit to the bootloader.
 More call sites accrue in later branches as more code paths become
 interesting to observe.
 
+#### Live-data streaming (LIVE_DATA_START, LIVE_DATA_STOP, NOTIFY_LIVE_DATA)
+
+Where `GET_HEALTH` is an on-demand snapshot of coarse state,
+`NOTIFY_LIVE_DATA` is a push stream at 1..50 Hz carrying a 32-byte
+snapshot of bootloader-internal counters and current-state pointers.
+Intended for host-side live-table / plot views during a flash
+session.
+
+##### Snapshot layout (32 bytes, natural alignment, LE)
+
+| Offset | Size | Field                 | Notes                                                      |
+|:---:|:---:|------------------------|------------------------------------------------------------|
+|  0  |  4  | `uptime_ms`            | `HAL_GetTick()`; wraps at ~49 days                         |
+|  4  |  2  | `frames_rx`            | Saturating uint16                                          |
+|  6  |  2  | `frames_tx`            | Saturating uint16                                          |
+|  8  |  2  | `nacks_sent`           | Subset of `frames_tx`                                      |
+| 10  |  2  | `dtc_count`            | Mirrors `GET_HEALTH`                                       |
+| 12  |  2  | `last_dtc_code`        | Mirrors `GET_HEALTH`                                       |
+| 14  |  1  | `flags`                | Bits 0..3 (see below)                                      |
+| 15  |  1  | `last_opcode`          | Most recent CMD opcode received by the dispatcher          |
+| 16  |  4  | `last_flash_addr`      | Most recent `FLASH_ERASE` / `FLASH_WRITE` target address   |
+| 20  |  4  | `isotp_rx_progress`    | Bytes reassembled in the current in-flight message, 0 = idle |
+| 24  |  4  | `session_age_ms`       | ms since last RX activity; 0 when no session               |
+| 28  |  4  | `reserved`             | Zero until future revisions claim                           |
+
+Flags bits (byte 14):
+
+| Bit | Name                               |
+|:---:|------------------------------------|
+|  0  | `BL_LIVE_FLAG_SESSION_ACTIVE`       |
+|  1  | `BL_LIVE_FLAG_VALID_APP_PRESENT`    |
+|  2  | `BL_LIVE_FLAG_LOG_STREAMING`        |
+|  3  | `BL_LIVE_FLAG_LIVEDATA_STREAMING`   |
+
+##### Rate
+
+`LIVE_DATA_START` carries a 1-byte `rate_hz`. Values outside
+`[BL_LIVE_MIN_RATE_HZ = 1, BL_LIVE_MAX_RATE_HZ = 50]` are rejected
+with `NACK(BL_NACK_UNSUPPORTED)`. 50 Hz over a 500 kbps bus runs
+~6 % bus utilisation — a safe ceiling that leaves room for the rest
+of the protocol.
+
+##### Wire surfaces
+
+- **`CMD_LIVE_DATA_START` (`0x32`)** — session-gated. 1-byte arg
+  `rate_hz`. ACK `[opcode]`.
+- **`CMD_LIVE_DATA_STOP` (`0x33`)** — session-gated. No args. ACK
+  `[opcode]`.
+- **`NOTIFY_LIVE_DATA` (`0xF3`)** — unsolicited. `[opcode, <32-byte
+  snapshot>]` = 33 bytes → one ISO-TP FF + 4 CFs per emission.
+
+##### Signal-definition file
+
+The host-side `can-flasher` tool maintains a signal-definition file
+(JSON or TOML) that maps the offsets above to named fields with
+types and scaling. That file is out of scope for the bootloader; the
+struct layout above is the single source of truth on the device
+side. Bumping the layout is a breaking change and should come with
+a minor-version bump on the protocol.
+
+##### App-side live data
+
+This phase streams **bootloader** state only. A second mechanism for
+apps to publish their own live-data fields is future work — most
+likely a fixed RAM region the app writes to and the bootloader
+proxies on a separate opcode, so the two streams don't interleave.
+
 #### FLASH_ERASE / FLASH_WRITE / FLASH_READ_CRC / FLASH_VERIFY
 
 All four operate on the writable range `[BL_APP_BASE, BL_APP_METADATA_ADDR)`.
@@ -659,7 +728,9 @@ negligible on a 500 kbps bus.
 | `0x0C` | `BL_NACK_NO_VALID_APP`         | jump / reset-to-app with no valid image                 |
 | `0xFE` | `BL_NACK_UNSUPPORTED`          | unknown opcode, bad arg length, or unaligned address    |
 
-### Phase 2 branch coverage
+### Protocol branch coverage
+
+**Phase 2** — `v0.2.0-protocol` tagged:
 
 | Branch                     | Adds                                                                                 |
 |----------------------------|--------------------------------------------------------------------------------------|
@@ -669,12 +740,21 @@ negligible on a 500 kbps bus.
 | `feat/8-flash-opcodes`     | `FLASH_ERASE` / `FLASH_WRITE` / `FLASH_READ_CRC` / `FLASH_VERIFY`; session gating     |
 | `feat/9-session-timeout`   | 30 s session watchdog + keepalive + retry budget                                     |
 
-Starting with `feat/8-flash-opcodes` the bootloader on `dev` is
-functional end-to-end: a host that speaks the protocol can erase,
-program and verify an application image. `feat/9-session-timeout`
-adds a 30 s session watchdog so a host that disappears mid-flash
-doesn't leave the bootloader indefinitely wedged. Once `feat/9`
-merges the `v0.2.0-protocol` dev→main tag closes Phase 2.
+**Phase 3** — firmware contract & diagnostics, closes at `v0.3.0-diagnostics`:
+
+| Branch                     | Adds                                                                                 |
+|----------------------------|--------------------------------------------------------------------------------------|
+| `feat/10-firmware-info`    | `__firmware_info` record + `GET_FW_INFO` opcode                                      |
+| `feat/11-heartbeat-health` | 1 Hz `NOTIFY_HEARTBEAT` + `GET_HEALTH` 32-byte record; reset-cause latch             |
+| `feat/12-dtc`              | BKPSRAM DTC table + `DTC_READ` / `DTC_CLEAR` / `NOTIFY_DTC`; auto-logged fault codes |
+| `feat/13-log-stream`       | BKPSRAM log ring + `LOG_STREAM_START/STOP` + `NOTIFY_LOG`; printf-style `bl_log_*`   |
+| `feat/14-live-data`        | 32-byte live snapshot + `LIVE_DATA_START/STOP` + `NOTIFY_LIVE_DATA`                  |
+
+By the end of Phase 3 the bootloader is a fully observable node: a
+host can identify the board (`GET_FW_INFO`), watch its heartbeat,
+inspect fault history (`DTC_READ`), tail its log (`LOG_STREAM_START`)
+and plot its counters in real time (`LIVE_DATA_START`). The
+`v0.3.0-diagnostics` dev→main tag closes the phase.
 
 ---
 
