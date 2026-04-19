@@ -19,7 +19,7 @@ state in GitHub Issues.
 |:---:|---|---|---|
 | 1 | Memory map & firmware contract | ✅ done `feat/1` | `v0.1.1-memmap` |
 | 2 | Protocol rewrite (classic CAN) | ✅ done `feat/5-frame-layout` · ✅ done `feat/6-isotp` · ✅ done `feat/7-core-opcodes` · ✅ done `feat/8-flash-opcodes` · ✅ done `feat/9-session-timeout` | `v0.2.0-protocol` |
-| 3 | Firmware contract & diagnostics | 🔜 planned `feat/10-firmware-info` · 🔜 planned `feat/11-heartbeat-health` · 🔜 planned `feat/12-dtc` · 🔜 planned `feat/13-log-stream` · 🔜 planned `feat/14-live-data` | `v0.3.0-diagnostics` |
+| 3 | Firmware contract & diagnostics | ✅ done `feat/10-firmware-info` · ✅ done `feat/11-heartbeat-health` · ✅ done `feat/12-dtc` · ✅ done `feat/13-log-stream` · ✅ done `feat/14-live-data` | `v0.3.0-diagnostics` |
 | 4 | Config & option bytes | 🔜 planned `feat/15-nvm` · 🔜 planned `feat/16-wrp-option-bytes` | `v0.4.0-config` |
 | 5 | Security | 🔜 planned `feat/17-ed25519-sign` · 🔜 planned `feat/18-replay-counter` · 🔜 planned `feat/19-challenge-response` · 🔜 planned `feat/20-encrypted-transport` | `v1.0.0` |
 | — | Workflow polish _(sidequest)_ | ✅ done `feat/2-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` · ✅ done `feat/3-roadmap` · ✅ done `feat/4-roadmap-header-config` | — |
@@ -70,23 +70,23 @@ gitGraph
 
     %% Phase 3 — Firmware contract & diagnostics
     branch feat/10-firmware-info
-    commit id: "○ __firmware_info exposed on CONNECT / DISCOVER"
+    commit id: "✔ __firmware_info exposed on CONNECT / DISCOVER"
     checkout dev
     merge feat/10-firmware-info
     branch feat/11-heartbeat-health
-    commit id: "○ NOTIFY_HEARTBEAT + reset cause + WRP status + uptime"
+    commit id: "✔ NOTIFY_HEARTBEAT + reset cause + WRP status + uptime"
     checkout dev
     merge feat/11-heartbeat-health
     branch feat/12-dtc
-    commit id: "○ DTC table + NOTIFY_DTC + DTC_READ / DTC_CLEAR"
+    commit id: "✔ DTC table + NOTIFY_DTC + DTC_READ / DTC_CLEAR"
     checkout dev
     merge feat/12-dtc
     branch feat/13-log-stream
-    commit id: "○ ring buffer + NOTIFY_LOG + LOG_STREAM_START / STOP"
+    commit id: "✔ ring buffer + NOTIFY_LOG + LOG_STREAM_START / STOP"
     checkout dev
     merge feat/13-log-stream
     branch feat/14-live-data
-    commit id: "○ LIVE_DATA_START / STOP (packed struct via signal set)"
+    commit id: "✔ LIVE_DATA_START / STOP (packed struct via signal set)"
     checkout dev
     merge feat/14-live-data
     checkout main

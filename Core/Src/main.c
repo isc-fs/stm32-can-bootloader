@@ -28,6 +28,10 @@
 
 #include "bl_memmap.h"
 #include "bl_config.h"
+#include "bl_dtc.h"
+#include "bl_health.h"
+#include "bl_live.h"
+#include "bl_log.h"
 #include "bl_proto.h"
 
 /* USER CODE END Includes */
@@ -290,6 +294,29 @@ static void Bootloader_Init(void) {
 	LED_OK_ON();
 	LED_ERR_OFF();
 
+	/* Latch the reset cause before anything else has a chance to clear
+	 * RCC->RSR. Health reporting depends on this surviving the rest of
+	 * the boot sequence. */
+	bl_health_init();
+
+	/* Bring up the DTC table in Backup SRAM. Runs after bl_health_init
+	 * so bl_dtc_log can timestamp entries against uptime. Also validates
+	 * the magic so a power-cycled BKPSRAM starts from a clean slate. */
+	bl_dtc_init();
+
+	/* Bring up the log ring in Backup SRAM (adjacent to the DTC table).
+	 * Same persistence semantics — a host that reconnects after a crash
+	 * can replay the last ~1 KB of bootloader log by issuing
+	 * LOG_STREAM_START. */
+	bl_log_init();
+	bl_log_info("bootloader up (reset_cause=%u)",
+	            (unsigned int)bl_health_reset_cause());
+
+	/* Zero the live-data counters. The snapshot is pulled together on
+	 * demand in bl_live_tick, so no persistent state needs initialising
+	 * beyond this. */
+	bl_live_init();
+
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */
 	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
@@ -363,7 +390,11 @@ static void Bootloader_MainLoop(void) {
 
 		/* Protocol tick — drives ISO-TP reassembly timeout. NACKs any
 		 * peer whose multi-frame transfer stalled past BL_ISOTP_TIMEOUT_MS. */
-		bl_proto_tick(HAL_GetTick());
+		uint32_t tick_now = HAL_GetTick();
+		bl_proto_tick(tick_now);
+		bl_health_tick(tick_now);
+		bl_log_tick(tick_now);
+		bl_live_tick(tick_now);
 
 		/* Auto-jump window: if we booted with a valid app and nobody
 		 * has talked to us before the deadline, hand control over. */

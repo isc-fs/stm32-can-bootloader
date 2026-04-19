@@ -23,8 +23,13 @@
 #include "bl_proto.h"
 
 #include "bl_config.h"
+#include "bl_dtc.h"
 #include "bl_flash.h"
+#include "bl_fwinfo.h"
+#include "bl_health.h"
 #include "bl_isotp.h"
+#include "bl_live.h"
+#include "bl_log.h"
 #include "bl_memmap.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
@@ -65,6 +70,13 @@ static void session_touch_activity(void)
 
 static void session_timeout(void)
 {
+    /* Record the event before tearing the session down — bl_dtc_log
+     * reads the current session state (via bl_health_flags) so the
+     * timeline in the health record and any NOTIFY_DTC carries the
+     * right "was in session" semantics. */
+    bl_dtc_log(BL_DTC_SESSION_TIMEOUT, BL_DTC_SEV_WARN, 0U);
+    bl_log_warn("session timeout, tearing down");
+
     g_session_active = false;
     bl_isotp_rx_init(&g_rx);
 
@@ -112,6 +124,11 @@ static void send_raw(uint8_t type,
     tx.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
     tx.MessageMarker       = 0;
 
+    /* Count every outgoing CAN frame for live-data telemetry. If the
+     * HAL call fails the frame isn't actually on the wire — but we
+     * still count the attempt; the host sees the attempt rate. */
+    bl_live_frame_tx();
+
     (void)HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data);
 }
 
@@ -155,6 +172,7 @@ static void send_ack(uint8_t dst, const uint8_t *payload, uint16_t length)
 static void send_nack(uint8_t dst, uint8_t rejected_opcode, uint8_t code)
 {
     uint8_t payload[2] = { rejected_opcode, code };
+    bl_live_nack_sent();
     send_message(BL_PROTO_TYPE_NACK, dst, payload, (uint16_t)sizeof(payload));
 }
 
@@ -194,6 +212,11 @@ static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
     g_session_active = true;
     session_touch_activity();  /* arm the watchdog starting now */
 
+    bl_log_info("CONNECT from 0x%X (host proto %u.%u)",
+                (unsigned int)peer,
+                (unsigned int)host_major,
+                (unsigned int)args[1]);
+
     uint8_t resp[3] = {
         BL_CMD_CONNECT,
         BL_PROTO_VERSION_MAJOR,
@@ -212,9 +235,9 @@ static void handle_disconnect(uint8_t peer, uint16_t args_len)
 }
 
 /* CMD_DISCOVER: no args. Reply as TYPE=DISCOVER with this node's ID
- * and the bootloader's protocol version. Additional identity fields
- * (UID, HW rev, FW version, WRP status, …) arrive as later phases
- * populate them. */
+ * and the bootloader's protocol version. Richer identity (product
+ * name, fw version, build stamp, …) is fetched via CMD_GET_FW_INFO
+ * once a host has picked the node it wants to talk to. */
 static void handle_discover(uint8_t peer)
 {
     uint8_t resp[4] = {
@@ -224,6 +247,148 @@ static void handle_discover(uint8_t peer)
         BL_PROTO_VERSION_MINOR,
     };
     send_message(BL_PROTO_TYPE_DISCOVER, peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_GET_FW_INFO: no args. Returns the 64-byte __firmware_info record
+ * the application publishes at BL_FWINFO_ADDR. The ACK is 65 bytes of
+ * payload (1 opcode + 64 record bytes), so it goes out as an ISO-TP
+ * First Frame plus nine Consecutive Frames — the first real exercise
+ * of multi-frame TX.
+ *
+ * Errors:
+ *   - BL_NACK_NO_VALID_APP   — no valid application is installed
+ *   - BL_NACK_UNSUPPORTED    — app is present but has no firmware-info
+ *                              record (missing / wrong magic / bad
+ *                              record-version). Treated as a host-side
+ *                              "this image pre-dates the convention". */
+static void handle_get_fw_info(uint8_t peer)
+{
+    if (Bootloader_CheckApplication() != 0U) {
+        send_nack(peer, BL_CMD_GET_FW_INFO, BL_NACK_NO_VALID_APP);
+        return;
+    }
+
+    const bl_fwinfo_t *info = bl_fwinfo_get();
+    if (info == (const bl_fwinfo_t *)0) {
+        send_nack(peer, BL_CMD_GET_FW_INFO, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t resp[1U + BL_FWINFO_SIZE];
+    resp[0] = BL_CMD_GET_FW_INFO;
+    memcpy(&resp[1], info, BL_FWINFO_SIZE);
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_GET_HEALTH: no args. Returns the 32-byte health record built by
+ * bl_health. Not session-gated — hosts should be able to poll health
+ * at any time (e.g. while deciding whether to open a session). ACK
+ * payload is 33 bytes (opcode + record) → one FF + four CFs. */
+static void handle_get_health(uint8_t peer)
+{
+    bl_health_record_t record;
+    bl_health_fill_record(&record);
+
+    uint8_t resp[1U + BL_HEALTH_RECORD_SIZE];
+    resp[0] = BL_CMD_GET_HEALTH;
+    memcpy(&resp[1], &record, BL_HEALTH_RECORD_SIZE);
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LOG_STREAM_START: [min_severity]. Session-gated — log streams
+ * are push-y and want session discipline. `min_severity` filters out
+ * lower-priority entries at the drain boundary. */
+static void handle_log_stream_start(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LOG_STREAM_START, BL_NACK_BAD_SESSION);
+        return;
+    }
+    uint8_t min_severity = (args_len >= 1U) ? args[0] : BL_LOG_SEV_INFO;
+    bl_log_stream_start(min_severity);
+
+    uint8_t resp[1] = { BL_CMD_LOG_STREAM_START };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LOG_STREAM_STOP: no args. Session-gated. The ring contents are
+ * left intact — a subsequent START replays whatever is still buffered. */
+static void handle_log_stream_stop(uint8_t peer)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LOG_STREAM_STOP, BL_NACK_BAD_SESSION);
+        return;
+    }
+    bl_log_stream_stop();
+
+    uint8_t resp[1] = { BL_CMD_LOG_STREAM_STOP };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LIVE_DATA_START: [rate_hz]. Session-gated. Validates the rate
+ * against BL_LIVE_{MIN,MAX}_RATE_HZ; out-of-range earns
+ * NACK(UNSUPPORTED). On success the bl_live_tick emitter starts
+ * shipping NOTIFY_LIVE_DATA at the chosen cadence. */
+static void handle_live_data_start(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 1U) {
+        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
+        return;
+    }
+    if (!bl_live_stream_start(args[0])) {
+        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_LIVE_DATA_START };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_LIVE_DATA_STOP: no args. Session-gated. */
+static void handle_live_data_stop(uint8_t peer)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_LIVE_DATA_STOP, BL_NACK_BAD_SESSION);
+        return;
+    }
+    bl_live_stream_stop();
+
+    uint8_t resp[1] = { BL_CMD_LIVE_DATA_STOP };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_DTC_READ: no args. Returns the full DTC table as
+ *   [opcode, count_le16, entry_0, entry_1, …]
+ * Up to 32 entries × 20 bytes + 3 bytes of header = 643 bytes worst
+ * case, well inside the 1024 B reassembly buffer. Not session-gated —
+ * diagnostic reads should always be possible, even before CONNECT. */
+static void handle_dtc_read(uint8_t peer)
+{
+    uint8_t resp[1U + 2U + BL_DTC_MAX_ENTRIES * sizeof(bl_dtc_entry_t)];
+    resp[0] = BL_CMD_DTC_READ;
+
+    uint16_t payload_len = 0U;
+    bl_dtc_serialize(&resp[1], &payload_len);
+
+    send_ack(peer, resp, (uint16_t)(1U + payload_len));
+}
+
+/* CMD_DTC_CLEAR: no args. Wipes the DTC table. Session-gated because
+ * erasing fault history is destructive. */
+static void handle_dtc_clear(uint8_t peer)
+{
+    if (!g_session_active) {
+        send_nack(peer, BL_CMD_DTC_CLEAR, BL_NACK_BAD_SESSION);
+        return;
+    }
+    bl_dtc_clear();
+
+    uint8_t resp[1] = { BL_CMD_DTC_CLEAR };
+    send_ack(peer, resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_RESET: [mode]. Modes:
@@ -329,13 +494,23 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
 
     uint32_t start  = read_le32(&args[0]);
     uint32_t length = read_le32(&args[4]);
+    bl_live_note_flash_addr(start);
 
     uint32_t sectors = 0U;
+    bl_log_info("FLASH_ERASE start=0x%08X len=0x%X",
+                (unsigned int)start, (unsigned int)length);
     bl_flash_status_t st = bl_flash_erase(start, length, &sectors);
     if (st != BL_FLASH_OK) {
+        if (st == BL_FLASH_ERR_HARDWARE) {
+            bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, start);
+            bl_log_error("FLASH_ERASE hw fail at 0x%08X", (unsigned int)start);
+        } else {
+            bl_log_warn("FLASH_ERASE rejected (status=%d)", (int)st);
+        }
         send_nack(peer, BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
         return;
     }
+    bl_log_info("FLASH_ERASE ok (%u sectors)", (unsigned int)sectors);
 
     uint8_t resp[1] = { BL_CMD_FLASH_ERASE };
     send_ack(peer, resp, (uint16_t)sizeof(resp));
@@ -359,9 +534,13 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
     uint32_t addr = read_le32(&args[0]);
     const uint8_t *data = &args[4];
     uint16_t       data_len = (uint16_t)(args_len - 4U);
+    bl_live_note_flash_addr(addr);
 
     bl_flash_status_t st = bl_flash_write(addr, data, data_len);
     if (st != BL_FLASH_OK) {
+        if (st == BL_FLASH_ERR_HARDWARE) {
+            bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, addr);
+        }
         send_nack(peer, BL_CMD_FLASH_WRITE, flash_status_to_nack(st));
         return;
     }
@@ -440,6 +619,9 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
                                                     expected_crc,
                                                     expected_version);
     if (st != BL_FLASH_OK) {
+        if (st == BL_FLASH_ERR_HARDWARE) {
+            bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_APP_METADATA_ADDR);
+        }
         send_nack(peer, BL_CMD_FLASH_VERIFY, flash_status_to_nack(st));
         return;
     }
@@ -489,6 +671,8 @@ static void handle_message(uint8_t peer,
                            const uint8_t *args,
                            uint16_t args_len)
 {
+    bl_live_note_opcode(opcode);
+
     switch (opcode) {
         case BL_CMD_CONNECT:
             handle_connect(peer, args, args_len);
@@ -498,6 +682,12 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_DISCOVER:
             handle_discover(peer);
+            break;
+        case BL_CMD_GET_FW_INFO:
+            handle_get_fw_info(peer);
+            break;
+        case BL_CMD_GET_HEALTH:
+            handle_get_health(peer);
             break;
         case BL_CMD_FLASH_ERASE:
             handle_flash_erase(peer, args, args_len);
@@ -510,6 +700,24 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_FLASH_VERIFY:
             handle_flash_verify(peer, args, args_len);
+            break;
+        case BL_CMD_LOG_STREAM_START:
+            handle_log_stream_start(peer, args, args_len);
+            break;
+        case BL_CMD_LOG_STREAM_STOP:
+            handle_log_stream_stop(peer);
+            break;
+        case BL_CMD_LIVE_DATA_START:
+            handle_live_data_start(peer, args, args_len);
+            break;
+        case BL_CMD_LIVE_DATA_STOP:
+            handle_live_data_stop(peer);
+            break;
+        case BL_CMD_DTC_READ:
+            handle_dtc_read(peer);
+            break;
+        case BL_CMD_DTC_CLEAR:
+            handle_dtc_clear(peer);
             break;
         case BL_CMD_RESET:
             handle_reset(peer, args, args_len);
@@ -551,6 +759,7 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
      * activity — including frames that end up getting NACKed. A host
      * that's still transmitting, even unsuccessfully, is still alive. */
     session_touch_activity();
+    bl_live_frame_rx();
 
     bool                 send_fc = false;
     bl_isotp_rx_status_t st      = bl_isotp_rx_feed(&g_rx,
@@ -614,4 +823,29 @@ void bl_proto_tick(uint32_t now_ms)
             session_timeout();
         }
     }
+}
+
+bool bl_proto_session_active(void)
+{
+    return g_session_active;
+}
+
+void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
+{
+    /* NOTIFY always goes to the host (node 0x0). Unsolicited — does
+     * not refresh the session watchdog. */
+    send_message(BL_PROTO_TYPE_NOTIFY, BL_PROTO_NODE_HOST, payload, length);
+}
+
+uint32_t bl_proto_session_age_ms(uint32_t now_ms)
+{
+    if (!g_session_active) {
+        return 0U;
+    }
+    return now_ms - g_session_last_activity_ms;
+}
+
+uint16_t bl_proto_isotp_rx_progress(void)
+{
+    return (g_rx.state == BL_ISOTP_STATE_WAIT_CF) ? (uint16_t)g_rx.received : 0U;
 }
