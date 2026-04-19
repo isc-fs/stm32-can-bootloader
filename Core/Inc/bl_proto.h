@@ -59,6 +59,8 @@ typedef enum {
 #define BL_CMD_FLASH_VERIFY         0x13U  /* verify app + commit metadata record */
 #define BL_CMD_LOG_STREAM_START     0x30U  /* start emitting NOTIFY_LOG frames */
 #define BL_CMD_LOG_STREAM_STOP      0x31U  /* stop emitting NOTIFY_LOG frames */
+#define BL_CMD_LIVE_DATA_START      0x32U  /* start periodic NOTIFY_LIVE_DATA */
+#define BL_CMD_LIVE_DATA_STOP       0x33U  /* stop NOTIFY_LIVE_DATA stream */
 #define BL_CMD_DTC_READ             0x40U  /* return the full DTC table */
 #define BL_CMD_DTC_CLEAR            0x41U  /* erase every DTC entry */
 #define BL_CMD_RESET                0x60U  /* reset MCU in one of four modes */
@@ -68,6 +70,7 @@ typedef enum {
 #define BL_NOTIFY_HEARTBEAT         0xF0U  /* 1 Hz periodic alive-plus-state ping */
 #define BL_NOTIFY_DTC               0xF1U  /* new DTC recorded; not emitted on dedupe */
 #define BL_NOTIFY_LOG               0xF2U  /* batched log entries from the bl_log ring */
+#define BL_NOTIFY_LIVE_DATA         0xF3U  /* 1..50 Hz 32-byte bootloader snapshot */
 
 /* ---- Protocol version advertised in CONNECT / DISCOVER replies ---- */
 #define BL_PROTO_VERSION_MAJOR      0U
@@ -154,5 +157,16 @@ bool bl_proto_session_active(void);
  * session watchdog — notifications are device-initiated and don't
  * prove the host is still talking. */
 void bl_proto_send_notify(const uint8_t *payload, uint16_t length);
+
+/* Milliseconds since the last session-activity event, or 0 when no
+ * session is active. `now_ms` is expected to be HAL_GetTick() from
+ * the caller — passing it in keeps bl_live's snapshot self-consistent
+ * (all time-based fields read from the same tick). */
+uint32_t bl_proto_session_age_ms(uint32_t now_ms);
+
+/* Bytes buffered so far in the current ISO-TP reassembly, or 0 when
+ * the reassembler is idle. Cheap accessor; intended for live-data
+ * dashboards. */
+uint16_t bl_proto_isotp_rx_progress(void);
 
 #endif /* BL_PROTO_H */
