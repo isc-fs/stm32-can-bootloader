@@ -117,18 +117,18 @@ static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
     return (bytes > 8U) ? 8U : (uint32_t)bytes;
 }
 
-/* Send one raw CAN frame. The 11-bit ID is built from (type, BL_NODE_ID,
- * dst); `data` holds `length` valid bytes. Any TX-queue full condition
- * is swallowed silently — the host's session timeout is the backstop. */
-static void send_raw(uint8_t type,
-                     uint8_t dst,
-                     const uint8_t *data,
-                     uint8_t length)
+/* Send one raw CAN frame — always from us (the node) back to the host.
+ * The ID is the constant `BL_PROTO_DIR_NODE_TO_HOST | BL_NODE_ID`;
+ * the new wire format has no concept of per-peer node→host addressing
+ * (there's exactly one host, and its reserved ID is 0x0 which doesn't
+ * show up in any node→host ID). `data` holds `length` valid bytes.
+ * Any TX-queue full condition is swallowed silently — the host's
+ * session timeout is the backstop. */
+static void send_raw(const uint8_t *data, uint8_t length)
 {
     FDCAN_TxHeaderTypeDef tx = { 0 };
-    tx.Identifier          = bl_proto_build_id((bl_proto_type_t)type,
-                                               BL_NODE_ID,
-                                               dst);
+    tx.Identifier          = bl_proto_build_id(BL_PROTO_DIRECTION_NODE_TO_HOST,
+                                               BL_NODE_ID);
     tx.IdType              = FDCAN_STANDARD_ID;
     tx.TxFrameType         = FDCAN_DATA_FRAME;
     tx.DataLength          = dlc_bytes_to_fdcan(length);
@@ -146,29 +146,41 @@ static void send_raw(uint8_t type,
     (void)HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data);
 }
 
-/* Send a logical message to `dst`. If the payload fits in a single
- * frame (<= 7 bytes) one SF frame is emitted; otherwise an FF followed
- * by CFs. FC-based flow control on the sender side is not implemented
- * yet — the bootloader emits back-to-back CFs and trusts the host's
- * permissive CTS. */
-static void send_message(bl_proto_type_t type,
-                         uint8_t dst,
+/* Send a logical message to the host. Prepends the `msg_type` byte
+ * to `payload` so SF/FF frames carry it as byte[1] (right after the
+ * PCI byte) per the fix/12 wire format. CFs inherit the type from
+ * their parent FF by virtue of sharing its CAN ID + ISO-TP
+ * reassembly state — they never carry msg_type explicitly.
+ *
+ * The framed buffer is a file-scope static rather than stack-allocated
+ * (at 1024 B it would dwarf the main-loop stack budget). Single-
+ * threaded bootloader: the main loop drives both RX dispatch and all
+ * TX, so there's no reentrancy risk. */
+static void send_message(bl_msg_type_t msg_type,
                          const uint8_t *payload,
                          uint16_t length)
 {
-    bl_isotp_tx_t tx;
-    uint8_t       frame[8];
-    uint8_t       dlc;
+    static uint8_t framed[BL_ISOTP_MAX_MSG];
+    bl_isotp_tx_t  tx;
+    uint8_t        frame[8];
+    uint8_t        dlc;
 
-    bl_isotp_tx_init(&tx, payload, length);
+    /* Guard against a caller that somehow builds a bigger payload
+     * than fits in our framed buffer (minus the one-byte msg_type
+     * prefix). Silently drop — matches send_raw's "never block
+     * forever on queue pressure" contract. */
+    if ((uint32_t)length + 1U > sizeof(framed)) {
+        return;
+    }
+    framed[0] = (uint8_t)msg_type;
+    if (length > 0U) {
+        memcpy(&framed[1], payload, length);
+    }
+    uint16_t framed_len = (uint16_t)(length + 1U);
+
+    bl_isotp_tx_init(&tx, framed, framed_len);
     while (bl_isotp_tx_next(&tx, frame, &dlc)) {
-        /* SF and FF keep the original message TYPE; CFs and FCs go
-         * out with TYPE = DATA per the spec. */
-        uint8_t pci_hi     = frame[0] & BL_ISOTP_PCI_MASK_HI;
-        uint8_t frame_type = (pci_hi == BL_ISOTP_PCI_SF || pci_hi == BL_ISOTP_PCI_FF)
-                                ? (uint8_t)type
-                                : (uint8_t)BL_PROTO_TYPE_DATA;
-        send_raw(frame_type, dst, frame, dlc);
+        send_raw(frame, dlc);
     }
 }
 
@@ -176,30 +188,33 @@ static void send_message(bl_proto_type_t type,
  * `payload[1..length-1]` is opcode-specific response data. Re-arms
  * the session watchdog so long blocking handlers (FLASH_ERASE) don't
  * appear dead the instant they finally ACK. */
-static void send_ack(uint8_t dst, const uint8_t *payload, uint16_t length)
+static void send_ack(const uint8_t *payload, uint16_t length)
 {
-    send_message(BL_PROTO_TYPE_ACK, dst, payload, length);
+    send_message(BL_MSG_ACK, payload, length);
     session_touch_activity();
 }
 
 /* Send a 2-byte NACK payload wrapped in an ISO-TP SF. */
-static void send_nack(uint8_t dst, uint8_t rejected_opcode, uint8_t code)
+static void send_nack(uint8_t rejected_opcode, uint8_t code)
 {
     uint8_t payload[2] = { rejected_opcode, code };
     bl_live_nack_sent();
-    send_message(BL_PROTO_TYPE_NACK, dst, payload, (uint16_t)sizeof(payload));
+    send_message(BL_MSG_NACK, payload, (uint16_t)sizeof(payload));
 }
 
-/* Send an FC(CTS, BS=0, STmin=0) to `dst`. FC frames always travel
- * with TYPE = DATA per the spec. */
-static void send_fc_cts(uint8_t dst)
+/* Send an FC(CTS, BS=0, STmin=0) back to the host.
+ *
+ * FCs are pure ISO-TP plumbing — they carry no msg_type byte. They
+ * share the same node→host ID as our SF/FF replies; the host's ISO-TP
+ * reassembler keys on the PCI nibble (0x3 = FC) to route them. */
+static void send_fc_cts(void)
 {
     uint8_t frame[3] = {
         (uint8_t)(BL_ISOTP_PCI_FC | BL_ISOTP_FC_CTS),
         BL_ISOTP_FC_BS_DEFAULT,
         BL_ISOTP_FC_STMIN_DEFAULT,
     };
-    send_raw((uint8_t)BL_PROTO_TYPE_DATA, dst, frame, 3U);
+    send_raw(frame, 3U);
 }
 
 /* ---- Opcode handlers ---- */
@@ -211,7 +226,7 @@ static void send_fc_cts(uint8_t dst)
 static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (args_len < 2U) {
-        send_nack(peer, BL_CMD_CONNECT, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_CONNECT, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -219,7 +234,7 @@ static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
     /* args[1] is host_minor — unused today, reserved. */
 
     if (host_major != BL_PROTO_VERSION_MAJOR) {
-        send_nack(peer, BL_CMD_CONNECT, BL_NACK_PROTOCOL_VERSION);
+        send_nack(BL_CMD_CONNECT, BL_NACK_PROTOCOL_VERSION);
         return;
     }
 
@@ -236,7 +251,7 @@ static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
         BL_PROTO_VERSION_MAJOR,
         BL_PROTO_VERSION_MINOR,
     };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_DISCONNECT: no args. Clears the session latch and acks. */
@@ -245,7 +260,7 @@ static void handle_disconnect(uint8_t peer, uint16_t args_len)
     (void)args_len;
     g_session_active = false;
     uint8_t resp[1] = { BL_CMD_DISCONNECT };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_DISCOVER: no args. Reply as TYPE=DISCOVER with this node's ID
@@ -254,13 +269,15 @@ static void handle_disconnect(uint8_t peer, uint16_t args_len)
  * once a host has picked the node it wants to talk to. */
 static void handle_discover(uint8_t peer)
 {
+    (void)peer;  /* there's only ever one peer (the host); kept for
+                  * signature symmetry with the other handlers */
     uint8_t resp[4] = {
         BL_CMD_DISCOVER,
         BL_NODE_ID,
         BL_PROTO_VERSION_MAJOR,
         BL_PROTO_VERSION_MINOR,
     };
-    send_message(BL_PROTO_TYPE_DISCOVER, peer, resp, (uint16_t)sizeof(resp));
+    send_message(BL_MSG_DISCOVER_REPLY, resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_GET_FW_INFO: no args. Returns the 64-byte __firmware_info record
@@ -278,20 +295,20 @@ static void handle_discover(uint8_t peer)
 static void handle_get_fw_info(uint8_t peer)
 {
     if (Bootloader_CheckApplication() != 0U) {
-        send_nack(peer, BL_CMD_GET_FW_INFO, BL_NACK_NO_VALID_APP);
+        send_nack(BL_CMD_GET_FW_INFO, BL_NACK_NO_VALID_APP);
         return;
     }
 
     const bl_fwinfo_t *info = bl_fwinfo_get();
     if (info == (const bl_fwinfo_t *)0) {
-        send_nack(peer, BL_CMD_GET_FW_INFO, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_GET_FW_INFO, BL_NACK_UNSUPPORTED);
         return;
     }
 
     uint8_t resp[1U + BL_FWINFO_SIZE];
     resp[0] = BL_CMD_GET_FW_INFO;
     memcpy(&resp[1], info, BL_FWINFO_SIZE);
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_GET_HEALTH: no args. Returns the 32-byte health record built by
@@ -306,7 +323,7 @@ static void handle_get_health(uint8_t peer)
     uint8_t resp[1U + BL_HEALTH_RECORD_SIZE];
     resp[0] = BL_CMD_GET_HEALTH;
     memcpy(&resp[1], &record, BL_HEALTH_RECORD_SIZE);
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_LOG_STREAM_START: [min_severity]. Session-gated — log streams
@@ -315,14 +332,14 @@ static void handle_get_health(uint8_t peer)
 static void handle_log_stream_start(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_LOG_STREAM_START, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_LOG_STREAM_START, BL_NACK_BAD_SESSION);
         return;
     }
     uint8_t min_severity = (args_len >= 1U) ? args[0] : BL_LOG_SEV_INFO;
     bl_log_stream_start(min_severity);
 
     uint8_t resp[1] = { BL_CMD_LOG_STREAM_START };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_LOG_STREAM_STOP: no args. Session-gated. The ring contents are
@@ -330,13 +347,13 @@ static void handle_log_stream_start(uint8_t peer, const uint8_t *args, uint16_t 
 static void handle_log_stream_stop(uint8_t peer)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_LOG_STREAM_STOP, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_LOG_STREAM_STOP, BL_NACK_BAD_SESSION);
         return;
     }
     bl_log_stream_stop();
 
     uint8_t resp[1] = { BL_CMD_LOG_STREAM_STOP };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_LIVE_DATA_START: [rate_hz]. Session-gated. Validates the rate
@@ -346,33 +363,33 @@ static void handle_log_stream_stop(uint8_t peer)
 static void handle_live_data_start(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_LIVE_DATA_START, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 1U) {
-        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
         return;
     }
     if (!bl_live_stream_start(args[0])) {
-        send_nack(peer, BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_LIVE_DATA_START, BL_NACK_UNSUPPORTED);
         return;
     }
 
     uint8_t resp[1] = { BL_CMD_LIVE_DATA_START };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_LIVE_DATA_STOP: no args. Session-gated. */
 static void handle_live_data_stop(uint8_t peer)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_LIVE_DATA_STOP, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_LIVE_DATA_STOP, BL_NACK_BAD_SESSION);
         return;
     }
     bl_live_stream_stop();
 
     uint8_t resp[1] = { BL_CMD_LIVE_DATA_STOP };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_DTC_READ: no args. Returns the full DTC table as
@@ -388,7 +405,7 @@ static void handle_dtc_read(uint8_t peer)
     uint16_t payload_len = 0U;
     bl_dtc_serialize(&resp[1], &payload_len);
 
-    send_ack(peer, resp, (uint16_t)(1U + payload_len));
+    send_ack(resp, (uint16_t)(1U + payload_len));
 }
 
 /* CMD_DTC_CLEAR: no args. Wipes the DTC table. Session-gated because
@@ -396,13 +413,13 @@ static void handle_dtc_read(uint8_t peer)
 static void handle_dtc_clear(uint8_t peer)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_DTC_CLEAR, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_DTC_CLEAR, BL_NACK_BAD_SESSION);
         return;
     }
     bl_dtc_clear();
 
     uint8_t resp[1] = { BL_CMD_DTC_CLEAR };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_NVM_READ: [key_le16]. Session-gated — NVM is bootloader
@@ -411,11 +428,11 @@ static void handle_dtc_clear(uint8_t peer)
 static void handle_nvm_read(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_NVM_READ, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 2U) {
-        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -425,11 +442,11 @@ static void handle_nvm_read(uint8_t peer, const uint8_t *args, uint16_t args_len
     uint8_t value_len = 0U;
     bl_nvm_status_t st = bl_nvm_read(key, value, sizeof(value), &value_len);
     if (st == BL_NVM_NOT_FOUND) {
-        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_NVM_NOT_FOUND);
+        send_nack(BL_CMD_NVM_READ, BL_NACK_NVM_NOT_FOUND);
         return;
     }
     if (st != BL_NVM_OK) {
-        send_nack(peer, BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_NVM_READ, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -438,7 +455,7 @@ static void handle_nvm_read(uint8_t peer, const uint8_t *args, uint16_t args_len
     resp[0] = BL_CMD_NVM_READ;
     resp[1] = value_len;
     memcpy(&resp[2], value, value_len);
-    send_ack(peer, resp, (uint16_t)(2U + value_len));
+    send_ack(resp, (uint16_t)(2U + value_len));
 }
 
 /* CMD_NVM_WRITE: [key_le16, value…]. Session-gated. `len == 0` (no
@@ -448,39 +465,39 @@ static void handle_nvm_read(uint8_t peer, const uint8_t *args, uint16_t args_len
 static void handle_nvm_write(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_NVM_WRITE, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 2U) {
-        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
         return;
     }
 
     uint16_t key = (uint16_t)args[0] | ((uint16_t)args[1] << 8);
     uint16_t value_len = (uint16_t)(args_len - 2U);
     if (value_len > BL_NVM_MAX_VALUE_LEN) {
-        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
         return;
     }
 
     bl_nvm_status_t st = bl_nvm_write(key, &args[2], (uint8_t)value_len);
     if (st == BL_NVM_FULL) {
-        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_NVM_FULL);
+        send_nack(BL_CMD_NVM_WRITE, BL_NACK_NVM_FULL);
         return;
     }
     if (st == BL_NVM_HARDWARE) {
         bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_NVM_BASE);
         bl_log_error("NVM write hw fail key=0x%04X", (unsigned int)key);
-        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_FLASH_HW);
+        send_nack(BL_CMD_NVM_WRITE, BL_NACK_FLASH_HW);
         return;
     }
     if (st != BL_NVM_OK) {
-        send_nack(peer, BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_NVM_WRITE, BL_NACK_UNSUPPORTED);
         return;
     }
 
     uint8_t resp[1] = { BL_CMD_NVM_WRITE };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_RESET: [mode]. Modes:
@@ -496,23 +513,23 @@ static void handle_nvm_write(uint8_t peer, const uint8_t *args, uint16_t args_le
 static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (args_len < 1U) {
-        send_nack(peer, BL_CMD_RESET, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_RESET, BL_NACK_UNSUPPORTED);
         return;
     }
 
     uint8_t mode = args[0];
     if (mode > 3U) {
-        send_nack(peer, BL_CMD_RESET, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_RESET, BL_NACK_UNSUPPORTED);
         return;
     }
 
     if (mode == 3U && Bootloader_CheckApplication() != 0U) {
-        send_nack(peer, BL_CMD_RESET, BL_NACK_NO_VALID_APP);
+        send_nack(BL_CMD_RESET, BL_NACK_NO_VALID_APP);
         return;
     }
 
     uint8_t resp[1] = { BL_CMD_RESET };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 
     /* Let the ACK drain onto the wire before we yank the MCU. */
     HAL_Delay(10U);
@@ -576,11 +593,11 @@ static uint8_t flash_status_to_nack(bl_flash_status_t st)
 static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_FLASH_ERASE, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_FLASH_ERASE, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 8U) {
-        send_nack(peer, BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -599,13 +616,13 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
         } else {
             bl_log_warn("FLASH_ERASE rejected (status=%d)", (int)st);
         }
-        send_nack(peer, BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
+        send_nack(BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
         return;
     }
     bl_log_info("FLASH_ERASE ok (%u sectors)", (unsigned int)sectors);
 
     uint8_t resp[1] = { BL_CMD_FLASH_ERASE };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_FLASH_WRITE: [addr_le32, data...]. Programs `args_len - 4` bytes
@@ -614,12 +631,12 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
 static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_FLASH_WRITE, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_FLASH_WRITE, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 5U) {
         /* Need at least the address plus one data byte. */
-        send_nack(peer, BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -633,12 +650,12 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
         if (st == BL_FLASH_ERR_HARDWARE) {
             bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, addr);
         }
-        send_nack(peer, BL_CMD_FLASH_WRITE, flash_status_to_nack(st));
+        send_nack(BL_CMD_FLASH_WRITE, flash_status_to_nack(st));
         return;
     }
 
     uint8_t resp[1] = { BL_CMD_FLASH_WRITE };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_FLASH_READ_CRC: [addr_le32, length_le32]. Returns CRC32 over the
@@ -647,11 +664,11 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
 static void handle_flash_read_crc(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_FLASH_READ_CRC, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_FLASH_READ_CRC, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 8U) {
-        send_nack(peer, BL_CMD_FLASH_READ_CRC, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_FLASH_READ_CRC, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -661,7 +678,7 @@ static void handle_flash_read_crc(uint8_t peer, const uint8_t *args, uint16_t ar
     /* CRC is read-only but we still enforce the writable range — a host
      * CRC'ing the bootloader itself would be a protocol abuse. */
     if (!bl_flash_range_is_writable(addr, length)) {
-        send_nack(peer, BL_CMD_FLASH_READ_CRC, BL_NACK_OUT_OF_BOUNDS);
+        send_nack(BL_CMD_FLASH_READ_CRC, BL_NACK_OUT_OF_BOUNDS);
         return;
     }
 
@@ -674,7 +691,7 @@ static void handle_flash_read_crc(uint8_t peer, const uint8_t *args, uint16_t ar
         (uint8_t)((crc >> 16) & 0xFFU),
         (uint8_t)((crc >> 24) & 0xFFU),
     };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_FLASH_VERIFY: [expected_crc_le32, expected_size_le32,
@@ -684,11 +701,11 @@ static void handle_flash_read_crc(uint8_t peer, const uint8_t *args, uint16_t ar
 static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_FLASH_VERIFY, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 12U) {
-        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_FLASH_VERIFY, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -697,13 +714,13 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
     uint32_t expected_version = read_le32(&args[8]);
 
     if (expected_size == 0U || expected_size > BL_APP_SIZE) {
-        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_OUT_OF_BOUNDS);
+        send_nack(BL_CMD_FLASH_VERIFY, BL_NACK_OUT_OF_BOUNDS);
         return;
     }
 
     uint32_t computed = bl_flash_crc32(BL_APP_BASE, expected_size);
     if (computed != expected_crc) {
-        send_nack(peer, BL_CMD_FLASH_VERIFY, BL_NACK_CRC_MISMATCH);
+        send_nack(BL_CMD_FLASH_VERIFY, BL_NACK_CRC_MISMATCH);
         return;
     }
 
@@ -714,12 +731,12 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
         if (st == BL_FLASH_ERR_HARDWARE) {
             bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_APP_METADATA_ADDR);
         }
-        send_nack(peer, BL_CMD_FLASH_VERIFY, flash_status_to_nack(st));
+        send_nack(BL_CMD_FLASH_VERIFY, flash_status_to_nack(st));
         return;
     }
 
     uint8_t resp[1] = { BL_CMD_FLASH_VERIFY };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_JUMP: [addr_le32]. Phase-2 policy: the address must equal
@@ -729,7 +746,7 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
 static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (args_len < 4U) {
-        send_nack(peer, BL_CMD_JUMP, BL_NACK_UNSUPPORTED);
+        send_nack(BL_CMD_JUMP, BL_NACK_UNSUPPORTED);
         return;
     }
 
@@ -739,17 +756,17 @@ static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
                   | ((uint32_t)args[3] << 24);
 
     if (addr != BL_APP_BASE) {
-        send_nack(peer, BL_CMD_JUMP, BL_NACK_OUT_OF_BOUNDS);
+        send_nack(BL_CMD_JUMP, BL_NACK_OUT_OF_BOUNDS);
         return;
     }
 
     if (Bootloader_CheckApplication() != 0U) {
-        send_nack(peer, BL_CMD_JUMP, BL_NACK_NO_VALID_APP);
+        send_nack(BL_CMD_JUMP, BL_NACK_NO_VALID_APP);
         return;
     }
 
     uint8_t resp[1] = { BL_CMD_JUMP };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 
     /* Let the ACK drain onto the wire before we deinit peripherals. */
     HAL_Delay(10U);
@@ -765,14 +782,14 @@ static void handle_ob_read(uint8_t peer)
 {
     bl_ob_status_t status;
     if (bl_obyte_read(&status) != BL_OB_OK) {
-        send_nack(peer, BL_CMD_OB_READ, BL_NACK_FLASH_HW);
+        send_nack(BL_CMD_OB_READ, BL_NACK_FLASH_HW);
         return;
     }
 
     uint8_t resp[1U + BL_OB_STATUS_SIZE];
     resp[0] = BL_CMD_OB_READ;
     memcpy(&resp[1], &status, BL_OB_STATUS_SIZE);
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 }
 
 /* CMD_OB_APPLY_WRP: [token_le32, sector_bitmap_le32?]. Session-gated.
@@ -795,18 +812,18 @@ static void handle_ob_read(uint8_t peer)
 static void handle_ob_apply_wrp(uint8_t peer, const uint8_t *args, uint16_t args_len)
 {
     if (!g_session_active) {
-        send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_BAD_SESSION);
+        send_nack(BL_CMD_OB_APPLY_WRP, BL_NACK_BAD_SESSION);
         return;
     }
     if (args_len < 4U) {
-        send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_OB_WRONG_TOKEN);
+        send_nack(BL_CMD_OB_APPLY_WRP, BL_NACK_OB_WRONG_TOKEN);
         return;
     }
 
     uint32_t token = read_le32(&args[0]);
     if (token != BL_OB_APPLY_TOKEN) {
         bl_log_warn("OB_APPLY_WRP bad token 0x%08X", (unsigned int)token);
-        send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_OB_WRONG_TOKEN);
+        send_nack(BL_CMD_OB_APPLY_WRP, BL_NACK_OB_WRONG_TOKEN);
         return;
     }
 
@@ -819,7 +836,7 @@ static void handle_ob_apply_wrp(uint8_t peer, const uint8_t *args, uint16_t args
                 (unsigned int)sector_bitmap);
 
     uint8_t resp[1] = { BL_CMD_OB_APPLY_WRP };
-    send_ack(peer, resp, (uint16_t)sizeof(resp));
+    send_ack(resp, (uint16_t)sizeof(resp));
 
     /* Drain the ACK before HAL_FLASH_OB_Launch yanks the MCU. */
     HAL_Delay(10U);
@@ -829,7 +846,7 @@ static void handle_ob_apply_wrp(uint8_t peer, const uint8_t *args, uint16_t args
      * failure. The session is gone either way; flag it to the host. */
     bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, (uint32_t)rc);
     bl_log_error("OB_APPLY_WRP HAL failure rc=%d", (int)rc);
-    send_nack(peer, BL_CMD_OB_APPLY_WRP, BL_NACK_FLASH_HW);
+    send_nack(BL_CMD_OB_APPLY_WRP, BL_NACK_FLASH_HW);
 }
 
 /* Dispatch a completed ISO-TP message. byte 0 = opcode, remaining bytes
@@ -906,7 +923,7 @@ static void handle_message(uint8_t peer,
             handle_jump(peer, args, args_len);
             break;
         default:
-            send_nack(peer, opcode, BL_NACK_UNSUPPORTED);
+            send_nack(opcode, BL_NACK_UNSUPPORTED);
             break;
     }
 }
@@ -917,34 +934,43 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
                        const uint8_t *data,
                        uint8_t length)
 {
-    if (!bl_proto_addressed_to_us(id->dst) || length == 0U) {
+    /* Defence in depth behind the FDCAN filter: the filter already
+     * rejects anything that isn't host→node and addressed to us, but
+     * keep the software-level guard so unit tests and any future
+     * software-routed code path (loopback harnesses, simulators)
+     * stay correct. */
+    if (id->direction != BL_PROTO_DIRECTION_HOST_TO_NODE
+        || !bl_proto_addressed_to_us(id->node)
+        || length == 0U) {
         return;
     }
 
-    /* Accepted TYPE/PCI combinations:
-     *   - CMD      + SF / FF : host command (single or multi-frame)
-     *   - DISCOVER + SF / FF : broadcast identity request
-     *   - DATA     + CF / FC : continuation / flow control
-     * Everything else is silently dropped. */
+    /* PCI gate: accept SF/FF (start of a new message) and CF/FC
+     * (continuation / flow control of an in-flight one). Anything
+     * else is malformed; silently drop. Under the fix/12 wire format
+     * message type lives in the reassembled payload, not the ID, so
+     * the PCI byte is the only thing we key on at the frame level. */
     uint8_t pci_hi = data[0] & BL_ISOTP_PCI_MASK_HI;
-    bool initial = (id->type == BL_PROTO_TYPE_CMD || id->type == BL_PROTO_TYPE_DISCOVER)
-                 && (pci_hi == BL_ISOTP_PCI_SF || pci_hi == BL_ISOTP_PCI_FF);
-    bool continuation = (id->type == BL_PROTO_TYPE_DATA)
-                     && (pci_hi == BL_ISOTP_PCI_CF || pci_hi == BL_ISOTP_PCI_FC);
-    if (!initial && !continuation) {
+    if (pci_hi != BL_ISOTP_PCI_SF && pci_hi != BL_ISOTP_PCI_FF
+        && pci_hi != BL_ISOTP_PCI_CF && pci_hi != BL_ISOTP_PCI_FC) {
         return;
     }
 
-    /* Any frame that made it through the TYPE/PCI gate counts as session
+    /* Any frame that made it through the PCI gate counts as session
      * activity — including frames that end up getting NACKed. A host
      * that's still transmitting, even unsuccessfully, is still alive. */
     session_touch_activity();
     bl_live_frame_rx();
 
+    /* `type` and `peer` args on bl_isotp_rx_feed are legacy
+     * bookkeeping — the new wire format has exactly one peer (the
+     * host, node 0x0) and no type-in-ID, so we pass constants. The
+     * reassembler stores them for later inspection but no code path
+     * in the new format actually reads them back. */
     bool                 send_fc = false;
     bl_isotp_rx_status_t st      = bl_isotp_rx_feed(&g_rx,
-                                                     (uint8_t)id->type,
-                                                     id->src,
+                                                     (uint8_t)BL_MSG_CMD,
+                                                     BL_PROTO_NODE_HOST,
                                                      data,
                                                      length,
                                                      &send_fc);
@@ -953,18 +979,55 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
         /* Arm the reassembly deadline at the same instant we tell the
          * host it may proceed with CFs. */
         g_rx.deadline_ms = HAL_GetTick() + BL_ISOTP_TIMEOUT_MS;
-        send_fc_cts(id->src);
+        send_fc_cts();
     }
 
     switch (st) {
         case BL_ISOTP_MSG_COMPLETE:
-            if (g_rx.received >= 1U) {
-                handle_message(id->src,
-                               g_rx.buf[0],
-                               &g_rx.buf[1],
-                               (uint16_t)(g_rx.received - 1U));
+            /* Reassembled layout:
+             *   g_rx.buf[0]   = msg_type
+             *   g_rx.buf[1]   = opcode
+             *   g_rx.buf[2..] = args
+             *
+             * Route by msg_type:
+             *   CMD, DISCOVER_REQUEST → dispatch to handle_message
+             *   APP_CTRL              → silently drop (BL transit)
+             *   ACK / NACK / NOTIFY / DISCOVER_REPLY → silently drop
+             *     (these are node→host types; seeing one here means
+             *     either a malformed frame or a loopback harness
+             *     feeding us our own TX — nothing actionable)
+             *   unknown (>= 0x07)     → silently drop (reserved for
+             *     future protocol extensions; keeping us quiet here
+             *     lets the host adopt new types without breaking
+             *     older BL firmware) */
+            if (g_rx.received < 2U) {
+                /* Need at least msg_type + opcode. Anything shorter
+                 * is truncated; report it so the host can resync. */
+                send_nack(0xFFU, BL_NACK_TRANSPORT_ERROR);
             } else {
-                send_nack(id->src, 0xFFU, BL_NACK_TRANSPORT_ERROR);
+                uint8_t msg_type_byte = g_rx.buf[0];
+                uint8_t opcode        = g_rx.buf[1];
+                const uint8_t *args   = &g_rx.buf[2];
+                uint16_t       args_len = (uint16_t)(g_rx.received - 2U);
+
+                switch (msg_type_byte) {
+                    case BL_MSG_CMD:
+                    case BL_MSG_DISCOVER_REQUEST:
+                        handle_message(BL_PROTO_NODE_HOST,
+                                       opcode,
+                                       args,
+                                       args_len);
+                        break;
+
+                    case BL_MSG_APP_CTRL:
+                    case BL_MSG_ACK:
+                    case BL_MSG_NACK:
+                    case BL_MSG_NOTIFY:
+                    case BL_MSG_DISCOVER_REPLY:
+                    default:
+                        /* Silent drop — see comment block above. */
+                        break;
+                }
             }
             bl_isotp_rx_init(&g_rx);
             break;
@@ -975,12 +1038,12 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
         case BL_ISOTP_ERR_TIMEOUT:
             /* Only _tick returns this; _feed never does. Handle
              * defensively anyway. */
-            send_nack(id->src, 0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
+            send_nack(0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
             bl_isotp_rx_init(&g_rx);
             break;
 
         default:
-            send_nack(id->src, 0xFFU, BL_NACK_TRANSPORT_ERROR);
+            send_nack(0xFFU, BL_NACK_TRANSPORT_ERROR);
             bl_isotp_rx_init(&g_rx);
             break;
     }
@@ -990,7 +1053,7 @@ void bl_proto_tick(uint32_t now_ms)
 {
     uint8_t peer = 0U;
     if (bl_isotp_rx_tick(&g_rx, now_ms, &peer)) {
-        send_nack(peer, 0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
+        send_nack(0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
     }
 
     /* Session watchdog — only runs while a session is active. Unsigned
@@ -1012,9 +1075,9 @@ bool bl_proto_session_active(void)
 
 void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
 {
-    /* NOTIFY always goes to the host (node 0x0). Unsolicited — does
-     * not refresh the session watchdog. */
-    send_message(BL_PROTO_TYPE_NOTIFY, BL_PROTO_NODE_HOST, payload, length);
+    /* NOTIFY always goes to the host. Unsolicited — does not
+     * refresh the session watchdog. */
+    send_message(BL_MSG_NOTIFY, payload, length);
 }
 
 uint32_t bl_proto_session_age_ms(uint32_t now_ms)
