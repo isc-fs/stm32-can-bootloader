@@ -98,11 +98,23 @@ bool bl_proto_addressed_to_us(uint8_t dst)
     return (dst == BL_NODE_ID) || (dst == BL_PROTO_NODE_BROADCAST);
 }
 
-/* Map a 0..8 byte count onto the FDCAN_DLC_BYTES_N encoding. */
+/* Map a 0..8 byte count onto the `FDCAN_DLC_BYTES_N` encoding the
+ * HAL expects in `FDCAN_TxHeaderTypeDef::DataLength`.
+ *
+ * For classic CAN the HAL's `FDCAN_DLC_BYTES_N` constants are just
+ * `N` (the byte count in the low nibble); the HAL itself shifts
+ * that value into bit position 16 when it packs the message RAM
+ * element (see `(pTxHeader->DataLength << 16U)` in the STM32H7 HAL
+ * `PrepareTxElement`). Pre-shifting on our side produces a DLC of
+ * `N << 16` which the peripheral reads as an out-of-range
+ * FD-format length — the TX either silently fails or reads
+ * garbage from `DLCtoBytes[N << 16]`.
+ *
+ * So just return the byte count directly (clamped to 8 for classic
+ * CAN). */
 static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
 {
-    uint32_t n = (bytes > 8U) ? 8U : (uint32_t)bytes;
-    return n << 16;
+    return (bytes > 8U) ? 8U : (uint32_t)bytes;
 }
 
 /* Send one raw CAN frame. The 11-bit ID is built from (type, BL_NODE_ID,
