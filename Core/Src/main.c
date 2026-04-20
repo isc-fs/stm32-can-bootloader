@@ -1,4 +1,4 @@
- /* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
  ******************************************************************************
  * @file           : main.c
@@ -232,7 +232,7 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.DataTimeSeg1 = 1;
   hfdcan2.Init.DataTimeSeg2 = 1;
   hfdcan2.Init.MessageRAMOffset = 0;
-  hfdcan2.Init.StdFiltersNbr = 1;
+  hfdcan2.Init.StdFiltersNbr = 2;
   hfdcan2.Init.ExtFiltersNbr = 1;
   hfdcan2.Init.RxFifo0ElmtsNbr = 16;
   hfdcan2.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
@@ -393,10 +393,17 @@ static void Bootloader_MainLoop(void) {
 					bl_proto_id_t id;
 					bl_proto_parse_id(rxHeader.Identifier, &id);
 
-					/* FDCAN_DLC_BYTES_N is encoded in bits 19:16 of the
-					 * DataLength word. For classic CAN (0..8) the field
-					 * value equals the byte count. */
-					uint8_t length = (uint8_t)((rxHeader.DataLength >> 16) & 0x0FU);
+					/* `HAL_FDCAN_GetRxMessage` already extracts the DLC
+					 * nibble into bits 3:0 of rxHeader.DataLength
+					 * (see `FDCAN_ELEMENT_MASK_DLC >> 16U` in the
+					 * STM32H7 HAL). For classic CAN the DLC value
+					 * equals the byte count, so we just mask to the
+					 * low nibble — NO extra shift. Earlier versions
+					 * shifted >>16 again, which zeroed out every
+					 * length and silently dropped every incoming
+					 * frame at bl_proto_dispatch's `length == 0U`
+					 * gate. */
+					uint8_t length = (uint8_t)(rxHeader.DataLength & 0x0FU);
 					if (length > 8U) {
 						length = 8U;
 					}
