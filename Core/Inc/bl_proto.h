@@ -4,12 +4,26 @@
 /*
  * Bootloader CAN protocol — frame layout + dispatch entry point.
  *
- * Classic CAN (11-bit standard ID, 8-byte payload) on FDCAN2. The 11-bit
- * identifier encodes three fields:
+ * Classic CAN (11-bit standard ID, 8-byte payload) on FDCAN2.
  *
- *   bits 10:8  — message type (3 bits, `bl_proto_type_t`)
- *   bits 7:4   — source node ID (4 bits, 0x0 = host)
- *   bits 3:0   — destination node ID (4 bits, 0xF = broadcast)
+ * ID layout (Proposal A — fix/12):
+ *
+ *   bits 10..5 = 0          (reserved; every valid ID ≤ 0x01F)
+ *   bit   4    = direction   0 = host→node, 1 = node→host
+ *   bits  3..0 = other-end node ID
+ *                host→node: dst (0x0..0xE unicast, 0xF broadcast)
+ *                node→host: src (0x1..0xE; 0x0 and 0xF reserved)
+ *
+ * Keeping every ID ≤ 0x01F gives the bootloader protocol the highest
+ * arbitration priority on any shared CAN bus (lower IDs win), and
+ * reserves `0x020..0x7FF` for future protocol extensions or
+ * application-owned traffic that should sit below BL priority.
+ *
+ * Message type is NOT encoded in the ID any more — it rides as
+ * payload byte 1 of every SF and FF (byte 0 is the ISO-TP PCI byte).
+ * CF and FC frames do not carry a message-type byte; they inherit
+ * semantic type from their parent FF, and ISO-TP PCI is sufficient
+ * to identify them. See `bl_msg_type_t` below for the enumeration.
  *
  * Opcode handlers are introduced across the rest of Phase 2:
  *   feat/6-isotp              — multi-frame segmentation / reassembly
@@ -25,27 +39,30 @@
 #include <stdint.h>
 
 /* ---- ID field layout ---- */
-#define BL_PROTO_TYPE_SHIFT        8U
-#define BL_PROTO_SRC_SHIFT         4U
-#define BL_PROTO_DST_SHIFT         0U
+#define BL_PROTO_DIRECTION_BIT      0x10U   /* bit 4 of the 11-bit ID */
+#define BL_PROTO_NODE_MASK          0x0FU   /* low nibble */
+#define BL_PROTO_ID_VALID_MASK      0x1FU   /* bits 4:0 only; everything else must be zero */
 
-#define BL_PROTO_TYPE_MASK         0x7U
-#define BL_PROTO_SRC_MASK          0xFU
-#define BL_PROTO_DST_MASK          0xFU
+/* ---- Direction constants ---- */
+#define BL_PROTO_DIR_HOST_TO_NODE   0x00U
+#define BL_PROTO_DIR_NODE_TO_HOST   0x10U
 
 /* ---- Reserved node IDs ---- */
-#define BL_PROTO_NODE_HOST         0x0U
-#define BL_PROTO_NODE_BROADCAST    0xFU
+#define BL_PROTO_NODE_HOST          0x0U
+#define BL_PROTO_NODE_BROADCAST     0xFU
 
-/* ---- Message type (bits 10:8 of the ID) ---- */
+/* ---- Message type byte (payload[1] of every SF/FF) ----
+ * Matches `MessageType` in the flasher's `protocol/ids.rs`. Keep in sync. */
 typedef enum {
-    BL_PROTO_TYPE_CMD      = 0x0U,  /* host → device, command */
-    BL_PROTO_TYPE_ACK      = 0x1U,  /* device → host, positive ack */
-    BL_PROTO_TYPE_NACK     = 0x2U,  /* device → host, negative ack */
-    BL_PROTO_TYPE_DATA     = 0x3U,  /* bidirectional multi-frame payload */
-    BL_PROTO_TYPE_NOTIFY   = 0x4U,  /* device → host, unsolicited event */
-    BL_PROTO_TYPE_DISCOVER = 0x7U,  /* broadcast, discovery ping/response */
-} bl_proto_type_t;
+    BL_MSG_CMD              = 0x00U,  /* host → device, command                      */
+    BL_MSG_ACK              = 0x01U,  /* device → host, positive ack                 */
+    BL_MSG_NACK             = 0x02U,  /* device → host, negative ack                 */
+    BL_MSG_NOTIFY           = 0x03U,  /* device → host, unsolicited event            */
+    BL_MSG_DISCOVER_REQUEST = 0x04U,  /* host → broadcast, discovery ping            */
+    BL_MSG_DISCOVER_REPLY   = 0x05U,  /* device → host, discovery reply              */
+    BL_MSG_APP_CTRL         = 0x06U,  /* host → node, application-level traffic      */
+                                      /* (BL silently drops; app firmware handles)   */
+} bl_msg_type_t;
 
 /* ---- Command opcodes ---- */
 #define BL_CMD_CONNECT              0x01U  /* start a session, exchange protocol version */
@@ -70,7 +87,7 @@ typedef enum {
 #define BL_CMD_NVM_READ             0x80U  /* read a value from the NVM store */
 #define BL_CMD_NVM_WRITE            0x81U  /* append/update/tombstone a value in the NVM store */
 
-/* ---- Unsolicited notifications (TYPE=NOTIFY, dst=HOST) ---- */
+/* ---- Unsolicited notifications (msg_type = BL_MSG_NOTIFY, dst = HOST) ---- */
 #define BL_NOTIFY_HEARTBEAT         0xF0U  /* 1 Hz periodic alive-plus-state ping */
 #define BL_NOTIFY_DTC               0xF1U  /* new DTC recorded; not emitted on dedupe */
 #define BL_NOTIFY_LOG               0xF2U  /* batched log entries from the bl_log ring */
@@ -110,26 +127,52 @@ typedef enum {
 #define BL_NACK_UNSUPPORTED         0xFEU  /* unknown opcode, unknown arg, or bad arg length */
 
 /* ---- Decoded frame ID ---- */
+typedef enum {
+    BL_PROTO_DIRECTION_HOST_TO_NODE = 0,
+    BL_PROTO_DIRECTION_NODE_TO_HOST = 1,
+} bl_proto_direction_t;
+
 typedef struct {
-    bl_proto_type_t type;
-    uint8_t src;
-    uint8_t dst;
+    bl_proto_direction_t direction;
+    /* The "other end" node, interpreted per direction:
+     *   HostToNode: dst (0x0..0xE, or 0xF broadcast)
+     *   NodeToHost: src (0x1..0xE; 0x0 and 0xF are reserved and a
+     *                     well-formed frame will never carry them)  */
+    uint8_t node;
 } bl_proto_id_t;
 
 /* Build an 11-bit ID from its components. */
-static inline uint32_t bl_proto_build_id(bl_proto_type_t type,
-                                         uint8_t src,
-                                         uint8_t dst) {
-    return ((uint32_t)((uint32_t)type & BL_PROTO_TYPE_MASK) << BL_PROTO_TYPE_SHIFT)
-         | ((uint32_t)((uint32_t)src  & BL_PROTO_SRC_MASK)  << BL_PROTO_SRC_SHIFT)
-         | ((uint32_t)((uint32_t)dst  & BL_PROTO_DST_MASK)  << BL_PROTO_DST_SHIFT);
+static inline uint32_t bl_proto_build_id(bl_proto_direction_t direction,
+                                         uint8_t node) {
+    uint32_t dir_bit = (direction == BL_PROTO_DIRECTION_NODE_TO_HOST)
+                       ? BL_PROTO_DIRECTION_BIT
+                       : 0U;
+    return dir_bit | ((uint32_t)node & BL_PROTO_NODE_MASK);
 }
 
-/* Parse an 11-bit ID into its components. */
-static inline void bl_proto_parse_id(uint32_t id, bl_proto_id_t *out) {
-    out->type = (bl_proto_type_t)((id >> BL_PROTO_TYPE_SHIFT) & BL_PROTO_TYPE_MASK);
-    out->src  = (uint8_t)((id >> BL_PROTO_SRC_SHIFT) & BL_PROTO_SRC_MASK);
-    out->dst  = (uint8_t)((id >> BL_PROTO_DST_SHIFT) & BL_PROTO_DST_MASK);
+/* Parse an 11-bit ID into its components.
+ *
+ * Returns true if the ID is well-formed for this protocol (bits 10..5
+ * clear, and — for node→host frames — node is not 0x0/0xF). Returns
+ * false for any ID outside the protocol's 5-bit space or with a
+ * reserved node ID on the node→host direction. In the false case
+ * `out` is still populated but callers should treat the frame as
+ * malformed. */
+static inline bool bl_proto_parse_id(uint32_t id, bl_proto_id_t *out) {
+    out->direction = (id & BL_PROTO_DIRECTION_BIT)
+                     ? BL_PROTO_DIRECTION_NODE_TO_HOST
+                     : BL_PROTO_DIRECTION_HOST_TO_NODE;
+    out->node = (uint8_t)(id & BL_PROTO_NODE_MASK);
+
+    if ((id & ~(uint32_t)BL_PROTO_ID_VALID_MASK) != 0U) {
+        return false;
+    }
+    if (out->direction == BL_PROTO_DIRECTION_NODE_TO_HOST
+        && (out->node == BL_PROTO_NODE_HOST
+            || out->node == BL_PROTO_NODE_BROADCAST)) {
+        return false;
+    }
+    return true;
 }
 
 /* Returns true if the frame is addressed to us — unicast to BL_NODE_ID
@@ -140,10 +183,12 @@ bool bl_proto_addressed_to_us(uint8_t dst);
 
 /* Dispatch a received frame. `data` must point to `length` bytes of
  * payload (0..8 for classic CAN). Frames are fed into the ISO-TP
- * reassembler; a completed message is routed to an internal single-
- * frame handler that — until the opcode branches land — answers with
- * NACK(BL_NACK_UNSUPPORTED). ISO-TP framing errors elicit a NACK with
- * BL_NACK_TRANSPORT_ERROR. */
+ * reassembler; a completed message's first payload byte is decoded as
+ * the message type (`bl_msg_type_t`) and the rest (opcode + args) is
+ * routed to an internal handler. ISO-TP framing errors elicit a NACK
+ * with BL_NACK_TRANSPORT_ERROR; unknown message types are silently
+ * dropped (so APP_CTRL traffic transits cleanly while the BL is
+ * running without provoking spurious NACKs). */
 void bl_proto_dispatch(const bl_proto_id_t *id,
                        const uint8_t *data,
                        uint8_t length);
@@ -159,7 +204,7 @@ void bl_proto_tick(uint32_t now_ms);
  * the latch without owning it. */
 bool bl_proto_session_active(void);
 
-/* Emit an unsolicited TYPE=NOTIFY message to the host (dst=0x0).
+/* Emit an unsolicited msg_type=NOTIFY message to the host (dst=0x0).
  * Short payloads go as SF, longer as FF+CFs. Does NOT refresh the
  * session watchdog — notifications are device-initiated and don't
  * prove the host is still talking. */
