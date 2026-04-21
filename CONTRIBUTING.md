@@ -96,12 +96,17 @@ closes the tracking issue automatically.
   say what you tested in the PR body.
 - The PR targets `dev`, not `main`.
 
-## Merging to main
+## Merging to main (release cut)
 
 Only when `dev` holds a set of validated changes and someone with
 bench access has signed off on a full flash-cycle test. The PR
 from `dev` → `main` is the release cut — tag it and bump the
 version in `bl_proto.h` so host tools see the change.
+
+After the release is published, `sync-dev-after-release.yml`
+fast-forwards `dev` to match `main` automatically. No need to
+run `git checkout dev && git merge main && git push` by hand;
+the workflow handles it on the `release: published` event.
 
 ---
 

@@ -1,0 +1,82 @@
+name: Sync dev after release
+
+# Fast-forwards `dev` to match `main` whenever a GitHub Release is
+# published. Closes the "dev behind main" drift that merge-commit
+# dev→main cuts leave behind: without this, the next feature branch
+# cut from `dev` diverges from `main` for no reason (new code path
+# == same code, just different merge-commit ancestry).
+#
+# The default `GITHUB_TOKEN` with `contents: write` is enough: we
+# only fast-forward or append merge commits, never force-push. If a
+# branch-protection rule ever lands on `dev`, the token's bot
+# identity needs to be on the allow-list, or this workflow will
+# surface a clear 403 instead of silently skipping.
+
+on:
+  release:
+    types: [published]
+
+# One sync at a time per repo — if two releases publish
+# back-to-back, the second run waits for the first rather than
+# racing against it.
+concurrency:
+  group: sync-dev-after-release
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: dev
+          # Full history so `merge-base --is-ancestor` can compare
+          # against main without falling back to shallow-fetch
+          # failure modes.
+          fetch-depth: 0
+
+      - name: Configure git as github-actions[bot]
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch main
+        run: git fetch origin main
+
+      - name: Sync dev with main
+        run: |
+          set -e
+          # Three cases:
+          #
+          #  1. dev is strictly behind main (expected post-release):
+          #     fast-forward. No new commits on dev.
+          #
+          #  2. dev is already ahead of main: someone pushed to dev
+          #     between release cut and release publication. Nothing
+          #     to do — dev is already correct from main's POV.
+          #
+          #  3. dev and main diverged: rare, but a human could have
+          #     merged a PR to dev after the release-cut PR opened.
+          #     Create a merge commit on dev so downstream branches
+          #     don't diverge further. Merge conflicts here are
+          #     genuine and will fail the step loud — human picks up.
+          if git merge-base --is-ancestor HEAD origin/main; then
+            git merge --ff-only origin/main
+            echo "✓ fast-forwarded dev to origin/main"
+          elif git merge-base --is-ancestor origin/main HEAD; then
+            echo "✓ dev is already ahead of main — nothing to do"
+            exit 0
+          else
+            echo "dev and main have diverged — creating a merge commit"
+            git merge --no-edit origin/main
+            echo "✓ merged main into dev"
+          fi
+
+      - name: Push dev
+        run: |
+          # `--no-force` is implicit on every push here (we don't
+          # pass --force anywhere) so a branch-protection rule that
+          # forbids force-push is respected cleanly.
+          git push origin dev
