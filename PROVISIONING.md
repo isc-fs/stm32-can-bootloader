@@ -1,20 +1,26 @@
-# Provisioning & bench-validation checklist
+# Provisioning & recovery
 
-Operator-facing procedures for taking a blank STM32H733 board to a
-shipping-ready state, updating the bootloader itself safely, and
-verifying that the protection layers actually fire on real hardware.
+Operator-facing procedures for the STM32H733 CAN bootloader:
+taking a blank board to production-ready, updating the bootloader
+itself without bricking, and recovering a board that's gone dark
+in the pit.
 
-Companion to `ARCHITECTURE.md` (which explains *why* the protection
-layers look the way they do). This file answers the three questions
-an operator has in front of the bench:
-
-1. **How do I get a fresh board to production-ready?**
-2. **How do I update the bootloader without bricking the part?**
-3. **How do I prove the protections are actually on?**
+Companion docs:
+- [ARCHITECTURE.md](ARCHITECTURE.md) — why the protection layers
+  look the way they do
+- [BENCH_TESTS.md](BENCH_TESTS.md) — how to prove they still fire
+  on real silicon (run once per hardware revision)
 
 If you find yourself wanting to paste one of these commands into a
 chat to check "is this right?", that means this doc needs a fix —
 PR it rather than keeping the correction in your head.
+
+---
+
+## 📢 In a hurry? Jump to §4 (Recovery)
+
+Most people open this file during an incident. §4 is the single
+most-read section; glance there first.
 
 ---
 
@@ -23,25 +29,26 @@ PR it rather than keeping the correction in your head.
 - **Hardware**: STM32H733 target + ST-Link V3 (or CMSIS-DAP compatible
   probe) on SWD + a CAN adapter (CANable or equivalent) on FDCAN2.
 - **Host tools**:
-  - `STM32CubeProgrammer` or `openocd` + `arm-none-eabi-gdb` for the
-    SWD flash step. CubeProgrammer has the friendlier option-byte UI;
-    openocd scripts better.
-  - `cf` (`can-flasher`) — built from `isc-fs/can-flasher` at a
-    revision that matches the BL's protocol version. Check with
-    `cf --version` against `BL_PROTO_VERSION_*` in `bl_proto.h`.
+  - `STM32CubeProgrammer` (friendlier OB UI) or `openocd` +
+    `arm-none-eabi-gdb` (scripts better) for SWD.
+  - `cf` (`can-flasher`) from
+    [`isc-fs/can-flasher`](https://github.com/isc-fs/can-flasher).
+    Flash tool and bootloader need matching protocol versions — if
+    in doubt, rebuild both from a matching git tag.
 - **Firmware artifacts**:
-  - `CAN_BL.bin` (the bootloader, targets `0x08000000`). Built from
-    this repo via `cmake --preset Release && cmake --build
-    build/Release`.
+  - `CAN_BL.bin` — the bootloader. Build from this repo with:
+    ```sh
+    cmake --preset Release && cmake --build build/Release
+    ```
+    Output lands at `build/Release/CAN_BL.bin`.
 
 ---
 
 ## 1. Fresh-board provisioning (first time)
 
-A brand-new H733 ships with all option bytes at their factory
-defaults: RDP Level 0, no WRP, BOR off. Goal of this flow: get the
-BL onto sector 0 and then **latch WRP so a misbehaving app can never
-overwrite it over CAN**.
+A brand-new H733 ships with option bytes at factory defaults: RDP
+Level 0, no WRP, BOR off. Goal: get the BL onto sector 0 and latch
+WRP so a misbehaving app can never overwrite it over CAN.
 
 ### Step 1.1 — Flash the bootloader via SWD
 
@@ -54,20 +61,20 @@ openocd -f interface/stlink.cfg -f target/stm32h7x.cfg \
         -c "program CAN_BL.bin 0x08000000 verify reset exit"
 ```
 
-Expected: success, MCU resets, LED behaviour matches "idle BL waiting
-for CAN traffic" from `ARCHITECTURE.md § LED semantics`.
+Expected: success, MCU resets, LEDs go to "idle BL" pattern (see
+[ARCHITECTURE.md § LED semantics](ARCHITECTURE.md)).
 
 ### Step 1.2 — Sanity-check CAN comms
 
-With the CAN adapter wired to FDCAN2:
+Wire the CAN adapter to FDCAN2, then:
 
 ```sh
 cf --interface slcan --channel /dev/cu.usbmodem1201 \
    --bitrate 500000 discover
 ```
 
-Expected output (one row, your node ID, protocol version, WRP column
-reads `✗` because we haven't applied it yet):
+Expected output — **one row, WRP column reads `✗`** (we haven't
+applied it yet):
 
 ```
 Node  Proto  FW Version        Git Hash  Product  WRP  Reset Cause
@@ -75,10 +82,11 @@ Node  Proto  FW Version        Git Hash  Product  WRP  Reset Cause
 0x01  0.1    no app installed  —         —        ✗    PIN
 ```
 
-If this step fails, stop — every later step depends on working CAN.
-See `ARCHITECTURE.md § Troubleshooting` or `can-flasher/README.md`.
+If this fails, stop — every later step depends on working CAN.
+Check adapter wiring, 120 Ω termination, and that `cf adapters`
+sees the dongle.
 
-### Step 1.3 — Latch WRP on sector 0 (irrevocable over CAN)
+### Step 1.3 — Latch WRP on sector 0
 
 ```sh
 cf --interface slcan --channel /dev/cu.usbmodem1201 \
@@ -86,60 +94,67 @@ cf --interface slcan --channel /dev/cu.usbmodem1201 \
    config ob apply-wrp --sector-mask 0x01
 ```
 
-Default `sector-mask 0x01` protects **sector 0 only** — the
-bootloader. The command token-gates the apply (requires
-`BL_OB_APPLY_TOKEN = 0x00505257` / ASCII `"WRP\0"` LE, which `cf`
-supplies automatically), ACKs before the OB launch, then the MCU
-resets as the launch pumps the new WRP mask into the active area.
+Default `--sector-mask 0x01` protects sector 0 only (the bootloader).
+The command auto-supplies the `BL_OB_APPLY_TOKEN` safety token, ACKs
+before the OB launch, then the MCU resets.
 
-### Step 1.4 — Verify WRP stuck
+### Step 1.4 — Verify + checkpoint
 
 ```sh
 cf --interface slcan --channel /dev/cu.usbmodem1201 \
    --bitrate 500000 discover
 ```
 
-Expected row: identical to Step 1.2 **except `WRP ✓`**. If still `✗`,
-the apply didn't launch — dig into logs (`cf diagnose log-stream`)
-before trusting the board to production use.
+**Provisioning done when**:
+- `WRP` column reads `✓` — sector 0 is now write-protected at the
+  flash-controller level.
+- You've recorded the board's serial number in whatever provisioning
+  log the team uses (spreadsheet, sticker, nothing — but pick one
+  and stick to it).
 
 The board is now **shipping-ready from the bootloader's perspective**.
-Application firmware can be loaded via the usual `cf flash` flow; it
-cannot overwrite the bootloader even with a bad linker script, because
-both the BL's range-check (Layer 1.1) and the flash controller's WRP
-(Layer 2.1) will refuse.
+Application firmware can be loaded via `cf flash` afterwards; it
+cannot overwrite the bootloader even with a bad linker script,
+because both the BL's range-check and the flash controller's WRP
+will refuse.
+
+### Optional Step 1.5 — Enable RDP Level 1 (production units only)
+
+For units that leave the workshop, set RDP Level 1 via
+STM32CubeProgrammer to block firmware readout via SWD:
+
+```sh
+STM32_Programmer_CLI -c port=SWD -ob RDP=0xBB
+```
+
+(`0xBB` is Level 1 on H7; `0xAA` is Level 0. **Never write `0xCC`
+— that's Level 2, which is irreversible.** See §3.)
 
 ---
 
 ## 2. Updating the bootloader itself
 
-The bootloader **is not updated over CAN in production** — there's no
-protocol command that can rewrite sector 0, and WRP would refuse even
-if there were. Updates go through SWD, which is the only path that
-can clear WRP.
+The bootloader **is not updated over CAN**. There's no protocol
+command that can rewrite sector 0, and WRP would refuse even if
+there were. Updates go through SWD.
 
-### Step 2.1 — Clear WRP via CubeProgrammer
+### Step 2.1 — Clear WRP
 
-WRP cleared by writing the "no sectors protected" mask (`0x000000FF`
-in the raw option-byte register maps to "all sectors unprotected" on
-H7 — the register uses inverted polarity). Easiest via
-CubeProgrammer's OB tab, or CLI:
+WRP cleared by writing the "no sectors protected" mask. Via
+CubeProgrammer (easier UI) or CLI:
 
 ```sh
 STM32_Programmer_CLI -c port=SWD \
                      -ob WRP1A_STRT=0x7F WRP1A_END=0x00 \
                      -ob WRP1B_STRT=0x7F WRP1B_END=0x00
-```
 
-**Verify WRP cleared** before proceeding:
-```sh
+# Always verify:
 STM32_Programmer_CLI -c port=SWD -ob displ
 ```
-Look for `WRP` fields showing no protected sectors. This step is
-intentionally pedantic because once the next flash runs, a bad BL
-image + active WRP = bricked board requiring the next step of
-recovery (chip erase via `-c halt` + `-e all`, then re-fetch the
-board from the shelf of spares).
+
+Confirm no WRP fields show protected sectors before proceeding. This
+step is pedantic on purpose: bad BL + active WRP = bricked part
+until a full chip erase on the programmer.
 
 ### Step 2.2 — Flash the new BL
 
@@ -147,7 +162,7 @@ Same as Step 1.1.
 
 ### Step 2.3 — Re-apply WRP
 
-Same as Step 1.3 — `cf config ob apply-wrp --sector-mask 0x01`.
+Same as Step 1.3.
 
 ### Step 2.4 — Verify
 
@@ -157,127 +172,66 @@ Same as Step 1.4.
 
 ## 3. RDP policy
 
-STM32 read-protection has three levels. Current policy for this
-project:
+STM32 read-protection has three levels. Current project policy:
 
-| Level | Meaning                                 | When to use |
-|------:|-----------------------------------------|-------------|
-| 0     | No protection (debug full, readout full)| Dev boards only |
-| 1     | Debug blocked when unlocked; readout blocked; regression to Level 0 triggers a full chip erase | Production units |
-| 2     | Level 1 + permanent lockout; **irreversible** | **Never** |
+| Level | Meaning | When to use |
+|------:|---------|-------------|
+| 0 (`0xAA`) | No protection (debug full, readout full) | Dev boards |
+| 1 (`0xBB`) | Debug blocked; readout blocked; downgrade to 0 triggers full chip erase | Production units |
+| 2 (`0xCC`) | Level 1 + permanent lockout; **irreversible** | **Never** |
 
-**Level 2 is forbidden** by this project. It's a one-way trip: the
-part loses SWD access permanently, no factory workflow can undo it, and
-you cannot re-provision a unit that's drifted onto the wrong firmware.
-Tooling in this repo has no code path that writes RDP — the reporting
-surface is read-only (`cf config ob read` shows the current level).
-
-**Setting Level 1** for production units is done out of band via
-CubeProgrammer during the provisioning flow. Insert as Step 1.5 once a
-dev board has been fully validated:
-
-```sh
-STM32_Programmer_CLI -c port=SWD -ob RDP=0xBB
-```
-
-(`0xBB` is Level 1 on H7; `0xAA` is Level 0 — the values that are
-*not* Level 2.) Confirmation prompts are intentional — read them.
+**Level 2 is forbidden.** One-way trip: the part loses SWD access
+permanently, no workflow can undo it. This project's tooling has no
+code path that writes RDP at all — `cf config ob read` reports the
+current level, nothing writes it. RDP changes happen out of band
+via CubeProgrammer, at provisioning time only, with a second person
+watching.
 
 ---
 
-## 4. Bench-validation tests
+## 4. Recovery — when things go wrong
 
-These tests prove the protection layers actually fire on real
-silicon, not just in unit tests against the in-process stub. Run them
-once per hardware revision; log the result somewhere that outlives
-the current operator.
+### "Board responds to `cf discover` but refuses CONNECT"
 
-### Test 4.1 — "Bad linker": app targets BL sector
+**Likely cause**: a prior `cf` run left the BL's session latch set
+and the 30 s watchdog hasn't fired yet.
 
-**Setup**: Build a test app whose linker script uses
-`MEMORY { FLASH (rx) : ORIGIN = 0x08000000, LENGTH = ... }` — i.e.
-deliberately points at the BL region. Sign-off in the commit message
-of the test project; do not leave it lying around as a default
-fallback.
+**Fix**: wait 30 s, or hit NRST on the board.
 
-**Command**:
-```sh
-cf --interface slcan --channel /dev/cu.usbmodem1201 \
-   --bitrate 500000 --node-id 0x1 \
-   flash bad-linker-test.elf
-```
+### "Board ignores every CAN frame after a flash"
 
-**Expected**:
-- `cf` exits **non-zero before any CAN frame goes out** — the
-  firmware loader's `TouchesBootloaderSector` check rejects at load
-  time. Error message points at segment 0.
-- No frames on the bus (verify with `candump` or `cf diagnose
-  log-stream` — if the BL sees nothing, the host rejected early).
+**Likely cause**: `cf flash --jump` succeeded and the application
+is running, but the app doesn't have an FDCAN filter installed, so
+nothing reaches the dispatcher.
 
-**What this proves**: Layer 1 host-side defence (fix/12's
-`validate_fits_app_region` and the `base_addr == BL_APP_BASE` guard
-in `cli/flash.rs`). The BL never has to decide.
+**Fix**:
+1. Hit NRST on the board.
+2. Within the 2 s auto-jump window, spam `cf discover` to cancel
+   auto-jump and keep the BL on.
+3. Once BL responds, re-flash or debug the application.
 
-### Test 4.2 — Chunk outside writable range
+### "WRP is stuck on and I need to update the BL"
 
-**Setup**: Use `cf send-raw` (generic primitive for building arbitrary
-frames) to send a hand-crafted `CMD_FLASH_WRITE` targeting
-`BL_BOOT_BASE + 0x100` — inside the bootloader's own sector. Requires
-an open session (`CONNECT` first).
+Follow [§2 — Updating the bootloader](#2-updating-the-bootloader-itself).
+Clear WRP via SWD first.
 
-**Expected**: Device answers `NACK(BL_NACK_PROTECTED_ADDR)` (code
-`0x01`). The frame is gated by `bl_flash_range_is_writable` in
-`bl_flash.c`, which requires `start >= BL_APP_BASE`.
+If CubeProgrammer refuses the OB write, the chip is probably at
+RDP Level 1 with a locked state. Downgrading to Level 0 triggers a
+full mass-erase — acceptable here (you're about to reflash
+anyway), but any data in sector 7 (NVM) is lost.
 
-**What this proves**: Layer 1.1 BL-side range check, independent of
-what the host claims.
+### "Accidentally wrote RDP Level 2"
 
-### Test 4.3 — Erase sector 0
+Unrecoverable. Swap the MCU from spares, file an incident report
+noting serial + who + when, audit the provisioning workflow that
+allowed it.
 
-**Setup**: Send `CMD_FLASH_ERASE start=0x08000000 length=0x00020000`
-(one full BL sector) via `cf send-raw` or a hand-crafted test.
+### "Board boots but LEDs show fault"
 
-**Expected**: `NACK(BL_NACK_PROTECTED_ADDR)`. Rejected by the same
-`range_is_writable` check before the HAL ever sees the erase
-request.
-
-### Test 4.4 — **WRPERR: flash controller blocks a bypassed write**
-
-**The one test in this doc that isn't covered by automated suites
-yet.** Validates that Layer 2 (WRP) would have caught the write even
-if Layer 1 failed.
-
-**Setup**:
-1. Provision a board with WRP on sector 0 (Steps 1.1–1.4 above).
-2. Attach ST-Link + connect via OpenOCD or CubeProgrammer.
-3. **Deliberately bypass the BL**: use the debugger to load and run a
-   test routine that calls `HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD,
-   0x08000000, …)` directly. A 30-line C program + openocd load/run
-   script is sufficient; no need to flash the test through the BL.
-
-**Expected**: `HAL_FLASH_Program` returns `HAL_ERROR`, the flash
-controller's `FLASH_SR1.WRPERR` bit is set, and a debugger-side read of
-`0x08000000` shows the original BL vector table unchanged.
-
-**What this proves**: WRP actually engages at the hardware level. If
-this test fails, WRP didn't latch — revisit Step 1.3 and the
-`HAL_FLASH_OB_Launch` return path.
-
-**Status today**: ⚠️ **not validated on current hardware revision**.
-Target: do this once and record the outcome here. After the first
-successful run, re-validate whenever the BL firmware's flash-control
-code path changes (unlikely — it's stable).
-
-### Test 4.5 — Oversize image rejected
-
-**Setup**: Craft a binary whose `expected_size` in `CMD_FLASH_VERIFY`
-exceeds `BL_APP_SIZE` (768 KB). Easiest: flash a 700 KB app
-normally, then manually issue `CMD_FLASH_VERIFY` with
-`expected_size = 0xFFFFFFFF` via `cf send-raw` against an open
-session.
-
-**Expected**: `NACK(BL_NACK_OUT_OF_BOUNDS)` from `handle_flash_verify`'s
-`expected_size > BL_APP_SIZE` gate. No metadata written.
+Check `cf diagnose log-stream` — the BL logs fault reasons (HAL
+init failure, bad boot magic, flash read error) to its log ring,
+and the log stream replays whatever it's buffered. Most boot-time
+faults leave a WARN or ERROR line explaining the cause.
 
 ---
 
@@ -289,35 +243,7 @@ session.
 | Check WRP status | `cf config ob read --json \| jq .wrp_sector_mask` |
 | Apply WRP (sector 0) | `cf config ob apply-wrp --sector-mask 0x01` |
 | Flash an app | `cf flash my-app.elf --verify-after --jump` |
-| Force app → BL (from running app) | `cf send-raw 0x001 03 06 01` |
+| Force app → BL (from a running app) | `cf send-raw 0x001 03 06 01` |
 | Dump BL logs live | `cf diagnose log-stream` |
 | Show health record | `cf diagnose health` |
-
----
-
-## 6. When things go wrong
-
-### "WRP stuck on but I want to update the BL"
-Follow §2 — SWD-clear WRP first. If CubeProgrammer refuses the OB
-write, the chip may be at RDP Level 1 with a locked state — a
-Level-1 → Level-0 transition triggers a full mass-erase, which is
-acceptable (you're about to reflash BL + app anyway) but means any
-NVM data in sector 7 is lost.
-
-### "Accidentally wrote RDP Level 2"
-Unrecoverable. Swap the MCU from spares; file an incident report
-noting which unit serial + who; audit the provisioning workflow that
-let it happen.
-
-### "Board responds to `cf discover` but refuses CONNECT"
-Likely cause: a prior `cf` run left the BL with `g_session_active =
-true` and the 30 s watchdog hasn't fired yet. Either wait 30 s or NRST
-the board.
-
-### "Board ignores every CAN frame after a flash"
-Likely cause: `cf flash --jump` succeeded and the app is running, but
-the app doesn't implement the ISO-TP + `APP_CTRL` convention and has
-no FDCAN filter installed. NRST the board; within the 2 s auto-jump
-window, blast a `cf discover` to cancel auto-jump and stay in BL.
-Future: a boot-time force-BL GPIO check would make this less
-time-sensitive (see ROADMAP).
+| Read option bytes | `cf config ob read` |
