@@ -2,7 +2,7 @@
 
 # IFS08 - STM32 CAN Bootloader
 
-> **Start here:** read [ARCHITECTURE.md](ARCHITECTURE.md) for the memory map, boot flow and firmware contract, and [ROADMAP.md](ROADMAP.md) for the phased delivery plan and current status of every branch. The roadmap is regenerated automatically on every push to `dev` — do not hand-edit it.
+> **Start here:** read [ARCHITECTURE.md](ARCHITECTURE.md) for the memory map, boot flow and firmware contract, [PROVISIONING.md](PROVISIONING.md) for bringing a fresh board to production-ready state + the bench checklist that validates protection, and [ROADMAP.md](ROADMAP.md) for the phased delivery plan and current status of every branch. The roadmap is regenerated automatically on every push to `dev` — do not hand-edit it.
 
 Custom CAN bootloader for the **STM32H733** nodes of the IFS08. Runs from the first 128 KB of flash and exposes a classic FDCAN protocol to erase, program and jump to the application image at `0x08020000`, with CRC32 verification and metadata-based validity checks.
 
