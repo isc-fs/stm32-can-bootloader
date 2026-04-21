@@ -853,6 +853,22 @@ The same check drives `BL_HEALTH_FLAG_WRP_PROTECTED` and
 `BL_LIVE_FLAG_WRP_PROTECTED`, so a host can gate its own apply
 decision on the flag without having to poll `OB_READ` first.
 
+##### RDP policy
+
+This project deliberately **reads** the RDP level (exposed in the
+status record above) but has **no code path that writes it**. RDP is
+set out-of-band during provisioning — see
+[PROVISIONING.md § 3](PROVISIONING.md#3-rdp-policy) for the concrete
+procedure and the irreversible-Level-2 guard rail.
+
+The short version: dev boards stay at Level 0, production units get
+Level 1 via STM32CubeProgrammer at provisioning time, **Level 2 is
+forbidden** (one-way trip that bricks the debug surface permanently).
+Keeping RDP out of the CAN-reachable surface is intentional — a
+misfiring host tool cannot accidentally transition a unit into
+Level 2 because the firmware cannot even emit the instruction that
+would do it.
+
 ### Session watchdog
 
 Once `CONNECT` succeeds the bootloader arms a watchdog timer that
