@@ -1,4 +1,4 @@
- /* USER CODE BEGIN Header */
+/* USER CODE BEGIN Header */
 /**
  ******************************************************************************
  * @file           : main.c
@@ -232,7 +232,7 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.DataTimeSeg1 = 1;
   hfdcan2.Init.DataTimeSeg2 = 1;
   hfdcan2.Init.MessageRAMOffset = 0;
-  hfdcan2.Init.StdFiltersNbr = 1;
+  hfdcan2.Init.StdFiltersNbr = 2;
   hfdcan2.Init.ExtFiltersNbr = 1;
   hfdcan2.Init.RxFifo0ElmtsNbr = 16;
   hfdcan2.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
@@ -391,17 +391,32 @@ static void Bootloader_MainLoop(void) {
 					g_AutoJumpEnabled = 0U;
 
 					bl_proto_id_t id;
-					bl_proto_parse_id(rxHeader.Identifier, &id);
+					/* `bl_proto_parse_id` returns false on malformed
+					 * IDs (bits 10..5 set, or reserved node→host node
+					 * IDs). The FDCAN filter already rejects anything
+					 * we can't decode, so in practice this guard is
+					 * defence-in-depth against future filter drift
+					 * or loopback-harness feeds. On false we skip the
+					 * dispatch but still fall through to the tick
+					 * block below, so session watchdogs keep running. */
+					if (bl_proto_parse_id(rxHeader.Identifier, &id)) {
+						/* `HAL_FDCAN_GetRxMessage` already extracts the DLC
+						 * nibble into bits 3:0 of rxHeader.DataLength
+						 * (see `FDCAN_ELEMENT_MASK_DLC >> 16U` in the
+						 * STM32H7 HAL). For classic CAN the DLC value
+						 * equals the byte count, so we just mask to the
+						 * low nibble — NO extra shift. Earlier versions
+						 * shifted >>16 again, which zeroed out every
+						 * length and silently dropped every incoming
+						 * frame at bl_proto_dispatch's `length == 0U`
+						 * gate. */
+						uint8_t length = (uint8_t)(rxHeader.DataLength & 0x0FU);
+						if (length > 8U) {
+							length = 8U;
+						}
 
-					/* FDCAN_DLC_BYTES_N is encoded in bits 19:16 of the
-					 * DataLength word. For classic CAN (0..8) the field
-					 * value equals the byte count. */
-					uint8_t length = (uint8_t)((rxHeader.DataLength >> 16) & 0x0FU);
-					if (length > 8U) {
-						length = 8U;
+						bl_proto_dispatch(&id, rxData, length);
 					}
-
-					bl_proto_dispatch(&id, rxData, length);
 				}
 			}
 		}
@@ -434,10 +449,24 @@ static void Bootloader_MainLoop(void) {
 	}
 }
 
-/* Configure FDCAN2 filters so FIFO0 only receives frames whose 4-bit
- * destination field (bits 3:0 of the 11-bit ID) matches either this
- * board's BL_NODE_ID or the broadcast address 0xF. Everything else is
- * rejected at the peripheral and never hits software. */
+/* Configure FDCAN2 filters so FIFO0 only receives host→node frames
+ * addressed to this board's BL_NODE_ID or the broadcast address 0xF.
+ * Under the fix/12 wire format the 11-bit ID layout is
+ *
+ *   bits 10..5 = 0   (reserved)
+ *   bit  4     = 0   (host→node; node→host is 1 and must be rejected)
+ *   bits 3..0  = destination node
+ *
+ * We use a mask filter that matches exactly five low bits
+ * (`BL_PROTO_ID_VALID_MASK = 0x01F`), which pins bit 4 to 0 and the
+ * low nibble to our node (or 0xF for broadcast). That rejects:
+ *   - every node→host frame (bit 4 set)
+ *   - frames addressed to a different node (low nibble mismatch)
+ *   - malformed IDs with bits 5..10 set (unknown future extensions)
+ *
+ * Our own TX never loops back through this filter because it sits at
+ * a different ID (direction bit 4 set), so the BL can't accidentally
+ * receive its own replies. */
 static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void) {
 	FDCAN_FilterTypeDef filter = { 0 };
 	HAL_StatusTypeDef st;
@@ -445,17 +474,18 @@ static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void) {
 	filter.IdType       = FDCAN_STANDARD_ID;
 	filter.FilterType   = FDCAN_FILTER_MASK;
 	filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-	filter.FilterID2    = BL_PROTO_DST_MASK;  /* match dst bits only */
+	filter.FilterID2    = BL_PROTO_ID_VALID_MASK;
 
-	/* Unicast to this node. */
+	/* Unicast: host → this node. ID = BL_PROTO_DIR_HOST_TO_NODE | BL_NODE_ID
+	 * (direction bit is 0; just the low nibble). */
 	filter.FilterIndex = 0U;
-	filter.FilterID1   = BL_NODE_ID & BL_PROTO_DST_MASK;
+	filter.FilterID1   = BL_NODE_ID & BL_PROTO_NODE_MASK;
 	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
 	if (st != HAL_OK) {
 		return st;
 	}
 
-	/* Broadcast to every bootloader on the bus. */
+	/* Broadcast: host → 0xF. */
 	filter.FilterIndex = 1U;
 	filter.FilterID1   = BL_PROTO_NODE_BROADCAST;
 	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
