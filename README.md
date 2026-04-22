@@ -56,4 +56,4 @@ fwinfo, dispatcher gates, ID parsing, app-stack validation. See
 
 ---
 
-*ISC Racing Team — IFS08 Driverless*
+*ISC Racing Team*
