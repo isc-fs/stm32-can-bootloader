@@ -43,4 +43,4 @@ encrypted transport) is deferred pending a deployment-model change.
 
 ---
 
-*ISC Racing Team — IFS08 Driverless*
+*ISC Racing Team*
