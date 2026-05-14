@@ -995,12 +995,23 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
 
     /* PCI gate: accept SF/FF (start of a new message) and CF/FC
      * (continuation / flow control of an in-flight one). Anything
-     * else is malformed; silently drop. Under the fix/12 wire format
-     * message type lives in the reassembled payload, not the ID, so
-     * the PCI byte is the only thing we key on at the frame level. */
+     * else is malformed. Under the fix/12 wire format message type
+     * lives in the reassembled payload, not the ID, so the PCI byte
+     * is the only thing we key on at the frame level.
+     *
+     * On reject we emit NACK(TRANSPORT_ERROR) rather than silently
+     * dropping — gives the host (or a fuzzer) the same diagnostic
+     * visibility every other transport-level error path provides,
+     * and prevents the dispatcher from looking like a black hole
+     * under malformed input. The earlier gate (direction +
+     * addressed_to_us + length>0) already filtered everything not
+     * meant for us, so we know the host expected a reply. The
+     * rejected_opcode is 0 because the frame failed before a
+     * reassembled message exposed one. Issue #60. */
     uint8_t pci_hi = data[0] & BL_ISOTP_PCI_MASK_HI;
     if (pci_hi != BL_ISOTP_PCI_SF && pci_hi != BL_ISOTP_PCI_FF
         && pci_hi != BL_ISOTP_PCI_CF && pci_hi != BL_ISOTP_PCI_FC) {
+        send_nack(0x00U, BL_NACK_TRANSPORT_ERROR);
         return;
     }
 
