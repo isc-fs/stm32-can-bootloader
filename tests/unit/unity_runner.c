@@ -79,6 +79,21 @@ void test_log_drain_well_formed_entry_passes_through(void);
 void test_log_drain_severity_filter_below_threshold_is_skipped(void);
 void test_log_init_zeros_ring_when_magic_is_wrong(void);
 
+/* ---- test_bl_app_validate.c ---- */
+void test_app_stack_dtcm_base_accepted(void);
+void test_app_stack_dtcm_interior_accepted(void);
+void test_app_stack_dtcm_initial_msp_accepted(void);
+void test_app_stack_just_past_dtcm_rejected(void);
+void test_app_stack_d1_base_accepted(void);
+void test_app_stack_d1_interior_accepted(void);
+void test_app_stack_d1_initial_msp_accepted(void);
+void test_app_stack_just_past_d1_rejected_regression(void);
+void test_app_stack_far_past_d1_rejected(void);
+void test_app_stack_gap_between_dtcm_and_d1_rejected(void);
+void test_app_stack_flash_address_rejected(void);
+void test_app_stack_zero_rejected(void);
+void test_app_stack_top_of_address_space_rejected(void);
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -138,6 +153,21 @@ int main(void)
     RUN_TEST(test_log_drain_well_formed_entry_passes_through);
     RUN_TEST(test_log_drain_severity_filter_below_threshold_is_skipped);
     RUN_TEST(test_log_init_zeros_ring_when_magic_is_wrong);
+
+    /* test_bl_app_validate.c */
+    RUN_TEST(test_app_stack_dtcm_base_accepted);
+    RUN_TEST(test_app_stack_dtcm_interior_accepted);
+    RUN_TEST(test_app_stack_dtcm_initial_msp_accepted);
+    RUN_TEST(test_app_stack_just_past_dtcm_rejected);
+    RUN_TEST(test_app_stack_d1_base_accepted);
+    RUN_TEST(test_app_stack_d1_interior_accepted);
+    RUN_TEST(test_app_stack_d1_initial_msp_accepted);
+    RUN_TEST(test_app_stack_just_past_d1_rejected_regression);
+    RUN_TEST(test_app_stack_far_past_d1_rejected);
+    RUN_TEST(test_app_stack_gap_between_dtcm_and_d1_rejected);
+    RUN_TEST(test_app_stack_flash_address_rejected);
+    RUN_TEST(test_app_stack_zero_rejected);
+    RUN_TEST(test_app_stack_top_of_address_space_rejected);
 
     return UNITY_END();
 }

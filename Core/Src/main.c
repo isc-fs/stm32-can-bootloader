@@ -26,6 +26,7 @@
 #include "stm32h7xx_hal_rcc_ex.h"
 #include "stm32h7xx_hal_pwr_ex.h"
 
+#include "bl_app_validate.h"
 #include "bl_memmap.h"
 #include "bl_config.h"
 #include "bl_dtc.h"
@@ -511,9 +512,10 @@ void Bootloader_JumpToApplication(void) {
 
 	/* --- Basic healthchecks --- */
 
-	/* 1) Stack pointer in valid RAM (DTCM o RAM_D1) */
-	if (!((appStack >= 0x20000000U && appStack <= 0x20020000U) ||  // DTCM 128K
-			(appStack >= 0x24000000U && appStack <= 0x24050000U))) { // RAM_D1 320K
+	/* 1) Stack pointer in valid RAM (DTCM or RAM_D1) — same predicate
+	 *    Bootloader_CheckApplication uses, so a metadata-approved app
+	 *    can't be silently rejected here. See bl_app_validate.h. */
+	if (!bl_app_stack_in_legal_range(appStack)) {
 		LED_ERR_ON();
 		return;
 	}
@@ -616,11 +618,15 @@ uint8_t Bootloader_CheckApplication(void) {
 	uint32_t appStack = *(__IO uint32_t*) BL_APP_BASE;
 	uint32_t appEntry = *(__IO uint32_t*) (BL_APP_BASE + 4U);
 
-	/* stack in DTCM o D1 RAM */
-	if (((appStack & 0x2FFE0000U) != 0x20000000U) && /* DTCM */
-	((appStack & 0x2FF00000U) != 0x24000000U)) /* D1 SRAM */
-	{
-		return 0x15;  // stack pointer fuera de rango
+	/* Stack in DTCM or D1 RAM. Previously this used bitmask checks
+	 * (& 0x2FF00000 == 0x24000000) that accepted the full 1 MB above
+	 * 0x24000000 — much larger than the real 320 KB RAM_D1 — while
+	 * Bootloader_JumpToApplication used a stricter range check. That
+	 * divergence let a malformed app pass Check and then silently
+	 * fail at Jump time with only an LED_ERR_ON. Both now share the
+	 * same predicate (see bl_app_validate.h). Issue #66. */
+	if (!bl_app_stack_in_legal_range(appStack)) {
+		return 0x15;
 	}
 
 	/* entry must be within the app's range */
