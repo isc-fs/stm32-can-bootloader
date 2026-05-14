@@ -38,11 +38,15 @@ static const bl_nvm_entry_t *slot_at(uint32_t slot)
 
 /* Write one 32-byte FLASHWORD at `addr`. Caller owns the unlock /
  * lock; this wrapper lets the rest of the file stay readable. */
-static HAL_StatusTypeDef program_flashword(uint32_t addr, const void *data)
+/* `uintptr_t addr` rather than `uint32_t addr` so the host-test build
+ * (where pointers are 64-bit) preserves the full BL_NVM_BASE-relative
+ * address through the call. On STM32 sizeof(uintptr_t) == sizeof(uint32_t)
+ * so there's no behavioural drift. */
+static HAL_StatusTypeDef program_flashword(uintptr_t addr, const void *data)
 {
     return HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD,
                              addr,
-                             (uint32_t)data);
+                             (uintptr_t)data);
 }
 
 /* Erase sector 7. The app metadata word at BL_APP_METADATA_ADDR is in
