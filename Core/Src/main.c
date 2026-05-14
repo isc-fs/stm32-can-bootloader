@@ -350,12 +350,18 @@ static void Bootloader_Init(void) {
 		}
 	}
 
-	if (HAL_FDCAN_ActivateNotification(&hfdcan2,
-	FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
-		LED_ERR_ON();
-		while (1) {
-		}
-	}
+	/* NOTE on FDCAN interrupts: the main loop drains RX_FIFO0 by
+	 * polling (HAL_FDCAN_GetRxFifoFillLevel + GetRxMessage below), so
+	 * we deliberately do NOT activate FDCAN_IT_RX_FIFO0_NEW_MESSAGE.
+	 *
+	 * The previous code enabled the notification but never overrode
+	 * HAL_FDCAN_RxFifo0Callback — so every RX frame entered the IRQ
+	 * (FDCAN2_IT0_IRQHandler → HAL_FDCAN_IRQHandler) only to dispatch
+	 * the default weak callback and return. Pure overhead, and a
+	 * footgun for anyone who later added a real callback expecting
+	 * it to actually drive RX while the main loop was still polling
+	 * — concurrent drain of the same FIFO would have dropped frames.
+	 * Audit follow-up (#68 last bullet). */
 
 	/* Check if application explicitly requested to stay in bootloader */
 	uint8_t bootReq = Bootloader_IsBootRequestActive();
