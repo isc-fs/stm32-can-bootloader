@@ -246,6 +246,48 @@ void test_isotp_rx_timeout_handles_tick_wraparound(void)
     TEST_ASSERT_EQUAL_UINT8(PEER_HOST, peer_out);
 }
 
+void test_isotp_rx_cf_with_no_payload_is_rejected(void)
+{
+    /* Regression for the first bullet of audit follow-ups (#68): a CF
+     * with length == 1 (PCI byte only, no payload data) used to be
+     * silently accepted — handle_cf computed frame_avail = 0,
+     * memcpy'd 0 bytes, but still advanced rx->next_seq. The protocol
+     * then proceeded with a sequence-vs-content invariant violation:
+     * every subsequent CF consumed a sequence slot without adding to
+     * rx->received, so rx->total_len was never reached and the
+     * reassembler stalled until the 1-second deadline fired.
+     *
+     * The fix rejects zero-payload CFs at the PCI level so the host
+     * gets immediate diagnostic feedback (NACK(TRANSPORT_ERROR) via
+     * the dispatcher) instead of waiting for the timeout. */
+    bl_isotp_rx_t rx;
+    bl_isotp_rx_init(&rx);
+
+    /* Start a multi-frame reassembly so we're in WAIT_CF state. */
+    uint8_t ff_chunk[6] = {1, 2, 3, 4, 5, 6};
+    uint8_t ff[8] = {0};
+    make_ff(ff, 14, ff_chunk, 6);
+    bool send_fc;
+    TEST_ASSERT_EQUAL_INT(BL_ISOTP_OK,
+        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, NOW_DONT_CARE,
+                         ff, 8, &send_fc));
+
+    /* Now feed a CF with only the PCI byte (length=1). */
+    uint8_t cf_pci_only[1] = { (uint8_t)(BL_ISOTP_PCI_CF | 0x01U) };
+    bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
+                                               cf_pci_only, 1, &send_fc);
+
+    /* The fix rejects it as malformed PCI rather than stalling. */
+    TEST_ASSERT_EQUAL_INT(BL_ISOTP_ERR_BAD_PCI, st);
+
+    /* And critically, rx->next_seq was NOT advanced — so if the host
+     * recovers and resends a well-formed CF, the protocol picks up
+     * where it left off (seq=1) instead of getting stuck at seq=2
+     * with no path to total_len. */
+    TEST_ASSERT_EQUAL_UINT8(1U, rx.next_seq);
+}
+
 void test_isotp_rx_sf_zero_length_is_rejected(void)
 {
     bl_isotp_rx_t rx;
