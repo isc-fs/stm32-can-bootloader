@@ -53,6 +53,15 @@ HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *pEraseInit, uint32_t
 uint32_t HAL_GetTick(void);
 void     HAL_Delay(uint32_t ms);
 
+/* ---- Backup-domain stubs ----
+ *
+ * bl_log + bl_dtc on the chip unlock BKPSRAM access and enable its
+ * clock as part of their init. On host they're no-ops. The macro form
+ * mirrors the CMSIS naming (`__HAL_RCC_*_CLK_ENABLE`) so the production
+ * code compiles unchanged. */
+void HAL_PWR_EnableBkUpAccess(void);
+#define __HAL_RCC_BKPRAM_CLK_ENABLE()    ((void)0)
+
 /* ---- Test-only helpers (defined alongside the stubs) ---- */
 void mock_flash_reset(void);            /* fill the 1-MB buffer with 0xFF */
 void mock_flash_set_program_fail(int n);/* next N program calls return HAL_ERROR */

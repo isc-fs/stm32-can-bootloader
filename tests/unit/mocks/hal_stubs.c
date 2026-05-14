@@ -145,3 +145,5 @@ HAL_StatusTypeDef HAL_FLASHEx_Erase(FLASH_EraseInitTypeDef *pEraseInit, uint32_t
 
 uint32_t HAL_GetTick(void) { return g_tick; }
 void     HAL_Delay(uint32_t ms) { g_tick += ms; }
+
+void HAL_PWR_EnableBkUpAccess(void) { /* no-op on host */ }

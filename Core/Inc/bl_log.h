@@ -58,8 +58,14 @@
 #define BL_LOG_DRAIN_BUDGET         256U    /* bytes per NOTIFY_LOG emission */
 #define BL_LOG_MIN_EMIT_INTERVAL_MS 50U     /* rate-limit NOTIFY_LOG traffic */
 
-/* ---- Placement in BKPSRAM ---- */
+/* ---- Placement in BKPSRAM ----
+ *
+ * BL_LOG_RING_ADDR is overridable so host-side unit tests can point it
+ * into a process-local buffer. On the chip the value is fixed to the
+ * BKPSRAM slot that follows bl_dtc's table (see the map above). */
+#ifndef BL_LOG_RING_ADDR
 #define BL_LOG_RING_ADDR            0x38800400U
+#endif
 #define BL_LOG_MAGIC                0x10CCABCDU
 
 /* ---- Severity levels (match bl_dtc for consistency) ---- */

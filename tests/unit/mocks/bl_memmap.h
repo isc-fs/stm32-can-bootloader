@@ -57,4 +57,19 @@ extern uint8_t g_fake_flash[1024U * 1024U];
 /* ---- Boot-request handshake (irrelevant on host but kept for parity) ---- */
 #define BL_BOOT_REQ_MAGIC        0xB00710ADU
 
+/* ---- bl_log ring placement override ----
+ *
+ * Production bl_log.h points BL_LOG_RING_ADDR at the chip's BKPSRAM
+ * slot (0x38800400). On host that's a wild address; redirect it to a
+ * process-local buffer so test cases can plant arbitrary state in it
+ * by writing through `(bl_log_ring_t *)BL_LOG_RING_ADDR` directly.
+ *
+ * Size = 32-byte header + BL_LOG_RING_BYTES (1024) = 1056. We don't
+ * include bl_log.h here to keep the dependency direction one-way; the
+ * literal is checked by bl_log.h's own _Static_assert on the chip side
+ * (which still compiles in the host build) so any size drift fails at
+ * the host compile step. */
+extern uint8_t g_fake_log_ring[1056];
+#define BL_LOG_RING_ADDR    ((uintptr_t)g_fake_log_ring)
+
 #endif /* BL_MEMMAP_H */
