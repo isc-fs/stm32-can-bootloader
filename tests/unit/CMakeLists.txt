@@ -57,6 +57,7 @@ add_executable(bl_unit_tests
     test_bl_nvm.c
     test_bl_proto_id.c
     test_bl_log.c
+    test_bl_app_validate.c
     unity_runner.c
 )
 
