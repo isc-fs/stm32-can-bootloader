@@ -87,4 +87,14 @@ void bl_health_fill_record(bl_health_record_t *out);
  * otherwise. */
 void bl_health_tick(uint32_t now_ms);
 
+/* Record one bootloader-initiated flash operation (program or erase
+ * via bl_flash_*). Bumps the in-RAM counter immediately and persists
+ * it to NVM under BL_NVM_KEY_FLASH_WRITE_COUNT so the next boot's
+ * counter starts where this one left off. The persisted value is
+ * what bl_health_fill_record reports as `flash_write_count`. NVM
+ * writes are themselves coalesced via the log-structured store's
+ * own compaction, so calling this per-op is not flash-pathological
+ * — every ~4000 ops triggers a single compaction-erase. */
+void bl_health_record_flash_write(void);
+
 #endif /* BL_HEALTH_H */
