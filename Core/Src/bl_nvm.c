@@ -319,6 +319,125 @@ static bl_nvm_status_t compact_and_append(uint16_t new_key,
 }
 
 
+/* ---- Compact + replace metadata (used by bl_flash_write_metadata) ----
+ *
+ * STM32 flash can only flip 1→0; the app metadata FLASHWORD at
+ * BL_APP_METADATA_ADDR therefore can't be rewritten in place once a
+ * previous flash has set any bit. This helper does the same
+ * snapshot / erase / rewrite dance as compact_and_append, but writes a
+ * caller-supplied metadata value at the end instead of restoring the
+ * old one — preserving live NVM entries while replacing the metadata
+ * with fresh content.
+ *
+ * Returns BL_NVM_FULL if there are more than BL_NVM_MAX_LIVE_ENTRIES
+ * live keys (same cap as compact_and_append). The caller should treat
+ * that as a fatal condition, recoverable only via bl_nvm_format().
+ */
+bl_nvm_status_t bl_nvm_compact_replace_meta(const uint32_t new_meta[])
+{
+    bl_nvm_entry_t buf[BL_NVM_MAX_LIVE_ENTRIES];
+    uint32_t count = 0U;
+
+    /* Pass 1: dedup MAGIC entries, keep latest seq per key (mirrors
+     * compact_and_append's pass 1). */
+    uint32_t end_slot = g_write_pos / BL_NVM_ENTRY_SIZE;
+    for (uint32_t i = 0U; i < end_slot; i++) {
+        const bl_nvm_entry_t *e = slot_at(i);
+        if (e->magic != BL_NVM_ENTRY_MAGIC) {
+            continue;
+        }
+        uint32_t j;
+        for (j = 0U; j < count; j++) {
+            if (buf[j].key == e->key) {
+                if (e->seq > buf[j].seq) {
+                    buf[j] = *e;
+                }
+                break;
+            }
+        }
+        if (j == count) {
+            if (count >= BL_NVM_MAX_LIVE_ENTRIES) {
+                return BL_NVM_FULL;
+            }
+            buf[count++] = *e;
+        }
+    }
+
+    /* Pass 2: drop tombstones. */
+    {
+        uint32_t live = 0U;
+        for (uint32_t i = 0U; i < count; i++) {
+            if (buf[i].len > 0U) {
+                if (i != live) {
+                    buf[live] = buf[i];
+                }
+                live++;
+            }
+        }
+        count = live;
+    }
+
+    if (HAL_FLASH_Unlock() != HAL_OK) {
+        return BL_NVM_HARDWARE;
+    }
+
+    HAL_StatusTypeDef st = erase_nvm_sector();
+    if (st != HAL_OK) {
+        HAL_FLASH_Lock();
+        return BL_NVM_HARDWARE;
+    }
+
+    /* Rewrite live entries with freshly-numbered seq values. */
+    uint32_t new_seq = 1U;
+    for (uint32_t i = 0U; i < count; i++) {
+        buf[i].seq = new_seq++;
+        st = program_flashword(BL_NVM_BASE + i * BL_NVM_ENTRY_SIZE, &buf[i]);
+        if (st != HAL_OK) {
+            HAL_FLASH_Lock();
+            return BL_NVM_HARDWARE;
+        }
+    }
+
+    /* Write the new metadata FLASHWORD. */
+    st = program_flashword(BL_APP_METADATA_ADDR, new_meta);
+    HAL_FLASH_Lock();
+    if (st != HAL_OK) {
+        return BL_NVM_HARDWARE;
+    }
+
+    g_write_pos = count * BL_NVM_ENTRY_SIZE;
+    g_max_seq   = new_seq - 1U;
+    return BL_NVM_OK;
+}
+
+
+/* ---- Format (unconditional sector erase + reset) ---- */
+/*
+ * Erases sector 7 in its entirety — NVM key-value entries AND the app
+ * metadata FLASHWORD — and resets in-RAM pointers. Intended for
+ * explicit operator-driven recovery when the sector has wedged in a
+ * way the automatic compaction paths can't escape (e.g. partial writes
+ * from prior power loss).
+ *
+ * After this call the BL boot path will see no_valid_app and a fresh
+ * flash session is required to install a runnable image.
+ */
+bl_nvm_status_t bl_nvm_format(void)
+{
+    if (HAL_FLASH_Unlock() != HAL_OK) {
+        return BL_NVM_HARDWARE;
+    }
+    HAL_StatusTypeDef st = erase_nvm_sector();
+    HAL_FLASH_Lock();
+    if (st != HAL_OK) {
+        return BL_NVM_HARDWARE;
+    }
+    g_write_pos = 0U;
+    g_max_seq   = 0U;
+    return BL_NVM_OK;
+}
+
+
 /* ---- Write (fast append, with compaction fallback) ---- */
 
 bl_nvm_status_t bl_nvm_write(uint16_t key, const void *value, uint8_t len)
@@ -347,11 +466,15 @@ bl_nvm_status_t bl_nvm_write(uint16_t key, const void *value, uint8_t len)
     HAL_FLASH_Lock();
 
     if (st != HAL_OK) {
-        /* Back off the seq counter so a subsequent successful write
-         * doesn't leave a gap — doesn't affect correctness but keeps
-         * the sequence tidy. */
+        /* Append failed — most common cause: the destination slot has
+         * stray non-0xFF bits from a previous partial / power-lost write.
+         * STM32 flash refuses 0→1 transitions, so that slot is
+         * permanently un-programmable until the whole sector is erased.
+         * Fall through to compaction (sector erase + rewrite of live
+         * entries) and retry the append from a clean base. If compaction
+         * itself fails, the original HARDWARE error is surfaced. */
         g_max_seq--;
-        return BL_NVM_HARDWARE;
+        return compact_and_append(key, value, len);
     }
 
     g_write_pos += BL_NVM_ENTRY_SIZE;

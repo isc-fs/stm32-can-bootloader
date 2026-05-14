@@ -86,6 +86,7 @@ typedef enum {
 #define BL_CMD_JUMP                 0x61U  /* jump directly to the installed application */
 #define BL_CMD_NVM_READ             0x80U  /* read a value from the NVM store */
 #define BL_CMD_NVM_WRITE            0x81U  /* append/update/tombstone a value in the NVM store */
+#define BL_CMD_NVM_FORMAT           0x82U  /* erase sector 7 (wipes NVM + app metadata); token-gated */
 
 /* ---- Unsolicited notifications (msg_type = BL_MSG_NOTIFY, dst = HOST) ---- */
 #define BL_NOTIFY_HEARTBEAT         0xF0U  /* 1 Hz periodic alive-plus-state ping */
@@ -124,6 +125,7 @@ typedef enum {
 #define BL_NACK_NVM_NOT_FOUND       0x0DU  /* NVM_READ for a key with no live value */
 #define BL_NACK_NVM_FULL            0x0EU  /* NVM store can't accept another write (post-compaction) */
 #define BL_NACK_OB_WRONG_TOKEN      0x0FU  /* OB_APPLY_WRP missing/incorrect confirmation token */
+#define BL_NACK_NVM_WRONG_TOKEN     0x10U  /* NVM_FORMAT missing/incorrect confirmation token */
 #define BL_NACK_UNSUPPORTED         0xFEU  /* unknown opcode, unknown arg, or bad arg length */
 
 /* ---- Decoded frame ID ---- */

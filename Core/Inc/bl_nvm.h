@@ -114,4 +114,29 @@ bl_nvm_status_t bl_nvm_write(uint16_t key,
  * Linear scan; not a hot path. */
 uint32_t bl_nvm_live_count(void);
 
+/* Snapshot live NVM entries, erase sector 7 (clearing both the NVM log
+ * AND the dedicated app metadata FLASHWORD at BL_APP_METADATA_ADDR),
+ * rewrite the live entries, and program the caller-supplied metadata
+ * value at BL_APP_METADATA_ADDR in a single coordinated pass.
+ *
+ * Used by bl_flash_write_metadata when the existing metadata word
+ * isn't in erased state (STM32 flash forbids 1→0 of already-set bits,
+ * so an in-place rewrite is impossible). Returns BL_NVM_FULL if more
+ * than BL_NVM_MAX_LIVE_ENTRIES live keys exist; BL_NVM_HARDWARE on
+ * any underlying flash error. The `new_meta` buffer must be
+ * BL_APP_METADATA_SIZE bytes (8 × uint32_t = 32 B). */
+bl_nvm_status_t bl_nvm_compact_replace_meta(const uint32_t new_meta[]);
+
+/* Erase sector 7 unconditionally — wipes every NVM entry AND the
+ * metadata FLASHWORD — and reset internal pointers. Operator-driven
+ * recovery for cases where the sector has wedged beyond what
+ * automatic compaction can fix. After this, no valid app is
+ * installed; a fresh flash + verify is required. */
+bl_nvm_status_t bl_nvm_format(void);
+
+/* Confirmation token for CMD_NVM_FORMAT. Wire bytes are 'F','M','T','\0'
+ * little-endian — picked to mirror the existing OB_APPLY_TOKEN style
+ * (BL_OB_APPLY_TOKEN = "WRP\0") while staying distinct. */
+#define BL_NVM_FORMAT_TOKEN     0x00544D46U   /* 'F','M','T',0x00 LE */
+
 #endif /* BL_NVM_H */

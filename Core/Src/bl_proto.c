@@ -184,6 +184,9 @@ static void send_message(bl_msg_type_t msg_type,
     }
 }
 
+/* Forward declarations for helpers defined further down. */
+static uint32_t read_le32(const uint8_t *p);
+
 /* Send a positive ack. `payload[0]` is the opcode being acked;
  * `payload[1..length-1]` is opcode-specific response data. Re-arms
  * the session watchdog so long blocking handlers (FLASH_ERASE) don't
@@ -497,6 +500,48 @@ static void handle_nvm_write(uint8_t peer, const uint8_t *args, uint16_t args_le
     }
 
     uint8_t resp[1] = { BL_CMD_NVM_WRITE };
+    send_ack(resp, (uint16_t)sizeof(resp));
+}
+
+/* CMD_NVM_FORMAT: [token_le32]. Session-gated and token-gated — wipes
+ * sector 7 entirely (every NVM key/value AND the app metadata
+ * FLASHWORD). After format, the BL boot path sees no_valid_app and a
+ * fresh flash session is required to install a runnable image.
+ *
+ * Intended for operator-driven recovery when the sector has wedged
+ * (e.g. metadata word stuck in a non-erased state and the automatic
+ * compact-replace path is itself failing) — for routine use bl_nvm
+ * handles this transparently via compaction. */
+static void handle_nvm_format(uint8_t peer, const uint8_t *args, uint16_t args_len)
+{
+    (void)peer;
+    if (!g_session_active) {
+        send_nack(BL_CMD_NVM_FORMAT, BL_NACK_BAD_SESSION);
+        return;
+    }
+    if (args_len < 4U) {
+        send_nack(BL_CMD_NVM_FORMAT, BL_NACK_NVM_WRONG_TOKEN);
+        return;
+    }
+
+    uint32_t token = read_le32(&args[0]);
+    if (token != BL_NVM_FORMAT_TOKEN) {
+        bl_log_warn("NVM_FORMAT bad token 0x%08X", (unsigned int)token);
+        send_nack(BL_CMD_NVM_FORMAT, BL_NACK_NVM_WRONG_TOKEN);
+        return;
+    }
+
+    bl_log_warn("NVM_FORMAT erasing sector 7 (NVM + app metadata)");
+
+    bl_nvm_status_t st = bl_nvm_format();
+    if (st != BL_NVM_OK) {
+        bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, BL_NVM_BASE);
+        bl_log_error("NVM_FORMAT failed (status=%d)", (int)st);
+        send_nack(BL_CMD_NVM_FORMAT, BL_NACK_FLASH_HW);
+        return;
+    }
+
+    uint8_t resp[1] = { BL_CMD_NVM_FORMAT };
     send_ack(resp, (uint16_t)sizeof(resp));
 }
 
@@ -909,6 +954,9 @@ static void handle_message(uint8_t peer,
             break;
         case BL_CMD_NVM_WRITE:
             handle_nvm_write(peer, args, args_len);
+            break;
+        case BL_CMD_NVM_FORMAT:
+            handle_nvm_format(peer, args, args_len);
             break;
         case BL_CMD_OB_READ:
             handle_ob_read(peer);
