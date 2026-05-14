@@ -41,6 +41,14 @@ static bool     g_streaming      = false;
 static uint32_t g_period_ms      = 0U;
 static uint32_t g_last_emit_ms   = 0U;
 
+/* Option-byte WRP state, cached at bl_live_init(). Option bytes can
+ * only change across a system reset (HAL_FLASH_OB_Launch triggers
+ * one), so reading them once at boot gives us the same answer the
+ * live snapshot would compute on every emission — without the
+ * per-tick HAL_FLASHEx_OBGetConfig round-trip at up to 50 Hz that
+ * was showing up in the audit as a low-priority perf bullet. */
+static bool     g_wrp_protected_sector0 = false;
+
 
 /* ---- Saturating increment helper ---- */
 
@@ -64,6 +72,11 @@ void bl_live_init(void)
     g_streaming       = false;
     g_period_ms       = 0U;
     g_last_emit_ms    = 0U;
+    /* Sample OB state once. Re-sampling would only matter across a
+     * reset (option-byte writes go through HAL_FLASH_OB_Launch which
+     * triggers one) — so by the time anyone cares about a change,
+     * we've re-run init anyway. */
+    g_wrp_protected_sector0 = bl_obyte_is_sector_wrp_protected(0U);
 }
 
 
@@ -126,7 +139,7 @@ void bl_live_fill_snapshot(bl_live_t *out)
     if (g_streaming) {
         flags |= BL_LIVE_FLAG_LIVEDATA_STREAMING;
     }
-    if (bl_obyte_is_sector_wrp_protected(0U)) {
+    if (g_wrp_protected_sector0) {
         flags |= BL_LIVE_FLAG_WRP_PROTECTED;
     }
     out->flags             = flags;
