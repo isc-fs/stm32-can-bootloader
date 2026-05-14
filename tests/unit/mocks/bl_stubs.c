@@ -8,13 +8,14 @@
  * incrementally — until then, no-op stubs here keep the linker happy
  * and make it obvious to anyone reading the test build what's faked.
  *
- * Each stub exposes a `mock_*_*` capture or knob so tests can either
- * drive deterministic values into the stub (uptime) or inspect what
- * the production code attempted to do (last NOTIFY payload).
+ * Linker-only stubs for the bigger peer modules (bl_dtc, bl_flash,
+ * bl_health-fill, bl_live, bl_obyte, and the Bootloader_* entry
+ * points) live in bl_peer_stubs.c next door — kept separate so the
+ * settable / inspectable knobs in this file don't get lost in a
+ * sea of empty-body stubs.
  */
 
 #include <stdint.h>
-#include <string.h>
 
 /* ---- BKPSRAM-resident state used by bl_log ----
  *
@@ -37,33 +38,3 @@ static uint32_t g_mock_uptime_seconds = 0U;
 void mock_set_uptime_seconds(uint32_t s) { g_mock_uptime_seconds = s; }
 
 uint32_t bl_health_uptime_seconds(void) { return g_mock_uptime_seconds; }
-
-
-/* ---- bl_proto_send_notify capture ----
- *
- * bl_log_tick() routes drained log payloads through this. The mock
- * stores the last call's payload + length so tests asserting on
- * NOTIFY_LOG emission have somewhere to look. Capacity matches the
- * largest realistic single-call size (NOTIFY opcode byte +
- * BL_LOG_DRAIN_BUDGET = 1 + 256 = 257; round up to 512 for safety
- * across future budget bumps). */
-#define MOCK_NOTIFY_CAPTURE_CAP 512U
-
-static uint8_t  g_last_notify_buf[MOCK_NOTIFY_CAPTURE_CAP];
-static uint16_t g_last_notify_len = 0U;
-static int      g_notify_call_count = 0;
-
-void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
-{
-    g_notify_call_count++;
-    uint16_t take = (length <= MOCK_NOTIFY_CAPTURE_CAP)
-                      ? length
-                      : (uint16_t)MOCK_NOTIFY_CAPTURE_CAP;
-    memcpy(g_last_notify_buf, payload, take);
-    g_last_notify_len = take;
-}
-
-void           mock_notify_reset(void)             { g_last_notify_len = 0U; g_notify_call_count = 0; }
-int            mock_notify_call_count(void)        { return g_notify_call_count; }
-const uint8_t *mock_last_notify_payload(void)      { return g_last_notify_buf; }
-uint16_t       mock_last_notify_length(void)       { return g_last_notify_len; }

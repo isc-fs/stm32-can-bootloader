@@ -46,10 +46,12 @@ add_executable(bl_unit_tests
     ${BL_ROOT}/Core/Src/bl_fwinfo.c
     ${BL_ROOT}/Core/Src/bl_nvm.c
     ${BL_ROOT}/Core/Src/bl_log.c
+    ${BL_ROOT}/Core/Src/bl_proto.c
 
     # Mocks / stubs
     mocks/hal_stubs.c
     mocks/bl_stubs.c
+    mocks/bl_peer_stubs.c
 
     # Tests
     test_bl_isotp.c
@@ -58,7 +60,14 @@ add_executable(bl_unit_tests
     test_bl_proto_id.c
     test_bl_log.c
     test_bl_app_validate.c
+    test_bl_proto_dispatch.c
     unity_runner.c
+)
+
+# bl_proto.c includes main.h which lives in Core/Inc. The other
+# production sources don't need it but it's harmless to expose.
+target_include_directories(bl_unit_tests PRIVATE
+    ${BL_ROOT}/Core/Inc
 )
 
 target_include_directories(bl_unit_tests PRIVATE

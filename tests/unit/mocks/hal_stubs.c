@@ -56,6 +56,13 @@ void mock_flash_reset(void)
     g_program_calls          = 0;
     g_erase_calls            = 0;
     g_tick                   = 0;
+    /* FDCAN capture also lives in this file (see further below) — wipe
+     * it here too so every test sees an empty TX ring even if it does
+     * its own ring setup later. Avoids cross-test leaks when a NACK
+     * fires unexpectedly. Defined as `mock_fdcan_reset()` further down
+     * but we just inline a forward call here to keep setUp() simple. */
+    extern void mock_fdcan_reset(void);
+    mock_fdcan_reset();
 }
 
 void mock_flash_set_program_fail(int n) { g_program_fail_remaining = n; }
@@ -147,3 +154,66 @@ uint32_t HAL_GetTick(void) { return g_tick; }
 void     HAL_Delay(uint32_t ms) { g_tick += ms; }
 
 void HAL_PWR_EnableBkUpAccess(void) { /* no-op on host */ }
+
+HAL_StatusTypeDef HAL_FLASH_OB_Launch(void)
+{
+    /* On the chip this never returns (triggers system reset). On host
+     * we report OK so the post-launch dead-code in handle_ob_apply_wrp
+     * runs deterministically if tests reach it. */
+    return HAL_OK;
+}
+
+/* ---- NVIC + RCC + RTC stub storage ---- */
+void NVIC_SystemReset(void) { /* no-op on host — real chip would not return */ }
+
+static RCC_TypeDef g_mock_rcc = { .BDCR = 0U };
+RCC_TypeDef *const RCC = &g_mock_rcc;
+
+static RTC_TypeDef g_mock_rtc = { .BKP0R = 0U };
+RTC_TypeDef *const RTC = &g_mock_rtc;
+
+
+/* ---- FDCAN TX capture ----
+ *
+ * Every successful HAL_FDCAN_AddMessageToTxFifoQ call records the
+ * frame into a ring. Tests assert against this to verify which
+ * frames the BL emits in response to a given dispatch input. */
+FDCAN_HandleTypeDef hfdcan2;   /* opaque storage matching the extern in bl_proto.c */
+
+static mock_fdcan_frame_t g_fdcan_frames[MOCK_FDCAN_CAPTURE_DEPTH];
+static int                g_fdcan_count = 0;
+
+void mock_fdcan_reset(void)
+{
+    g_fdcan_count = 0;
+    memset(g_fdcan_frames, 0, sizeof(g_fdcan_frames));
+}
+
+int mock_fdcan_tx_count(void) { return g_fdcan_count; }
+
+const mock_fdcan_frame_t *mock_fdcan_get(int index)
+{
+    if (index < 0 || index >= g_fdcan_count) {
+        return (const mock_fdcan_frame_t *)0;
+    }
+    return &g_fdcan_frames[index];
+}
+
+HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
+                                                FDCAN_TxHeaderTypeDef *hdr,
+                                                uint8_t *data)
+{
+    (void)h;
+    if (g_fdcan_count >= (int)MOCK_FDCAN_CAPTURE_DEPTH) {
+        return HAL_ERROR;
+    }
+    mock_fdcan_frame_t *slot = &g_fdcan_frames[g_fdcan_count++];
+    slot->identifier = hdr->Identifier;
+    /* bl_proto's dlc_bytes_to_fdcan() (see Core/Src/bl_proto.c) returns
+     * the byte count directly — NOT shifted, because the ST HAL itself
+     * does the bit-16 shift internally during message-RAM packing.
+     * So DataLength is just the 0..8 byte count, clamped. */
+    slot->dlc_bytes = (uint8_t)(hdr->DataLength > 8U ? 8U : hdr->DataLength);
+    memcpy(slot->data, data, slot->dlc_bytes);
+    return HAL_OK;
+}
