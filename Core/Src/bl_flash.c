@@ -10,8 +10,10 @@
 #include "bl_flash.h"
 
 #include "bl_memmap.h"
+#include "bl_nvm.h"
 #include "stm32h7xx_hal.h"
 
+#include <stdbool.h>
 #include <string.h>
 
 #define BL_FLASHWORD_BYTES        32U
@@ -190,6 +192,27 @@ bl_flash_status_t bl_flash_write_metadata(uint32_t size,
     meta[4] = version;
     /* meta[5..7] reserved (zeroed above) */
 
+    /* STM32 flash only permits 1→0 transitions per program cycle; once
+     * any bit at BL_APP_METADATA_ADDR is set, an in-place rewrite with
+     * different content will return HAL_ERROR. Check whether the word
+     * is in erased state (all 0xFF); if not, hand off to
+     * bl_nvm_compact_replace_meta() which erases sector 7 (preserving
+     * live NVM entries) and writes the new metadata in one pass. */
+    const uint32_t *cur = (const uint32_t *)BL_APP_METADATA_ADDR;
+    bool erased = true;
+    for (uint32_t i = 0U; i < (BL_APP_METADATA_SIZE / 4U); i++) {
+        if (cur[i] != 0xFFFFFFFFU) {
+            erased = false;
+            break;
+        }
+    }
+
+    if (!erased) {
+        bl_nvm_status_t ns = bl_nvm_compact_replace_meta(meta);
+        return (ns == BL_NVM_OK) ? BL_FLASH_OK : BL_FLASH_ERR_HARDWARE;
+    }
+
+    /* Fast path: metadata word is erased, just program it. */
     if (HAL_FLASH_Unlock() != HAL_OK) {
         return BL_FLASH_ERR_HARDWARE;
     }
