@@ -32,6 +32,7 @@ void test_isotp_rx_cf_without_ff_errors(void);
 void test_isotp_rx_overflow_too_long_message_rejects(void);
 void test_isotp_rx_timeout_invalidates_partial_assembly(void);
 void test_isotp_rx_timeout_handles_tick_wraparound(void);
+void test_isotp_rx_cf_with_no_payload_is_rejected(void);
 void test_isotp_rx_sf_zero_length_is_rejected(void);
 void test_isotp_tx_single_frame_below_8_bytes(void);
 void test_isotp_tx_multi_frame_yields_ff_then_cfs(void);
@@ -114,6 +115,7 @@ int main(void)
     RUN_TEST(test_isotp_rx_overflow_too_long_message_rejects);
     RUN_TEST(test_isotp_rx_timeout_invalidates_partial_assembly);
     RUN_TEST(test_isotp_rx_timeout_handles_tick_wraparound);
+    RUN_TEST(test_isotp_rx_cf_with_no_payload_is_rejected);
     RUN_TEST(test_isotp_rx_sf_zero_length_is_rejected);
     RUN_TEST(test_isotp_tx_single_frame_below_8_bytes);
     RUN_TEST(test_isotp_tx_multi_frame_yields_ff_then_cfs);

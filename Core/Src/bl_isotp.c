@@ -126,6 +126,20 @@ static bl_isotp_rx_status_t handle_cf(bl_isotp_rx_t *rx,
         return BL_ISOTP_ERR_NO_FF;
     }
 
+    /* A CF must carry at least 1 payload byte (length >= 2: 1 PCI +
+     * 1 data). The previous code accepted length == 1, computed
+     * frame_avail = 0, and silently advanced rx->next_seq without
+     * adding anything to rx->received. The protocol then proceeded
+     * with a now-corrupted sequence-vs-content invariant: every CF
+     * after that consumes a sequence slot but rx->total_len is never
+     * reached, so reassembly stalls until the 1-second deadline
+     * fires. Reject zero-payload CFs as malformed PCI so the host
+     * sees a NACK(TRANSPORT_ERROR) immediately instead of waiting
+     * for the timeout. Issue #68 first bullet. */
+    if (length < 2U) {
+        return BL_ISOTP_ERR_BAD_PCI;
+    }
+
     uint8_t seq = data[0] & BL_ISOTP_PCI_MASK_LO;
     if (seq != rx->next_seq) {
         return BL_ISOTP_ERR_BAD_SEQ;
@@ -135,7 +149,7 @@ static bl_isotp_rx_status_t handle_cf(bl_isotp_rx_t *rx,
      * short; trust the total_len from FF to decide how many bytes of
      * the frame are meaningful. */
     uint16_t remaining = (uint16_t)(rx->total_len - rx->received);
-    uint8_t  frame_avail = (length > 1U) ? (uint8_t)(length - 1U) : 0U;
+    uint8_t  frame_avail = (uint8_t)(length - 1U);
     uint16_t take = (remaining < frame_avail) ? remaining : frame_avail;
 
     memcpy(&rx->buf[rx->received], &data[1], take);
