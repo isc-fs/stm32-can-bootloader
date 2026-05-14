@@ -541,8 +541,30 @@ void Bootloader_JumpToApplication(void) {
 	/* App vector table */
 	SCB->VTOR = BL_APP_BASE;   // 0x08020000
 
+	/* Make the VTOR write globally visible before anything that might
+	 * read or be affected by it. On Cortex-M7 (vs M4 or M0) the CPU has
+	 * a separate L1 I-cache and a speculative instruction prefetcher,
+	 * plus a deeper pipeline; without an explicit data-synchronisation
+	 * barrier here an instruction fetch that started before the VTOR
+	 * change can still complete against the OLD vector table.
+	 *
+	 * The BL doesn't enable I/D-cache today, so the cache-coherency
+	 * piece is latent — but ARM AN-298 (and the STM32H7 HAL examples)
+	 * specify the DSB/ISB pair regardless of cache state, and we want
+	 * this to be a no-op the day someone flips cache on to speed up
+	 * CRC / VERIFY. Issue #67. */
+	__DSB();
+
 	/* Application stack */
 	__set_MSP(appStack);
+
+	/* Pipeline barrier so the MSP change is in effect before the next
+	 * instruction starts executing. Without this the CPU is allowed
+	 * to speculatively decode the upcoming `JumpToApp()` indirect
+	 * branch with the OLD MSP in its rename state, which on a deep
+	 * M7 pipeline could affect exception-frame placement if a fault
+	 * triggered during the transition window. Issue #67. */
+	__ISB();
 
 	/* IRQs stay masked across the jump. The previous code re-enabled
 	 * them here, which let any IRQ that was pending while masked (e.g.
