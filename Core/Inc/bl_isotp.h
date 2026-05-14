@@ -111,6 +111,9 @@ void bl_isotp_rx_init(bl_isotp_rx_t *rx);
  *
  *   type     = message TYPE from the CAN ID (used to stamp reassembly)
  *   peer     = source node ID from the CAN ID
+ *   now_ms   = current millisecond tick (HAL_GetTick()); used to arm
+ *              the reassembly deadline when an FF is accepted, so
+ *              bl_isotp_rx_tick() can later observe a real timeout
  *   data     = CAN frame payload (starts with PCI byte)
  *   length   = number of valid bytes in `data` (1..8)
  *   send_fc  = out-param, set to true if the caller should reply with
@@ -121,10 +124,18 @@ void bl_isotp_rx_init(bl_isotp_rx_t *rx);
  * or one of the error codes. Error codes never leave partial state in
  * the buffer — the caller should still invoke bl_isotp_rx_init after
  * handling the error.
+ *
+ * Encapsulation note: prior to fix/14 the deadline was armed externally
+ * by the dispatcher after every FF. That worked but left the invariant
+ * dependent on caller discipline — any future caller (test harness,
+ * loopback simulator, secondary transport) that forgot the stamp would
+ * see the reassembler time out instantly. Threading now_ms in here
+ * makes the lifetime correct by construction.
  */
 bl_isotp_rx_status_t bl_isotp_rx_feed(bl_isotp_rx_t *rx,
                                       uint8_t type,
                                       uint8_t peer,
+                                      uint32_t now_ms,
                                       const uint8_t *data,
                                       uint8_t length,
                                       bool *send_fc);

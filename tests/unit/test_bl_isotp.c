@@ -46,6 +46,10 @@ static void make_cf(uint8_t *frame, uint8_t seq,
 
 /* ---- RX tests ---- */
 
+/* Arbitrary fixed tick for tests that don't care about timing — keeps
+ * the rx_feed call sites compact and signals "any now_ms is fine here". */
+#define NOW_DONT_CARE   0U
+
 void test_isotp_rx_single_frame_completes_in_one_feed(void)
 {
     bl_isotp_rx_t rx;
@@ -57,6 +61,7 @@ void test_isotp_rx_single_frame_completes_in_one_feed(void)
 
     bool send_fc = false;
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
                                                frame, 8, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_MSG_COMPLETE, st);
     TEST_ASSERT_EQUAL_UINT16(7, rx.received);
@@ -75,13 +80,17 @@ void test_isotp_rx_first_frame_starts_assembly(void)
     make_ff(frame, 12, chunk, 6);
 
     bool send_fc = false;
+    /* Use a non-zero now_ms so we can confirm the deadline was armed
+     * to now_ms + TIMEOUT — proves the fix/14 invariant landed. */
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               500U,
                                                frame, 8, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_OK, st);
     TEST_ASSERT_TRUE(send_fc);                    /* must reply CTS */
     TEST_ASSERT_EQUAL_UINT16(6, rx.received);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_STATE_WAIT_CF, rx.state);
     TEST_ASSERT_EQUAL_UINT8(1, rx.next_seq);
+    TEST_ASSERT_EQUAL_UINT32(500U + BL_ISOTP_TIMEOUT_MS, rx.deadline_ms);
 }
 
 void test_isotp_rx_ff_plus_cf_chain_completes(void)
@@ -97,11 +106,13 @@ void test_isotp_rx_ff_plus_cf_chain_completes(void)
     make_ff(ff, 12, ff_chunk, 6);
     bool send_fc = false;
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_OK,
-        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, ff, 8, &send_fc));
+        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, NOW_DONT_CARE,
+                         ff, 8, &send_fc));
 
     uint8_t cf[8] = {0};
     make_cf(cf, 1, cf_chunk, 6);
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
                                                cf, 7, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_MSG_COMPLETE, st);
     TEST_ASSERT_EQUAL_UINT16(12, rx.received);
@@ -121,13 +132,15 @@ void test_isotp_rx_cf_with_wrong_sequence_errors(void)
     make_ff(ff, 14, ff_chunk, 6);
     bool send_fc;
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_OK,
-        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, ff, 8, &send_fc));
+        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, NOW_DONT_CARE,
+                         ff, 8, &send_fc));
 
     /* Send CF with seq=2 instead of expected 1. */
     uint8_t cf_chunk[7] = {7,8,9,10,11,12,13};
     uint8_t cf[8] = {0};
     make_cf(cf, 2, cf_chunk, 7);
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
                                                cf, 8, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_ERR_BAD_SEQ, st);
 }
@@ -142,6 +155,7 @@ void test_isotp_rx_cf_without_ff_errors(void)
     make_cf(cf, 1, chunk, 7);
     bool send_fc;
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
                                                cf, 8, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_ERR_NO_FF, st);
 }
@@ -158,34 +172,35 @@ void test_isotp_rx_overflow_too_long_message_rejects(void)
 
     bool send_fc;
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
                                                ff, 8, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_ERR_OVERFLOW, st);
 }
 
 void test_isotp_rx_timeout_invalidates_partial_assembly(void)
 {
-    /* Caught a real bug while writing this: handle_ff() calls
-     * reset_idle() which zeroes rx->deadline_ms, but no code path
-     * subsequently sets it to now_ms + BL_ISOTP_TIMEOUT_MS. As a
-     * result bl_isotp_rx_tick() considers the reassembly to have
-     * timed out the instant after FF receipt (since (now_ms - 0) is
-     * non-negative for any reasonable now_ms). Tracking via the BL
-     * issue tracker; this test stays IGNORE'd until the fix lands so
-     * the suite passes for the rest of the infrastructure PR. */
-    TEST_IGNORE_MESSAGE(
-        "Expected-fail: deadline_ms never set in bl_isotp_rx_feed; "
-        "tracked in issue #54. Re-enable once the fix lands.");
-
+    /* Regression for issue #54: prior to fix/14, handle_ff() called
+     * reset_idle() (which zeroes rx->deadline_ms) but no code path in
+     * bl_isotp_rx_feed armed the deadline afterwards. Production papered
+     * over this by stamping g_rx.deadline_ms in bl_proto.c right after
+     * the feed returned send_fc=true — but any caller that didn't do
+     * that (test harnesses, loopback simulators) saw the reassembly
+     * time out the instant after FF receipt.
+     *
+     * Fix: thread now_ms into bl_isotp_rx_feed; handle_ff arms the
+     * deadline before returning, so the invariant lives inside the
+     * module. This test now exercises the full path. */
     bl_isotp_rx_t rx;
     bl_isotp_rx_init(&rx);
 
-    mock_set_tick(0);
     uint8_t chunk[6] = {1,2,3,4,5,6};
     uint8_t ff[8] = {0};
     make_ff(ff, 14, chunk, 6);
     bool send_fc;
+    /* FF at now_ms = 0 → deadline armed to BL_ISOTP_TIMEOUT_MS. */
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_OK,
-        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, ff, 8, &send_fc));
+        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST, 0U, ff, 8, &send_fc));
+    TEST_ASSERT_EQUAL_UINT32(BL_ISOTP_TIMEOUT_MS, rx.deadline_ms);
 
     uint8_t peer_out = 0;
     TEST_ASSERT_FALSE(bl_isotp_rx_tick(&rx, BL_ISOTP_TIMEOUT_MS - 1U, &peer_out));
@@ -194,7 +209,41 @@ void test_isotp_rx_timeout_invalidates_partial_assembly(void)
     TEST_ASSERT_EQUAL_UINT8(PEER_HOST, peer_out);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_STATE_IDLE, rx.state);
 
+    /* tick() reset the state — a second call must not re-fire. */
     TEST_ASSERT_FALSE(bl_isotp_rx_tick(&rx, BL_ISOTP_TIMEOUT_MS + 2U, &peer_out));
+}
+
+void test_isotp_rx_timeout_handles_tick_wraparound(void)
+{
+    /* Belt-and-suspenders for the signed-diff path in bl_isotp_rx_tick:
+     * when an FF arrives near the top of the 32-bit tick range, the
+     * deadline math wraps around 0. The tick() function uses
+     * (int32_t)(now - deadline) >= 0 specifically to handle this case.
+     *
+     * Scenario: FF at now_ms = 0xFFFFFF00. With TIMEOUT_MS = 1000
+     * (0x3E8) the deadline lands at 0x000002E8 after unsigned wrap.
+     * tick() must NOT fire at 0xFFFFFFFF (still inside the window) and
+     * MUST fire at 0x00000400 (past the wrapped deadline). */
+    bl_isotp_rx_t rx;
+    bl_isotp_rx_init(&rx);
+
+    uint8_t chunk[6] = {1,2,3,4,5,6};
+    uint8_t ff[8] = {0};
+    make_ff(ff, 14, chunk, 6);
+    bool send_fc;
+    TEST_ASSERT_EQUAL_INT(BL_ISOTP_OK,
+        bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                         0xFFFFFF00U, ff, 8, &send_fc));
+    /* Confirm the deadline wrapped through zero. */
+    TEST_ASSERT_EQUAL_UINT32(
+        (uint32_t)(0xFFFFFF00U + BL_ISOTP_TIMEOUT_MS), rx.deadline_ms);
+
+    uint8_t peer_out = 0;
+    /* Still inside the window — about to wrap but not past the deadline. */
+    TEST_ASSERT_FALSE(bl_isotp_rx_tick(&rx, 0xFFFFFFFFU, &peer_out));
+    /* Past the wrapped deadline — must fire. */
+    TEST_ASSERT_TRUE(bl_isotp_rx_tick(&rx, 0x00000400U, &peer_out));
+    TEST_ASSERT_EQUAL_UINT8(PEER_HOST, peer_out);
 }
 
 void test_isotp_rx_sf_zero_length_is_rejected(void)
@@ -208,6 +257,7 @@ void test_isotp_rx_sf_zero_length_is_rejected(void)
     frame[0] = (uint8_t)BL_ISOTP_PCI_SF | 0x00U;
     bool send_fc;
     bl_isotp_rx_status_t st = bl_isotp_rx_feed(&rx, TYPE_CMD, PEER_HOST,
+                                               NOW_DONT_CARE,
                                                frame, 8, &send_fc);
     TEST_ASSERT_EQUAL_INT(BL_ISOTP_ERR_BAD_PCI, st);
 }
