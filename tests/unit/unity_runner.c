@@ -36,6 +36,22 @@ void test_isotp_rx_sf_zero_length_is_rejected(void);
 void test_isotp_tx_single_frame_below_8_bytes(void);
 void test_isotp_tx_multi_frame_yields_ff_then_cfs(void);
 
+/* ---- test_bl_proto_id.c ---- */
+void test_proto_build_host_to_node_unicast(void);
+void test_proto_build_host_to_node_broadcast(void);
+void test_proto_build_node_to_host_sets_dir_bit(void);
+void test_proto_build_masks_node_id_to_low_nibble(void);
+void test_proto_parse_valid_host_to_node_unicast(void);
+void test_proto_parse_valid_host_to_node_broadcast(void);
+void test_proto_parse_valid_node_to_host(void);
+void test_proto_parse_rejects_reserved_bit_5_set(void);
+void test_proto_parse_rejects_reserved_bit_high_set(void);
+void test_proto_parse_rejects_node_to_host_src_zero(void);
+void test_proto_parse_rejects_node_to_host_src_broadcast(void);
+void test_proto_parse_accepts_node_to_host_src_max_unicast(void);
+void test_proto_parse_accepts_host_to_node_zero(void);
+void test_proto_build_parse_roundtrip_all_valid_ids(void);
+
 /* ---- test_bl_fwinfo.c ---- */
 void test_fwinfo_absent_returns_false_on_erased_flash(void);
 void test_fwinfo_valid_magic_and_major1_is_present(void);
@@ -72,6 +88,22 @@ int main(void)
     RUN_TEST(test_isotp_rx_sf_zero_length_is_rejected);
     RUN_TEST(test_isotp_tx_single_frame_below_8_bytes);
     RUN_TEST(test_isotp_tx_multi_frame_yields_ff_then_cfs);
+
+    /* test_bl_proto_id.c */
+    RUN_TEST(test_proto_build_host_to_node_unicast);
+    RUN_TEST(test_proto_build_host_to_node_broadcast);
+    RUN_TEST(test_proto_build_node_to_host_sets_dir_bit);
+    RUN_TEST(test_proto_build_masks_node_id_to_low_nibble);
+    RUN_TEST(test_proto_parse_valid_host_to_node_unicast);
+    RUN_TEST(test_proto_parse_valid_host_to_node_broadcast);
+    RUN_TEST(test_proto_parse_valid_node_to_host);
+    RUN_TEST(test_proto_parse_rejects_reserved_bit_5_set);
+    RUN_TEST(test_proto_parse_rejects_reserved_bit_high_set);
+    RUN_TEST(test_proto_parse_rejects_node_to_host_src_zero);
+    RUN_TEST(test_proto_parse_rejects_node_to_host_src_broadcast);
+    RUN_TEST(test_proto_parse_accepts_node_to_host_src_max_unicast);
+    RUN_TEST(test_proto_parse_accepts_host_to_node_zero);
+    RUN_TEST(test_proto_build_parse_roundtrip_all_valid_ids);
 
     /* test_bl_fwinfo.c */
     RUN_TEST(test_fwinfo_absent_returns_false_on_erased_flash);

@@ -53,6 +53,7 @@ add_executable(bl_unit_tests
     test_bl_isotp.c
     test_bl_fwinfo.c
     test_bl_nvm.c
+    test_bl_proto_id.c
     unity_runner.c
 )
 
