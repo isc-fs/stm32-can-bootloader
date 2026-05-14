@@ -117,6 +117,42 @@ static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
     return (bytes > 8U) ? 8U : (uint32_t)bytes;
 }
 
+/* TX-FIFO/Queue depth as configured by main.c::MX_FDCAN2_Init's
+ * `Init.TxFifoQueueElmtsNbr = 16` setting. Used by wait_tx_drain
+ * below; if MX_FDCAN2_Init is ever regenerated with a different
+ * value, sync this constant or the drain wait will short-circuit
+ * incorrectly. CubeMX preserves USER CODE blocks across regen, so
+ * this constant in particular won't drift silently — but a check
+ * here is the canonical fence. */
+#define BL_FDCAN_TX_QUEUE_DEPTH        16U
+
+/* Block until the FDCAN TX FIFO has drained or `max_ms` has elapsed.
+ *
+ * HAL_FDCAN_AddMessageToTxFifoQ returns the moment the frame is in
+ * the controller's queue — actual transmission is asynchronous. The
+ * old "let the ACK drain" pattern of `HAL_Delay(10U)` was hope, not
+ * guarantee: under bus load (long ISO-TP CFs queued ahead, low CAN
+ * bitrate, arbitration loss) 10 ms can be too short and the host
+ * never sees the ACK before NVIC_SystemReset / OB_Launch fires.
+ *
+ * Free level equals the configured queue depth exactly when every
+ * frame has been transmitted (or aborted; AutoRetransmission=DISABLE
+ * means a frame the bus refused to ACK won't sit in the queue
+ * forever). The fallback timeout keeps us from hanging the BL if
+ * the bus is genuinely offline — better to reset / launch and let
+ * the host detect via session timeout than to brick the device.
+ *
+ * Issue #68 ("HAL_Delay-based 'let ACK drain'" bullet). */
+static void wait_tx_drain(uint32_t max_ms)
+{
+    uint32_t start = HAL_GetTick();
+    while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan2) < BL_FDCAN_TX_QUEUE_DEPTH) {
+        if ((HAL_GetTick() - start) >= max_ms) {
+            return;  /* timeout — proceed anyway */
+        }
+    }
+}
+
 /* Send one raw CAN frame — always from us (the node) back to the host.
  * The ID is the constant `BL_PROTO_DIR_NODE_TO_HOST | BL_NODE_ID`;
  * the new wire format has no concept of per-peer node→host addressing
@@ -576,8 +612,12 @@ static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
     uint8_t resp[1] = { BL_CMD_RESET };
     send_ack(resp, (uint16_t)sizeof(resp));
 
-    /* Let the ACK drain onto the wire before we yank the MCU. */
-    HAL_Delay(10U);
+    /* Wait for the ACK to actually leave the TX FIFO before resetting
+     * the MCU. See wait_tx_drain() comment for the rationale; 50 ms
+     * is comfortably more than the time to transmit a 4-byte SF at
+     * 125 kbps (the slowest classic-CAN rate we're likely to see)
+     * with 16 frames already queued ahead. */
+    wait_tx_drain(50U);
 
     switch (mode) {
         case 0U:
@@ -813,8 +853,10 @@ static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
     uint8_t resp[1] = { BL_CMD_JUMP };
     send_ack(resp, (uint16_t)sizeof(resp));
 
-    /* Let the ACK drain onto the wire before we deinit peripherals. */
-    HAL_Delay(10U);
+    /* Wait for the ACK to leave the TX FIFO before Bootloader_JumpToApp
+     * deinitialises FDCAN and yanks the MCU into the app's vector
+     * table. Same rationale + timeout as in handle_reset above. */
+    wait_tx_drain(50U);
     Bootloader_JumpToApplication();  /* never returns on success */
 }
 
@@ -883,15 +925,29 @@ static void handle_ob_apply_wrp(uint8_t peer, const uint8_t *args, uint16_t args
     uint8_t resp[1] = { BL_CMD_OB_APPLY_WRP };
     send_ack(resp, (uint16_t)sizeof(resp));
 
-    /* Drain the ACK before HAL_FLASH_OB_Launch yanks the MCU. */
-    HAL_Delay(10U);
+    /* Wait for the ACK to leave the TX FIFO before HAL_FLASH_OB_Launch
+     * (inside bl_obyte_apply_wrp) yanks the MCU into a system reset.
+     * Same rationale + timeout as the other terminal opcodes above. */
+    wait_tx_drain(50U);
 
     bl_ob_rc_t rc = bl_obyte_apply_wrp(sector_bitmap);
-    /* Only reachable if OB_Launch didn't reset — HAL flagged a program
-     * failure. The session is gone either way; flag it to the host. */
+    /* This point is only reachable if OB_Launch unexpectedly returned —
+     * usually means HAL_FLASH_OB_Unlock or HAL_FLASHEx_OBProgram failed
+     * before the launch ever happened, so the option bytes weren't
+     * touched. We log a DTC + bl_log_error for post-mortem visibility,
+     * then fall through silently.
+     *
+     * Previously this path also emitted send_nack(FLASH_HW). That was a
+     * protocol-invariant violation: the host already received a positive
+     * ACK above, and a contradictory NACK arriving afterwards would
+     * tear the session down on hosts that key off either. The host
+     * detects the no-op via session timeout (the BL stops responding
+     * because we're hung here, OR — more typically — the bench operator
+     * reboots and queries OB_READ to verify nothing changed). #68 OB
+     * bullet. */
     bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, (uint32_t)rc);
-    bl_log_error("OB_APPLY_WRP HAL failure rc=%d", (int)rc);
-    send_nack(BL_CMD_OB_APPLY_WRP, BL_NACK_FLASH_HW);
+    bl_log_error("OB_APPLY_WRP HAL failure rc=%d (no NACK — session "
+                 "watchdog will surface the failure)", (int)rc);
 }
 
 /* Dispatch a completed ISO-TP message. byte 0 = opcode, remaining bytes

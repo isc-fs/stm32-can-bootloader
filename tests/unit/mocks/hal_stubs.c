@@ -199,6 +199,15 @@ const mock_fdcan_frame_t *mock_fdcan_get(int index)
     return &g_fdcan_frames[index];
 }
 
+uint32_t HAL_FDCAN_GetTxFifoFreeLevel(FDCAN_HandleTypeDef *h)
+{
+    (void)h;
+    /* "Always fully drained." Matches BL_FDCAN_TX_QUEUE_DEPTH (16) in
+     * bl_proto.c — when that constant changes, this mock must agree
+     * or wait_tx_drain will spin in tests. */
+    return 16U;
+}
+
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,
                                                 uint8_t *data)
