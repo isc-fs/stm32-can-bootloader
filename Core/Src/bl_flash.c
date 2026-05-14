@@ -142,9 +142,11 @@ bl_flash_status_t bl_flash_write(uint32_t addr,
             memset(fw + chunk, 0xFFU, BL_FLASHWORD_BYTES - chunk);
         }
 
+        /* `(uintptr_t)` rather than `(uint32_t)`: identity on STM32,
+         * lossless on a 64-bit host (unit tests). */
         HAL_StatusTypeDef st = HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD,
                                                  addr + offset,
-                                                 (uint32_t)fw);
+                                                 (uintptr_t)fw);
         if (st != HAL_OK) {
             HAL_FLASH_Lock();
             return BL_FLASH_ERR_HARDWARE;
@@ -217,9 +219,11 @@ bl_flash_status_t bl_flash_write_metadata(uint32_t size,
         return BL_FLASH_ERR_HARDWARE;
     }
 
+    /* `(uintptr_t)` rather than `(uint32_t)`: identity on STM32,
+     * lossless on a 64-bit host (unit tests). */
     HAL_StatusTypeDef st = HAL_FLASH_Program(FLASH_TYPEPROGRAM_FLASHWORD,
                                              BL_APP_METADATA_ADDR,
-                                             (uint32_t)meta);
+                                             (uintptr_t)meta);
     HAL_FLASH_Lock();
 
     return (st == HAL_OK) ? BL_FLASH_OK : BL_FLASH_ERR_HARDWARE;
