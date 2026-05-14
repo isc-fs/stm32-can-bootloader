@@ -66,6 +66,7 @@ static bl_isotp_rx_status_t handle_sf(bl_isotp_rx_t *rx,
 static bl_isotp_rx_status_t handle_ff(bl_isotp_rx_t *rx,
                                       uint8_t type,
                                       uint8_t peer,
+                                      uint32_t now_ms,
                                       const uint8_t *data,
                                       uint8_t length,
                                       bool *send_fc)
@@ -99,6 +100,12 @@ static bl_isotp_rx_status_t handle_ff(bl_isotp_rx_t *rx,
     uint16_t first_chunk = (total < 6U) ? total : 6U;
     memcpy(rx->buf, &data[2], first_chunk);
     rx->received = first_chunk;
+
+    /* Arm the reassembly deadline. bl_isotp_rx_tick() uses a signed
+     * 32-bit diff against this value, so unsigned wrap of now_ms +
+     * BL_ISOTP_TIMEOUT_MS is harmless — it still measures the right
+     * 1-second window across a HAL_GetTick() rollover. */
+    rx->deadline_ms = (uint32_t)(now_ms + BL_ISOTP_TIMEOUT_MS);
 
     /* Caller must send FC(CTS) to keep the host flowing. */
     *send_fc = true;
@@ -144,6 +151,7 @@ static bl_isotp_rx_status_t handle_cf(bl_isotp_rx_t *rx,
 bl_isotp_rx_status_t bl_isotp_rx_feed(bl_isotp_rx_t *rx,
                                       uint8_t type,
                                       uint8_t peer,
+                                      uint32_t now_ms,
                                       const uint8_t *data,
                                       uint8_t length,
                                       bool *send_fc)
@@ -158,10 +166,12 @@ bl_isotp_rx_status_t bl_isotp_rx_feed(bl_isotp_rx_t *rx,
 
     switch (pci_hi) {
         case BL_ISOTP_PCI_SF:
+            /* SF completes in-frame — no deadline to arm, now_ms unused. */
+            (void)now_ms;
             return handle_sf(rx, type, peer, data, length);
 
         case BL_ISOTP_PCI_FF:
-            return handle_ff(rx, type, peer, data, length, send_fc);
+            return handle_ff(rx, type, peer, now_ms, data, length, send_fc);
 
         case BL_ISOTP_PCI_CF:
             return handle_cf(rx, data, length);
