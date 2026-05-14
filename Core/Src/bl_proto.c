@@ -1014,19 +1014,24 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
      * bookkeeping — the new wire format has exactly one peer (the
      * host, node 0x0) and no type-in-ID, so we pass constants. The
      * reassembler stores them for later inspection but no code path
-     * in the new format actually reads them back. */
+     * in the new format actually reads them back.
+     *
+     * now_ms is passed through so the reassembler can arm its own
+     * deadline on FF acceptance (fix/14 / issue #54). Before this the
+     * dispatcher armed it externally right after send_fc_cts() — the
+     * invariant lived in the caller, which left a footgun for any
+     * future caller (e.g. unit tests, loopback simulators) that
+     * forgot to stamp it. */
     bool                 send_fc = false;
     bl_isotp_rx_status_t st      = bl_isotp_rx_feed(&g_rx,
                                                      (uint8_t)BL_MSG_CMD,
                                                      BL_PROTO_NODE_HOST,
+                                                     HAL_GetTick(),
                                                      data,
                                                      length,
                                                      &send_fc);
 
     if (send_fc) {
-        /* Arm the reassembly deadline at the same instant we tell the
-         * host it may proceed with CFs. */
-        g_rx.deadline_ms = HAL_GetTick() + BL_ISOTP_TIMEOUT_MS;
         send_fc_cts();
     }
 
