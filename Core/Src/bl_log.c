@@ -79,12 +79,56 @@ static void ring_skip(size_t len)
 }
 
 
+/* ---- Corruption handling ----
+ *
+ * BKPSRAM is reachable by application firmware running before us and
+ * survives soft resets, so anything we read out of it must be treated
+ * as untrusted in the same way we treat host CAN traffic. The two
+ * places that lift a length byte off the ring — bl_log_drain's main
+ * loop and evict_oldest — have to bound-check before doing any
+ * memcpy / ring_read / pointer-advance, otherwise a corrupted
+ * `ent_len = 0xFF` overflows the `scratch[]` in bl_log_drain (sized
+ * for HEADER + BL_LOG_MAX_ENTRY_TEXT = 6 + 120, an attacker-readable
+ * 0xFF byte would ask for HEADER + 255). Issue #65.
+ *
+ * `entry_consistent` returns true iff the entry currently at the
+ * read pointer has a sensible header and fits inside what the ring
+ * claims is buffered. `reset_ring_corrupt` puts the ring back into a
+ * known-clean state — losing the existing contents on purpose: if we
+ * can't trust the length byte we can't trust the rest of the buffer
+ * either. */
+static bool entry_consistent(uint8_t ent_len)
+{
+    if (ent_len > BL_LOG_MAX_ENTRY_TEXT) {
+        return false;
+    }
+    size_t ent_total = (size_t)BL_LOG_ENTRY_HEADER_SIZE + ent_len;
+    if (ent_total > (size_t)g_ring->unread_bytes) {
+        return false;
+    }
+    return true;
+}
+
+static void reset_ring_corrupt(void)
+{
+    memset(g_ring, 0, sizeof(*g_ring));
+    g_ring->magic = BL_LOG_MAGIC;
+}
+
+
 /* ---- Eviction ---- */
 
-/* Evict the oldest entry. Returns its total size (header + text). */
+/* Evict the oldest entry. Returns its total size (header + text) on
+ * success, or the full ring size when the entry was corrupt and the
+ * ring was hard-reset — that gives bl_log()'s eviction loop a clean
+ * exit (any new entry now fits because unread_bytes is 0). */
 static size_t evict_oldest(void)
 {
     uint8_t len = ring_peek(0);
+    if (!entry_consistent(len)) {
+        reset_ring_corrupt();
+        return (size_t)BL_LOG_RING_BYTES;
+    }
     size_t total = (size_t)BL_LOG_ENTRY_HEADER_SIZE + len;
     g_ring->read_pos = (uint32_t)((g_ring->read_pos + total) % BL_LOG_RING_BYTES);
     g_ring->unread_bytes -= (uint32_t)total;
@@ -220,7 +264,14 @@ size_t bl_log_drain(uint8_t *out, size_t out_cap, uint8_t min_severity)
     while (g_ring->unread_bytes > 0U) {
         uint8_t ent_len = ring_peek(0);
         uint8_t ent_sev = ring_peek(1);
-        size_t  ent_total = (size_t)BL_LOG_ENTRY_HEADER_SIZE + ent_len;
+
+        /* Bound-check before any memcpy / ring_read / pointer advance.
+         * See the comment on entry_consistent() for the why. */
+        if (!entry_consistent(ent_len)) {
+            reset_ring_corrupt();
+            break;
+        }
+        size_t ent_total = (size_t)BL_LOG_ENTRY_HEADER_SIZE + ent_len;
 
         if (ent_sev >= min_severity) {
             if (written + ent_total > out_cap) {

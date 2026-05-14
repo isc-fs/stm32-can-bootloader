@@ -72,6 +72,13 @@ void test_nvm_compact_replace_meta_writes_caller_metadata(void);
 void test_nvm_compact_replace_meta_erases_old_metadata(void);
 void test_nvm_write_recovers_via_compaction_on_first_program_fail(void);
 
+/* ---- test_bl_log.c ---- */
+void test_log_drain_clamps_oversized_ent_len(void);
+void test_log_drain_clamps_when_unread_smaller_than_declared_entry(void);
+void test_log_drain_well_formed_entry_passes_through(void);
+void test_log_drain_severity_filter_below_threshold_is_skipped(void);
+void test_log_init_zeros_ring_when_magic_is_wrong(void);
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -124,6 +131,13 @@ int main(void)
     RUN_TEST(test_nvm_compact_replace_meta_writes_caller_metadata);
     RUN_TEST(test_nvm_compact_replace_meta_erases_old_metadata);
     RUN_TEST(test_nvm_write_recovers_via_compaction_on_first_program_fail);
+
+    /* test_bl_log.c */
+    RUN_TEST(test_log_drain_clamps_oversized_ent_len);
+    RUN_TEST(test_log_drain_clamps_when_unread_smaller_than_declared_entry);
+    RUN_TEST(test_log_drain_well_formed_entry_passes_through);
+    RUN_TEST(test_log_drain_severity_filter_below_threshold_is_skipped);
+    RUN_TEST(test_log_init_zeros_ring_when_magic_is_wrong);
 
     return UNITY_END();
 }
