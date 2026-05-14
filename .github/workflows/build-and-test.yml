@@ -1,0 +1,92 @@
+name: Build & test
+
+# Runs on every push and PR. Two parallel jobs:
+#
+#   1. firmware-build — cross-compile the BL with arm-none-eabi-gcc
+#      for both Debug and Release. Catches warnings, link errors, and
+#      memory-budget regressions on the firmware target.
+#
+#   2. host-tests — build + run the Unity-based host unit tests under
+#      tests/unit/. Catches logic regressions in the pure-logic modules
+#      (bl_isotp, bl_fwinfo, bl_nvm, …) and the just-fixed NVM
+#      compact-replace / format paths.
+#
+# Both jobs use a Linux runner, pinned tool versions, and FetchContent
+# for Unity so there's no submodule maintenance.
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+# Cancel stale runs on the same ref so a quick push doesn't queue
+# behind a slower in-flight build.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  firmware-build:
+    name: Firmware build (${{ matrix.preset }})
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        preset: [Debug, Release]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install arm-none-eabi toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '14.3.Rel1'
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build build/${{ matrix.preset }}
+
+      - name: Report flash usage
+        run: |
+          ELF=build/${{ matrix.preset }}/CAN_BL.elf
+          arm-none-eabi-size --format=berkeley "$ELF"
+
+      - name: Upload .elf / .bin / .hex artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: CAN_BL-${{ matrix.preset }}
+          path: |
+            build/${{ matrix.preset }}/CAN_BL.elf
+            build/${{ matrix.preset }}/CAN_BL.bin
+            build/${{ matrix.preset }}/CAN_BL.hex
+          if-no-files-found: warn
+          retention-days: 14
+
+  host-tests:
+    name: Host unit tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential
+
+      - name: Configure
+        run: cmake -B build-tests -S tests/unit -G Ninja
+
+      - name: Build
+        run: cmake --build build-tests
+
+      - name: Run tests
+        run: ctest --test-dir build-tests --output-on-failure
