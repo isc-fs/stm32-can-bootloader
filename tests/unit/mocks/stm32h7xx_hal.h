@@ -145,6 +145,13 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,
                                                 uint8_t *data);
 
+/* Returns the number of empty slots in the TX FIFO/queue. The mock
+ * always reports "fully drained" (= queue depth from main.c) so
+ * bl_proto's wait_tx_drain loop exits in zero iterations during host
+ * tests. Dispatcher tests that want to exercise the drain-timeout
+ * behaviour can install a smarter fake on top of this. */
+uint32_t HAL_FDCAN_GetTxFifoFreeLevel(FDCAN_HandleTypeDef *h);
+
 /* ---- FDCAN TX capture (test-only) ----
  *
  * Every successful HAL_FDCAN_AddMessageToTxFifoQ call appends a record
