@@ -542,7 +542,19 @@ void Bootloader_JumpToApplication(void) {
 	/* Application stack */
 	__set_MSP(appStack);
 
-	__enable_irq();
+	/* IRQs stay masked across the jump. The previous code re-enabled
+	 * them here, which let any IRQ that was pending while masked (e.g.
+	 * a queued SysTick — CTRL=0 above stops the counter but doesn't
+	 * clear the pending flag) dispatch through the new VTOR before the
+	 * application's Reset_Handler has run: the app's peripherals
+	 * aren't initialised, its globals aren't relocated, stack-beyond-
+	 * MSP isn't set up. Result: undefined behaviour at jump time,
+	 * intermittent fault under bus load.
+	 *
+	 * The app's HAL_Init() / Reset_Handler will re-enable IRQs after
+	 * it owns the CPU state. Matches the convention used by other
+	 * production bootloaders (e.g. AM32-bootloader's blutil jump:
+	 * disable once, never re-enable on the BL side). Issue #59. */
 
 	/* Jump to app */
 	JumpToApp();
