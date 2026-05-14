@@ -79,6 +79,13 @@ void test_log_drain_well_formed_entry_passes_through(void);
 void test_log_drain_severity_filter_below_threshold_is_skipped(void);
 void test_log_init_zeros_ring_when_magic_is_wrong(void);
 
+/* ---- test_bl_proto_dispatch.c ---- */
+void test_dispatch_node_to_host_direction_is_silently_dropped(void);
+void test_dispatch_wrong_destination_is_silently_dropped(void);
+void test_dispatch_zero_length_frame_is_silently_dropped(void);
+void test_dispatch_bad_pci_emits_nack_transport_error(void);
+void test_dispatch_valid_sf_pci_passes_pci_gate(void);
+
 /* ---- test_bl_app_validate.c ---- */
 void test_app_stack_dtcm_base_accepted(void);
 void test_app_stack_dtcm_interior_accepted(void);
@@ -153,6 +160,13 @@ int main(void)
     RUN_TEST(test_log_drain_well_formed_entry_passes_through);
     RUN_TEST(test_log_drain_severity_filter_below_threshold_is_skipped);
     RUN_TEST(test_log_init_zeros_ring_when_magic_is_wrong);
+
+    /* test_bl_proto_dispatch.c */
+    RUN_TEST(test_dispatch_node_to_host_direction_is_silently_dropped);
+    RUN_TEST(test_dispatch_wrong_destination_is_silently_dropped);
+    RUN_TEST(test_dispatch_zero_length_frame_is_silently_dropped);
+    RUN_TEST(test_dispatch_bad_pci_emits_nack_transport_error);
+    RUN_TEST(test_dispatch_valid_sf_pci_passes_pci_gate);
 
     /* test_bl_app_validate.c */
     RUN_TEST(test_app_stack_dtcm_base_accepted);

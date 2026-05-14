@@ -3,9 +3,14 @@
 
 /*
  * Test-only mock surface paired with mocks/bl_stubs.c. Tests that need
- * to drive deterministic uptime values or inspect captured NOTIFY
- * payloads include this header explicitly; it isn't force-included so
- * production sources never see it.
+ * to drive deterministic uptime values include this header explicitly;
+ * it isn't force-included so production sources never see it.
+ *
+ * FDCAN TX capture (formerly here as bl_proto_send_notify) now lives
+ * at the HAL layer — see `mock_fdcan_*` in mocks/stm32h7xx_hal.h. The
+ * real bl_proto.c is linked into the test build, so its send_notify
+ * routes through HAL_FDCAN_AddMessageToTxFifoQ → the FDCAN capture
+ * ring, and tests inspect frames there.
  */
 
 #include <stdint.h>
@@ -13,17 +18,5 @@
 /* ---- bl_health uptime control ----
  * Sets the value returned by bl_health_uptime_seconds() until reset. */
 void mock_set_uptime_seconds(uint32_t s);
-
-/* ---- bl_proto_send_notify capture ----
- *
- * Every call to bl_proto_send_notify() copies its payload + length
- * into the capture buffers below. Tests use these to assert what the
- * production code emitted. `mock_notify_reset()` clears the capture
- * so each test starts from a known state.
- */
-void           mock_notify_reset(void);
-int            mock_notify_call_count(void);
-const uint8_t *mock_last_notify_payload(void);
-uint16_t       mock_last_notify_length(void);
 
 #endif /* BL_STUBS_H */
