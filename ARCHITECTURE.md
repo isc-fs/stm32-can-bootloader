@@ -47,6 +47,70 @@ classic CAN only; CAN FD is not used by the protocol at this stage.
 
 ---
 
+## Module map
+
+Files in `Core/Src/bl_*.c` cluster into three layers. Lower layers
+own pure data structures + HAL wrappers and don't call into peer
+`bl_*` modules; the middle layer adds storage / diagnostic state;
+the top layer orchestrates everything via the dispatcher. The diagram
+is a simplification — `bl_log`, `bl_live` and `bl_health` also touch
+the dispatcher for `NOTIFY_*` emission, so the boundary isn't strictly
+acyclic at link time — but as a mental model for "what depends on
+what" it captures intent.
+
+```mermaid
+flowchart TD
+    classDef orch fill:#fde2e2,stroke:#a85050,color:#000
+    classDef diag fill:#fff4cf,stroke:#a78a3f,color:#000
+    classDef util fill:#d8ecd8,stroke:#3f6e3f,color:#000
+    classDef hal  fill:#cfdcf0,stroke:#3f5e8a,color:#000
+
+    proto["bl_proto<br/>dispatcher + opcode handlers"]:::orch
+
+    flash["bl_flash<br/>erase / program / CRC"]:::diag
+    log["bl_log<br/>BKPSRAM ring + NOTIFY_LOG"]:::diag
+    health["bl_health<br/>reset cause + heartbeat + counters"]:::diag
+    live["bl_live<br/>32 B snapshot + NOTIFY_LIVE_DATA"]:::diag
+
+    isotp["bl_isotp<br/>SF/FF/CF reassembly + segmentation"]:::util
+    nvm["bl_nvm<br/>log-structured KV in sector 7"]:::util
+    dtc["bl_dtc<br/>32-entry DTC table in BKPSRAM"]:::util
+    obyte["bl_obyte<br/>option-byte read + apply-WRP"]:::util
+    fwinfo["bl_fwinfo<br/>app-record validation"]:::util
+    appval["bl_app_validate<br/>jump-time SP/entry guards"]:::util
+
+    hal["STM32H7 HAL<br/>HAL_FLASH_* · HAL_FDCAN_* · BKPSRAM · RCC · RTC"]:::hal
+
+    proto --> isotp
+    proto --> flash
+    proto --> nvm
+    proto --> dtc
+    proto --> obyte
+    proto --> fwinfo
+    proto --> log
+    proto --> health
+    proto --> live
+
+    flash --> nvm
+    flash --> health
+    health --> nvm
+    live --> dtc
+    live --> obyte
+    live --> health
+    log --> health
+
+    flash --> hal
+    nvm --> hal
+    dtc --> hal
+    obyte --> hal
+    log --> hal
+    health --> hal
+    proto --> hal
+    appval --> hal
+```
+
+---
+
 ## Flash memory map
 
 All addresses are in the STM32 flash alias `0x0800_0000`.
@@ -95,6 +159,34 @@ version, and the bootloader stamps the record.
 
 ## Boot flow
 
+```mermaid
+flowchart TD
+    reset((Reset)) --> init["Peripheral init<br/>clocks · GPIO · FDCAN2 · LEDs"]
+    init --> bootreq{"RTC->BKP0R<br/>== BL_BOOT_REQ_MAGIC?"}
+    bootreq -- yes --> clearmagic["Clear BKP0R<br/>(one-shot)"] --> listen["CAN-listen mode<br/>no auto-jump armed"]
+    bootreq -- no --> checkapp{"Bootloader_CheckApplication()<br/>(magic + CRC32 + SP + entry)"}
+    checkapp -- valid --> armjump["Arm auto-jump<br/>(2 s window)"]
+    checkapp -- invalid --> listen
+    armjump --> mainloop["Main loop<br/>poll FDCAN RX FIFO0<br/>+ dispatch frames"]
+    listen --> mainloop
+    mainloop -- "frame in window" --> mainloop_cancel["Cancel auto-jump"] --> mainloop
+    mainloop -- "deadline elapsed,<br/>no traffic, app valid" --> jump["Jump to app<br/>(see below)"]
+    mainloop -- "any other state" --> mainloop
+
+    subgraph jumpdetail [Jump to application]
+      direction TB
+      j1["HAL_FDCAN_DeInit + HAL_DeInit"] --> j2["Stop SysTick"]
+      j2 --> j3["__disable_irq()"]
+      j3 --> j4["SCB->VTOR = BL_APP_BASE<br/>__DSB()"]
+      j4 --> j5["__set_MSP(appStack)<br/>__ISB()"]
+      j5 --> j6["bx app->Reset_Handler<br/>(IRQs stay masked;<br/>app's HAL_Init enables them)"]
+    end
+
+    jump --> j1
+```
+
+Prose walk-through:
+
 1. **Reset** — MCU starts the bootloader (vector table at
    `0x08000000`).
 2. **Peripheral init** — clocks, GPIO, FDCAN2, status LEDs.
@@ -111,9 +203,18 @@ version, and the bootloader stamps the record.
    the auto-jump fires when its deadline elapses with no inbound
    traffic.
 5. **Jump to application** — deinit FDCAN and HAL, stop SysTick,
-   disable IRQs, relocate `SCB->VTOR` to `BL_APP_BASE`, restore
-   MSP from the app's stack word, re-enable IRQs, branch to the
-   app's reset vector.
+   disable IRQs, relocate `SCB->VTOR` to `BL_APP_BASE` (followed
+   by `__DSB()` so the write is visible before any instruction
+   fetch reads from the new vector table), restore MSP from the
+   app's stack word (followed by `__ISB()` so the pipeline sees
+   the new SP before the branch), and finally `bx` to the app's
+   reset vector. **IRQs stay masked across the handoff** — the
+   app's `Reset_Handler` / `HAL_Init()` is what re-enables them
+   once it owns the CPU state. Re-enabling on the BL side risked
+   a pending IRQ dispatching through the new VTOR before the
+   app's reset handler had run; the barriers + masked-IRQs pattern
+   are documented in ARM AN-298 and the AM32-bootloader reference
+   implementation.
 
 A corrupt or missing application never causes a blind jump — the
 bootloader lights the error LED and stays in CAN-listen mode.
@@ -429,9 +530,13 @@ would eliminate that window if stronger guarantees are ever
 required.
 
 **Reserved keys** live below `0x1000`; user / app keys start at
-`0x1000`. Today: `0x0001` `BL_NVM_KEY_NODE_ID` (1-byte override
-for compile-time `BL_NODE_ID`), `0x0002` `BL_NVM_KEY_CAN_BITRATE`
-(reserved — future CAN bitrate preference).
+`0x1000`. Today:
+
+| Key      | Name                            | Notes                                                |
+|---------:|---------------------------------|------------------------------------------------------|
+| `0x0001` | `BL_NVM_KEY_NODE_ID`            | 1-byte override for compile-time `BL_NODE_ID`        |
+| `0x0002` | `BL_NVM_KEY_CAN_BITRATE`        | reserved — future CAN bitrate preference             |
+| `0x0003` | `BL_NVM_KEY_FLASH_WRITE_COUNT`  | 4-byte lifetime counter of `bl_flash_{write,erase}` ops, persisted across boots and exposed in the `flash_write_count` field of the health record |
 
 #### Option bytes (OB_READ, OB_APPLY_WRP)
 
@@ -457,13 +562,27 @@ programmer. Optional bytes 4..7 carry a LE sector bitmap; omitted,
 it defaults to `0x01` (protect sector 0 — the bootloader — only).
 
 **Launch sequencing.** On a valid request the handler ACKs
-synchronously, sleeps 10 ms so the ACK drains onto the wire, then
-calls `bl_obyte_apply_wrp()` which unlocks the OB area, programs
-the new WRP mask, and calls `HAL_FLASH_OB_Launch()`. The launch
-itself resets the MCU, so the handler does not return on success.
-If the launch ever returns (a documented edge case on some
-families) the handler logs `BL_DTC_FLASH_HW` and emits
-`NACK(BL_NACK_FLASH_HW)`.
+synchronously, then **polls the FDCAN TX FIFO until it has fully
+drained** (`HAL_FDCAN_GetTxFifoFreeLevel == BL_FDCAN_TX_QUEUE_DEPTH`,
+with a 50 ms timeout fallback), and only then calls
+`bl_obyte_apply_wrp()` which unlocks the OB area, programs the new
+WRP mask, and calls `HAL_FLASH_OB_Launch()`. The earlier `HAL_Delay(10)`
+"let the ACK drain" pattern was hope, not guarantee — a long CF
+chain queued ahead or a low CAN bitrate could leave the ACK in the
+FIFO when the MCU reset and the host would never see it.
+
+The launch itself resets the MCU, so the handler does not return on
+success. If the launch ever returns (a documented edge case on some
+families — usually means `HAL_FLASH_OB_Unlock` or
+`HAL_FLASHEx_OBProgram` failed before the launch ever ran, so the
+option bytes weren't touched) the handler logs `BL_DTC_FLASH_HW`
+and surfaces the failure through the DTC table — **but does NOT
+emit a NACK**, because the host already received a positive ACK
+above and a contradictory NACK arriving afterwards would violate
+the protocol's at-most-one-response-per-CMD invariant. The host
+detects the no-op via session-watchdog timeout (the BL is hung in
+the failed handler) and verifies via `OB_READ` on the next
+reconnect that the option bytes are unchanged.
 
 **Boot-time self-check.** `Bootloader_Init` calls
 `bl_obyte_is_sector_wrp_protected(0)`; if sector 0 isn't
@@ -484,6 +603,19 @@ host tool cannot transition a unit into Level 2 because the
 firmware cannot emit the instruction that would do it.
 
 ### Session watchdog
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle: reset
+    Idle --> Active: CMD_CONNECT (host major == BL major)
+    Idle --> Idle: any other addressed frame<br/>(NACK if needed; no latch flip)
+
+    Active --> Active: addressed frame OR ACK emitted<br/>(refresh activity timestamp)
+    Active --> Active: 1 Hz heartbeat tick<br/>(NOTIFY_HEARTBEAT)
+    Active --> Idle: CMD_DISCONNECT
+    Active --> Idle: watchdog (30 s silence)<br/>→ try auto-jump if app valid
+    Active --> [*]: NVIC_SystemReset()<br/>(CMD_RESET / OB_APPLY_WRP)
+```
 
 Once `CONNECT` succeeds the bootloader arms a watchdog that fires
 after `BL_SESSION_TIMEOUT_MS` (default **30 000 ms**, override with
@@ -550,17 +682,23 @@ extended as new SRAM regions come into use.
 
 ## Future work (not implemented)
 
-**Phase 5 — security** (deferred at `v1.0.0`). Planned branches
-stay on [ROADMAP.md](ROADMAP.md) with a `⏸ deferred` badge so the
-on-ramp is preserved: `feat/17-ed25519-sign` (64-byte signature
-record near `0x080FFF00`, boot-time verify against a bootloader-
-embedded public key, `BL_NACK_SIGNATURE_INVALID` on mismatch);
-`feat/18-replay-counter` (monotonic `min_fw_version` in NVM key
-`0x0003`; `FLASH_VERIFY` rejects downgrades);
-`feat/19-challenge-response` (nonce in the `CONNECT` ACK + new
-`CMD_AUTH` opcode carrying a Blake2b-MAC);
-`feat/20-encrypted-transport` (optional AES-128-CTR wrapping of
-ISO-TP payloads behind a build-time feature flag).
+**Phase 5 — security** (deferred at `v1.0.0`). Planned work stays
+on [ROADMAP.md](ROADMAP.md) with a `⏸ deferred` badge so the on-
+ramp is preserved. Sketch (counters assigned at branch-cut time —
+the `feat/N` numbering in early drafts of this doc has since been
+consumed by other work):
+
+- **Image signing.** 64-byte Ed25519 signature record near
+  `0x080FFF00`, boot-time verify against a bootloader-embedded
+  public key, `BL_NACK_SIGNATURE_INVALID` on mismatch.
+- **Replay counter.** Monotonic `min_fw_version` persisted in a
+  new NVM key (the existing `0x0003` is now used for the flash-op
+  counter, so this work picks a fresh key); `FLASH_VERIFY` rejects
+  downgrades.
+- **Challenge–response.** Nonce in the `CONNECT` ACK + new
+  `CMD_AUTH` opcode carrying a Blake2b-MAC.
+- **Encrypted transport.** Optional AES-128-CTR wrapping of ISO-TP
+  payloads behind a build-time feature flag.
 
 **Other deferred work.** Rollback slots (A/B) — a second app
 region for safe-update semantics; would require re-sizing sector 7
