@@ -58,8 +58,9 @@
 /* ---- Well-known keys (bootloader use) ----
  * User / app keys should start at 0x1000 to stay clear of the
  * bootloader's reserved range. */
-#define BL_NVM_KEY_NODE_ID        0x0001U   /* 1-byte override for compile-time BL_NODE_ID */
-#define BL_NVM_KEY_CAN_BITRATE    0x0002U   /* future — CAN bitrate preference             */
+#define BL_NVM_KEY_NODE_ID            0x0001U   /* 1-byte override for compile-time BL_NODE_ID */
+#define BL_NVM_KEY_CAN_BITRATE        0x0002U   /* future — CAN bitrate preference             */
+#define BL_NVM_KEY_FLASH_WRITE_COUNT  0x0003U   /* persistent counter of bl_flash_{write,erase} */
 
 /* ---- Status codes ---- */
 typedef enum {
