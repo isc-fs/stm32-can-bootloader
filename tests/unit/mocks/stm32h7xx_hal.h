@@ -61,6 +61,106 @@ void     HAL_Delay(uint32_t ms);
  * code compiles unchanged. */
 void HAL_PWR_EnableBkUpAccess(void);
 #define __HAL_RCC_BKPRAM_CLK_ENABLE()    ((void)0)
+#define __HAL_RCC_RTC_ENABLE()           ((void)0)
+
+/* ---- NVIC + RCC + RTC stubs ----
+ *
+ * bl_proto's handle_reset and handle_jump touch a handful of CMSIS
+ * /core_cm7 inlines and ST register-block typedefs. None of these
+ * paths get exercised by the current dispatcher tests (they end in
+ * NVIC_SystemReset which would actually reset the chip), but the
+ * linker still needs the symbols. Provide enough surface to compile,
+ * with no-op semantics — a test that DOES exercise these paths will
+ * upgrade these to proper fakes when it lands. */
+void NVIC_SystemReset(void);
+
+typedef struct {
+    volatile uint32_t BDCR;
+} RCC_TypeDef;
+extern RCC_TypeDef *const RCC;
+#define RCC_BDCR_RTCEN              0x00008000U
+
+typedef struct {
+    volatile uint32_t BKP0R;
+} RTC_TypeDef;
+extern RTC_TypeDef *const RTC;
+
+/* ---- Option-byte launcher stub ----
+ * bl_obyte's apply-WRP path on the chip calls HAL_FLASH_OB_Launch
+ * which never returns (it triggers a system reset). On host it just
+ * returns OK; the dispatcher's post-launch dead-code is unreachable
+ * in real life. */
+HAL_StatusTypeDef HAL_FLASH_OB_Launch(void);
+
+/* ---- FDCAN surface ----
+ *
+ * The real ST HAL's FDCAN headers are large and full of register-level
+ * detail bl_proto doesn't touch. We mirror only the types and constants
+ * bl_proto.c actually uses, with field names matching the production
+ * header so production code compiles unchanged. */
+typedef struct {
+    int _opaque;
+} FDCAN_HandleTypeDef;
+
+typedef struct {
+    uint32_t Identifier;
+    uint32_t IdType;
+    uint32_t TxFrameType;
+    uint32_t DataLength;
+    uint32_t ErrorStateIndicator;
+    uint32_t BitRateSwitch;
+    uint32_t FDFormat;
+    uint32_t TxEventFifoControl;
+    uint32_t MessageMarker;
+} FDCAN_TxHeaderTypeDef;
+
+/* Flags / mode constants used by bl_proto. Values are arbitrary —
+ * the production HAL gives them specific bit patterns but bl_proto
+ * just assigns them as opaque tokens, so any unique uint32_t works. */
+#define FDCAN_STANDARD_ID           0x00000000U
+#define FDCAN_DATA_FRAME            0x00000000U
+#define FDCAN_ESI_ACTIVE            0x00000000U
+#define FDCAN_BRS_OFF               0x00000000U
+#define FDCAN_CLASSIC_CAN           0x00000000U
+#define FDCAN_NO_TX_EVENTS          0x00000000U
+
+/* The real HAL encodes 0..8 byte counts in a non-linear table; bl_proto
+ * computes the right token from dlc_bytes_to_fdcan() and we just need
+ * to round-trip distinct values. Match the production HAL's actual
+ * encoding so the dlc table assertion lines up if any test wants to
+ * verify it. */
+#define FDCAN_DLC_BYTES_0           (0U << 16)
+#define FDCAN_DLC_BYTES_1           (1U << 16)
+#define FDCAN_DLC_BYTES_2           (2U << 16)
+#define FDCAN_DLC_BYTES_3           (3U << 16)
+#define FDCAN_DLC_BYTES_4           (4U << 16)
+#define FDCAN_DLC_BYTES_5           (5U << 16)
+#define FDCAN_DLC_BYTES_6           (6U << 16)
+#define FDCAN_DLC_BYTES_7           (7U << 16)
+#define FDCAN_DLC_BYTES_8           (8U << 16)
+
+extern FDCAN_HandleTypeDef hfdcan2;
+
+HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
+                                                FDCAN_TxHeaderTypeDef *hdr,
+                                                uint8_t *data);
+
+/* ---- FDCAN TX capture (test-only) ----
+ *
+ * Every successful HAL_FDCAN_AddMessageToTxFifoQ call appends a record
+ * to a ring sized for typical test cases. Tests inspect the captured
+ * frames to assert "what did the BL emit in response to X?". */
+#define MOCK_FDCAN_CAPTURE_DEPTH    16U
+
+typedef struct {
+    uint32_t identifier;
+    uint8_t  dlc_bytes;
+    uint8_t  data[8];
+} mock_fdcan_frame_t;
+
+void  mock_fdcan_reset(void);
+int   mock_fdcan_tx_count(void);
+const mock_fdcan_frame_t *mock_fdcan_get(int index);  /* 0..count-1, or NULL */
 
 /* ---- Test-only helpers (defined alongside the stubs) ---- */
 void mock_flash_reset(void);            /* fill the 1-MB buffer with 0xFF */
