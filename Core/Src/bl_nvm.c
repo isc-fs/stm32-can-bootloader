@@ -211,6 +211,19 @@ static bl_nvm_status_t compact_and_append(uint16_t new_key,
                                           const void *new_value,
                                           uint8_t new_len)
 {
+    /* Defence in depth on caller-supplied length. bl_nvm_write does
+     * the same check before calling us, but a future caller (test
+     * harness, future opcode handler) could forget — so we re-check
+     * here. memcpy(entry.value, new_value, new_len) below copies into
+     * a fixed-size `value[BL_NVM_MAX_VALUE_LEN]` field, and STM32
+     * flash's program-by-FLASHWORD semantics mean any byte past the
+     * struct end gets quietly clobbered with the next sector's data.
+     * Audit follow-up (#68 bl_nvm bullet) — same encapsulation
+     * pattern issue #54 cured for bl_isotp. */
+    if (new_len > BL_NVM_MAX_VALUE_LEN) {
+        return BL_NVM_BAD_ARG;
+    }
+
     bl_nvm_entry_t buf[BL_NVM_MAX_LIVE_ENTRIES];
     uint32_t count = 0U;
 
