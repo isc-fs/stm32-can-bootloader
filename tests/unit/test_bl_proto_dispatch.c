@@ -243,6 +243,81 @@ void test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error(void)
 }
 
 
+void test_dispatch_write_chunk_262byte_37cf_padded_last_cf(void)
+{
+    /* Higher-fidelity reproducer for #94 using the EXACT candump from
+     * the operator's bench session. WRITE_CHUNK with declared total
+     * 262 bytes (PCI `11 06`), 37 CFs at DLC=8, last CF padded with
+     * three 0x00 bytes (real data ends at offset 4 of the 7-byte
+     * data area).
+     *
+     * Operator's hypothesis: BL credits 7 bytes per CF regardless of
+     * declared remainder, so 6 + 37*7 = 265 > 262 = OVERFLOW. The
+     * code-side `take = min(remaining, frame_avail)` says it
+     * shouldn't, but bench evidence is concrete — this test settles
+     * the question deterministically. If it FAILS we have the bug;
+     * if it PASSES the failure happens elsewhere (bench-side
+     * framing, bridge mangling some specific frame, etc.). */
+    bl_proto_id_t id = host_to_us();
+
+    /* === FF: PCI=0x11 06 → total=262, 6 bytes of payload === */
+    uint8_t ff[8];
+    ff[0] = 0x11U;                       /* FF PCI, length high nibble=1 */
+    ff[1] = 0x06U;                       /* length low byte = 0x06 → total 0x106 = 262 */
+    ff[2] = (uint8_t)BL_MSG_CMD;
+    ff[3] = (uint8_t)BL_CMD_FLASH_WRITE;
+    ff[4] = 0x00U;                       /* addr LE → 0x08020000 */
+    ff[5] = 0x00U;
+    ff[6] = 0x02U;
+    ff[7] = 0x08U;
+    bl_proto_dispatch(&id, ff, 8U);
+
+    /* === 36 full CFs: DLC=8, 7 data bytes each.
+     *
+     * Sequence pattern from the trace:
+     *   CFs 1..15  → seq 1..15
+     *   CFs 16..31 → seq 0..15
+     *   CFs 32..36 → seq 0..4
+     * All DLC=8. */
+    for (uint8_t i = 0U; i < 36U; i++) {
+        uint8_t seq = (uint8_t)((i + 1U) & 0x0FU);
+        uint8_t cf[8];
+        cf[0] = (uint8_t)(0x20U | seq);
+        for (uint8_t j = 1U; j < 8U; j++) {
+            cf[j] = (uint8_t)(0xA0U + (i & 0x3FU));
+        }
+        bl_proto_dispatch(&id, cf, 8U);
+    }
+
+    /* === 37th CF: PCI 0x25 (seq=5, the next after CF36's seq=4),
+     *   DLC=8 with last 3 bytes zero-padded (real data ends at index 4).
+     * Total real data after FF = 36*7 + 4 = 252 + 4 = 256 bytes.
+     * Total message = 6 + 256 = 262 = declared. === */
+    uint8_t cf37[8];
+    cf37[0] = 0x25U;
+    cf37[1] = 0xF1U; cf37[2] = 0x10U; cf37[3] = 0x02U; cf37[4] = 0x08U;
+    cf37[5] = 0x00U; cf37[6] = 0x00U; cf37[7] = 0x00U;  /* padding */
+    bl_proto_dispatch(&id, cf37, 8U);
+
+    /* Assert: no captured frame is a NACK with TRANSPORT_ERROR. */
+    int n = mock_fdcan_tx_count();
+    for (int i = 0; i < n; i++) {
+        const mock_fdcan_frame_t *f = mock_fdcan_get(i);
+        TEST_ASSERT_NOT_NULL(f);
+        if (frame_is_nack_with_code(f, (uint8_t)BL_NACK_TRANSPORT_ERROR)) {
+            char detail[200];
+            (void)snprintf(detail, sizeof(detail),
+                "BL emitted NACK(TRANSPORT_ERROR) at TX frame %d/%d "
+                "(rejected_opcode=0x%02X). Issue #94 regression: the "
+                "262-byte / 37-CF WRITE_CHUNK shape from the operator's "
+                "bench trace fails reassembly in unit test.",
+                i, n, f->data[2]);
+            TEST_FAIL_MESSAGE(detail);
+        }
+    }
+}
+
+
 /* ---- Sanity: valid SF still passes through the gate ---- */
 
 void test_dispatch_valid_sf_pci_passes_pci_gate(void)
