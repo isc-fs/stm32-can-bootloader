@@ -30,6 +30,7 @@ adapter.
 | Taking a blank board to shipping-ready, or recovering one in the pit | [**PROVISIONING.md**](PROVISIONING.md) |
 | Proving the protection layers fire on real hardware | [**BENCH_TESTS.md**](BENCH_TESTS.md) |
 | Cutting a release — mechanical bench checklist per-PR | [**RELEASE_BENCH.md**](RELEASE_BENCH.md) |
+| What changed between releases | [**CHANGELOG.md**](CHANGELOG.md) |
 | Understanding the memory map, boot flow, and design rationale | [**ARCHITECTURE.md**](ARCHITECTURE.md) |
 | Working on the bootloader code itself | [**CONTRIBUTING.md**](CONTRIBUTING.md) |
 | Phase-by-phase delivery history (auto-generated) | [ROADMAP.md](ROADMAP.md) |
