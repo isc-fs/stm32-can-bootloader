@@ -90,3 +90,122 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build-tests --output-on-failure
+
+  firmware-size:
+    # Builds the Release preset twice — once on this PR's head and once
+    # on the base branch — and fails if any segment grew by more than
+    # the per-segment threshold below. Goal: catch accidental flash/RAM
+    # bloat early. The link itself already catches "doesn't fit"; this
+    # job catches "fits, but is a lot bigger than last week" trends.
+    #
+    # Why PR-only (`if:` below): the gate needs a "before" to diff
+    # against. On push events there's no PR base, so the job skips.
+    # The push branch will still get a green Firmware build (Debug/
+    # Release) job that reports absolute sizes via `arm-none-eabi-size`,
+    # which is enough for direct-push observability.
+    #
+    # Thresholds (per segment, in bytes) live in the script step below
+    # and are deliberately on the loose side — a normal feature PR
+    # should land well under 2 KB of .text and 256 B of bss/data. Tune
+    # them tighter once we have a few PRs of data.
+    name: Firmware size delta
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history to checkout the base branch via worktree.
+          fetch-depth: 0
+
+      - name: Install arm-none-eabi toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '14.3.Rel1'
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Build Release on PR head
+        run: |
+          cmake --preset Release
+          cmake --build build/Release
+
+      - name: Build Release on base (${{ github.base_ref }})
+        # We use a worktree rather than `git checkout` so we don't lose
+        # the head's build/ tree (which we still need for the diff
+        # step). The worktree gets its own build/Release/.
+        run: |
+          git fetch --no-tags --depth=50 origin "${{ github.base_ref }}"
+          git worktree add ../base-tree "origin/${{ github.base_ref }}"
+          (cd ../base-tree && cmake --preset Release && cmake --build build/Release)
+
+      - name: Compare segment sizes
+        # `arm-none-eabi-size --format=berkeley` prints a 2-line table:
+        #     text  data  bss  dec  hex  filename
+        #     <N>   <N>   <N>  <N>  <h>  CAN_BL.elf
+        # We parse line 2 into shell vars for head + base, diff them,
+        # and write a summary table to $GITHUB_STEP_SUMMARY so the PR
+        # reviewer sees the deltas at a glance.
+        run: |
+          set -euo pipefail
+
+          # Tunable per-segment regression thresholds, in bytes.
+          # Loose for the first landing — tighten once we have a few
+          # PRs of baseline data. Anything legitimately bigger than
+          # these wants reviewer scrutiny anyway.
+          TEXT_MAX_INCREASE=2048
+          DATA_MAX_INCREASE=256
+          BSS_MAX_INCREASE=256
+
+          parse_size() {
+            arm-none-eabi-size --format=berkeley "$1" \
+              | awk 'NR==2 { print $1, $2, $3, $4 }'
+          }
+
+          HEAD_ELF="$GITHUB_WORKSPACE/build/Release/CAN_BL.elf"
+          BASE_ELF="$GITHUB_WORKSPACE/../base-tree/build/Release/CAN_BL.elf"
+
+          read TEXT_HEAD DATA_HEAD BSS_HEAD DEC_HEAD < <(parse_size "$HEAD_ELF")
+          read TEXT_BASE DATA_BASE BSS_BASE DEC_BASE < <(parse_size "$BASE_ELF")
+
+          TEXT_DELTA=$((TEXT_HEAD - TEXT_BASE))
+          DATA_DELTA=$((DATA_HEAD - DATA_BASE))
+          BSS_DELTA=$((BSS_HEAD  - BSS_BASE))
+          DEC_DELTA=$((DEC_HEAD  - DEC_BASE))
+
+          printf 'Segment   |   base   |   head   |   delta\n'
+          printf 'text      | %8d | %8d | %+8d\n' "$TEXT_BASE" "$TEXT_HEAD" "$TEXT_DELTA"
+          printf 'data      | %8d | %8d | %+8d\n' "$DATA_BASE" "$DATA_HEAD" "$DATA_DELTA"
+          printf 'bss       | %8d | %8d | %+8d\n' "$BSS_BASE"  "$BSS_HEAD"  "$BSS_DELTA"
+          printf 'dec total | %8d | %8d | %+8d\n' "$DEC_BASE"  "$DEC_HEAD"  "$DEC_DELTA"
+
+          {
+            echo "## Firmware size delta (Release)"
+            echo ""
+            echo "| Segment | base (${{ github.base_ref }}) | head (this PR) | delta |"
+            echo "|---|---:|---:|---:|"
+            printf '| text | %d | %d | %+d |\n'  "$TEXT_BASE" "$TEXT_HEAD" "$TEXT_DELTA"
+            printf '| data | %d | %d | %+d |\n'  "$DATA_BASE" "$DATA_HEAD" "$DATA_DELTA"
+            printf '| bss  | %d | %d | %+d |\n'  "$BSS_BASE"  "$BSS_HEAD"  "$BSS_DELTA"
+            printf '| **dec total** | **%d** | **%d** | **%+d** |\n' \
+              "$DEC_BASE" "$DEC_HEAD" "$DEC_DELTA"
+            echo ""
+            echo "_Thresholds: text +${TEXT_MAX_INCREASE} B, data +${DATA_MAX_INCREASE} B, bss +${BSS_MAX_INCREASE} B._"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          fail=0
+          if [ "$TEXT_DELTA" -gt "$TEXT_MAX_INCREASE" ]; then
+            echo "::error::text grew by ${TEXT_DELTA} B (threshold ${TEXT_MAX_INCREASE} B)"
+            fail=1
+          fi
+          if [ "$DATA_DELTA" -gt "$DATA_MAX_INCREASE" ]; then
+            echo "::error::data grew by ${DATA_DELTA} B (threshold ${DATA_MAX_INCREASE} B)"
+            fail=1
+          fi
+          if [ "$BSS_DELTA" -gt "$BSS_MAX_INCREASE" ]; then
+            echo "::error::bss grew by ${BSS_DELTA} B (threshold ${BSS_MAX_INCREASE} B)"
+            fail=1
+          fi
+          exit "$fail"
