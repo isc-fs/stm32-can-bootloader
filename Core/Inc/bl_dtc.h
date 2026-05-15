@@ -45,6 +45,20 @@
 /* ---- Well-known DTC codes the bootloader itself emits ---- */
 #define BL_DTC_FLASH_HW         0x0010U  /* flash erase / program HAL failure */
 #define BL_DTC_SESSION_TIMEOUT  0x0020U  /* session watchdog expired           */
+#define BL_DTC_ISOTP_ERROR      0x0030U  /* bl_isotp_rx_feed returned an error
+                                          * code the dispatcher converted to
+                                          * NACK(TRANSPORT_ERROR or TIMEOUT).
+                                          * context_data packs diagnostic info
+                                          * — high byte = bl_isotp_rx_status_t,
+                                          * byte 2 = expected next_seq (only
+                                          * meaningful for BAD_SEQ; 0 otherwise),
+                                          * byte 1 = received seq / PCI byte
+                                          * (BAD_SEQ → got_seq, BAD_PCI →
+                                          * data[0], else 0), low byte = FDCAN
+                                          * RX_FIFO0 fill level at error
+                                          * detection (0..16 on the chip).
+                                          * High fill values point at FIFO
+                                          * overflow as the root cause. #94. */
 
 /* ---- Entry layout (20 bytes, no padding) ---- */
 typedef struct {

@@ -100,6 +100,15 @@ typedef struct {
     uint16_t received;                      /* bytes filled into buf so far    */
     uint8_t  next_seq;                      /* expected CF sequence 0..15      */
     uint32_t deadline_ms;                   /* HAL_GetTick() target            */
+    /* Diagnostics carried OUT of bl_isotp_rx_feed when a frame is
+     * rejected, so the dispatcher can DTC-log the mismatch without
+     * bl_isotp having to depend on bl_dtc. Populated only on
+     * BAD_SEQ / BAD_PCI returns; contents undefined otherwise.
+     * Issue #94 — pins down silent-CF-drop scenarios where the BL
+     * sees a sequence gap because the FDCAN RX FIFO overflowed. */
+    uint8_t  last_err_expected;             /* BAD_SEQ: expected next_seq      */
+    uint8_t  last_err_observed;             /* BAD_SEQ: got_seq;
+                                             * BAD_PCI: full data[0] byte      */
     uint8_t  buf[BL_ISOTP_MAX_MSG];
 } bl_isotp_rx_t;
 
