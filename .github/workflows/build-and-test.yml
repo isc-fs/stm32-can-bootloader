@@ -90,3 +90,48 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build-tests --output-on-failure
+
+  host-tests-sanitized:
+    # Same suite, but compiled with AddressSanitizer + UndefinedBehaviorSanitizer.
+    # Catches memory issues (heap/stack OOB, use-after-free) and signed
+    # integer overflow / shift-out-of-range / null deref etc. that the
+    # plain debug build doesn't flag.
+    #
+    # -fno-sanitize-recover=all turns every detected issue into an
+    # immediate abort, so the test failure surfaces as a non-zero exit
+    # code instead of a buried warning on stderr.
+    #
+    # Runs in parallel with `host-tests`. Not (yet) added to branch-
+    # protection required checks — promote to required after a few
+    # successful runs to make sure the sanitizers stay green under
+    # normal development.
+    name: Host unit tests (ASan + UBSan)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential
+
+      - name: Configure
+        run: |
+          cmake -B build-tests-san -S tests/unit -G Ninja \
+            -DCMAKE_C_FLAGS_INIT='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all -g -O1' \
+            -DCMAKE_EXE_LINKER_FLAGS_INIT='-fsanitize=address,undefined'
+
+      - name: Build
+        run: cmake --build build-tests-san
+
+      - name: Run tests
+        # ASAN_OPTIONS / UBSAN_OPTIONS keep the runtime verbose and
+        # ensure no detection is silently downgraded. abort_on_error
+        # makes CI failures point at the exact crash, not a continuing
+        # run.
+        env:
+          ASAN_OPTIONS:  detect_leaks=1:abort_on_error=1:strict_string_checks=1:check_initialization_order=1:detect_stack_use_after_return=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ctest --test-dir build-tests-san --output-on-failure
