@@ -2,8 +2,17 @@ name: Close linked issues on merge to dev
 
 # GitHub only auto-closes issues referenced by `Closes #N` when the PR is merged
 # into the repository's default branch. Our workflow merges feat/fix PRs into
-# `dev` instead, so this workflow reproduces the behaviour by parsing the PR
-# body for the standard closing keywords and closing each referenced issue.
+# `dev` instead, so this workflow reproduces the behaviour by:
+#
+#   1. parsing the PR body+title for the standard closing keywords
+#      (close/closes/closed/fix/fixes/fixed/resolve/resolves/resolved)
+#      and closing each #N reference.
+#
+#   2. additionally finding the branch's auto-created tracking issue
+#      (`branch-issue.yml` titles it `[<head-ref>]`) and closing that
+#      too. Before this step landed every merged branch left its
+#      tracking issue OPEN forever — six accumulated this session and
+#      were closed manually before this fix went in.
 
 on:
   pull_request:
@@ -20,19 +29,23 @@ jobs:
       pull-requests: read
 
     steps:
-      - name: Close issues referenced by the PR body
+      - name: Close issues referenced by the PR body + the branch tracking issue
         uses: actions/github-script@v7
         env:
-          PR_BODY:   ${{ github.event.pull_request.body }}
-          PR_TITLE:  ${{ github.event.pull_request.title }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          PR_BASE:   ${{ github.event.pull_request.base.ref }}
+          PR_BODY:     ${{ github.event.pull_request.body }}
+          PR_TITLE:    ${{ github.event.pull_request.title }}
+          PR_NUMBER:   ${{ github.event.pull_request.number }}
+          PR_BASE:     ${{ github.event.pull_request.base.ref }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
         with:
           script: |
-            const body    = process.env.PR_BODY  || '';
-            const title   = process.env.PR_TITLE || '';
+            const body    = process.env.PR_BODY    || '';
+            const title   = process.env.PR_TITLE   || '';
             const prNum   = parseInt(process.env.PR_NUMBER, 10);
             const baseRef = process.env.PR_BASE;
+            const headRef = process.env.PR_HEAD_REF || '';
+
+            /* ---- Pass 1: explicit `Closes #N` style references ---- */
 
             /* GitHub's own closing keywords:
                  close, closes, closed, fix, fixes, fixed,
@@ -48,39 +61,94 @@ jobs:
 
             if (numbers.size === 0) {
               console.log('No closing-keyword references found in PR body or title.');
+            } else {
+              for (const n of numbers) {
+                try {
+                  const { data: issue } = await github.rest.issues.get({
+                    owner: context.repo.owner,
+                    repo:  context.repo.repo,
+                    issue_number: n,
+                  });
+                  if (issue.pull_request) {
+                    console.log(`#${n} is a PR, skipping.`);
+                    continue;
+                  }
+                  if (issue.state === 'closed') {
+                    console.log(`#${n} already closed, skipping.`);
+                    continue;
+                  }
+                  await github.rest.issues.update({
+                    owner: context.repo.owner,
+                    repo:  context.repo.repo,
+                    issue_number: n,
+                    state: 'closed',
+                    state_reason: 'completed',
+                  });
+                  await github.rest.issues.createComment({
+                    owner: context.repo.owner,
+                    repo:  context.repo.repo,
+                    issue_number: n,
+                    body:  `Closed by #${prNum} (merged into \`${baseRef}\`).`,
+                  });
+                  console.log(`Closed #${n}.`);
+                } catch (err) {
+                  console.log(`Could not close #${n}: ${err.message}`);
+                }
+              }
+            }
+
+            /* ---- Pass 2: close the branch's auto-tracking issue ----
+             *
+             * `branch-issue.yml` titles every tracking issue exactly
+             * `[<branch-name>]` (see its `issue: { title: }` block),
+             * so we look up that exact title and close it. The
+             * exact-string match guards against fuzzy-search drift —
+             * a branch named `fix/12-foo` should NEVER pick up
+             * `[fix/12-foo-bar]`. */
+            if (!headRef) {
+              console.log('No head ref on this event — skipping tracking-issue lookup.');
               return;
             }
 
-            for (const n of numbers) {
-              try {
-                const { data: issue } = await github.rest.issues.get({
-                  owner: context.repo.owner,
-                  repo:  context.repo.repo,
-                  issue_number: n,
-                });
-                if (issue.pull_request) {
-                  console.log(`#${n} is a PR, skipping.`);
-                  continue;
-                }
-                if (issue.state === 'closed') {
-                  console.log(`#${n} already closed, skipping.`);
-                  continue;
-                }
+            const expectedTitle = `[${headRef}]`;
+            try {
+              const query = [
+                `repo:${context.repo.owner}/${context.repo.repo}`,
+                'is:issue',
+                'is:open',
+                'in:title',
+                `"${expectedTitle}"`,
+              ].join(' ');
+              const { data: search } = await github.rest.search.issuesAndPullRequests({
+                q: query,
+              });
+              const matches = search.items.filter((item) => {
+                return (item.title || '').trim() === expectedTitle && !item.pull_request;
+              });
+              if (matches.length === 0) {
+                console.log(`No tracking issue found for ${expectedTitle}.`);
+                return;
+              }
+              for (const item of matches) {
                 await github.rest.issues.update({
                   owner: context.repo.owner,
                   repo:  context.repo.repo,
-                  issue_number: n,
+                  issue_number: item.number,
                   state: 'closed',
                   state_reason: 'completed',
                 });
                 await github.rest.issues.createComment({
                   owner: context.repo.owner,
                   repo:  context.repo.repo,
-                  issue_number: n,
-                  body:  `Closed by #${prNum} (merged into \`${baseRef}\`).`,
+                  issue_number: item.number,
+                  body: [
+                    `Tracking issue closed automatically.`,
+                    ``,
+                    `Branch \`${headRef}\` was merged via #${prNum} into \`${baseRef}\`.`,
+                  ].join('\n'),
                 });
-                console.log(`Closed #${n}.`);
-              } catch (err) {
-                console.log(`Could not close #${n}: ${err.message}`);
+                console.log(`Closed tracking issue #${item.number} (${expectedTitle}).`);
               }
+            } catch (err) {
+              console.log(`Branch-tracking-issue lookup failed: ${err.message}`);
             }
