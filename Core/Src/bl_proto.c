@@ -241,6 +241,42 @@ static void send_nack(uint8_t rejected_opcode, uint8_t code)
     send_message(BL_MSG_NACK, payload, (uint16_t)sizeof(payload));
 }
 
+/* Log an ISO-TP reassembly error to the DTC table + log stream.
+ *
+ * Packs four bytes of diagnostic context — see BL_DTC_ISOTP_ERROR in
+ * bl_dtc.h for the encoding. The FDCAN RX_FIFO0 fill level in the low
+ * byte is the smoking gun for issue #94: if it consistently reads
+ * "near full" (≥ depth-2) right when BAD_SEQ fires, host CFs are
+ * being dropped at the controller because the BL's main-loop drain
+ * rate can't keep up — fix is on the BL side (faster drain or move to
+ * ISR-driven RX). If it reads "near empty" with a real seq gap, the
+ * drop happened upstream (bridge / driver / cabling). Either case is
+ * actionable; the BAD_PCI / OVERFLOW / NO_FF cases each get their own
+ * useful context bytes too (see bl_dtc.h). */
+static void log_isotp_error(bl_isotp_rx_status_t st)
+{
+    uint32_t fifo_fill =
+        HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0);
+
+    /* v2 encoding: drop fifo_fill from the DTC context (already known
+     * to be near-zero from the first bench-replay — see #94) and use
+     * that byte slot for the raw data[0] of the failing frame.
+     * fifo_fill stays in the log-ring message for completeness. */
+    uint32_t ctx =
+        ((uint32_t)(uint8_t)st              << 24) |
+        ((uint32_t)g_rx.last_err_raw        << 16) |
+        ((uint32_t)g_rx.last_err_expected   <<  8) |
+        ((uint32_t)g_rx.last_err_observed        );
+
+    bl_dtc_log(BL_DTC_ISOTP_ERROR, BL_DTC_SEV_WARN, ctx);
+    bl_log_warn("isotp err st=%u raw=0x%02X exp=0x%02X got=0x%02X fifo=%u",
+                (unsigned int)st,
+                (unsigned int)g_rx.last_err_raw,
+                (unsigned int)g_rx.last_err_expected,
+                (unsigned int)g_rx.last_err_observed,
+                (unsigned int)fifo_fill);
+}
+
 /* Send an FC(CTS, BS=0, STmin=0) back to the host.
  *
  * FCs are pure ISO-TP plumbing — they carry no msg_type byte. They
@@ -1158,11 +1194,13 @@ void bl_proto_dispatch(const bl_proto_id_t *id,
         case BL_ISOTP_ERR_TIMEOUT:
             /* Only _tick returns this; _feed never does. Handle
              * defensively anyway. */
+            log_isotp_error(st);
             send_nack(0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
             bl_isotp_rx_init(&g_rx);
             break;
 
         default:
+            log_isotp_error(st);
             send_nack(0xFFU, BL_NACK_TRANSPORT_ERROR);
             bl_isotp_rx_init(&g_rx);
             break;
@@ -1173,6 +1211,7 @@ void bl_proto_tick(uint32_t now_ms)
 {
     uint8_t peer = 0U;
     if (bl_isotp_rx_tick(&g_rx, now_ms, &peer)) {
+        log_isotp_error(BL_ISOTP_ERR_TIMEOUT);
         send_nack(0xFFU, BL_NACK_TRANSPORT_TIMEOUT);
     }
 

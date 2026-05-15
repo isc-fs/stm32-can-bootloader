@@ -221,7 +221,31 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Instance = FDCAN2;
   hfdcan2.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
   hfdcan2.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan2.Init.AutoRetransmission = DISABLE;
+  /* AutoRetransmission MUST be ENABLE for this bootloader. With it
+   * DISABLE, FDCAN drops any frame that loses arbitration to a
+   * higher-priority ID (the host sits on 0x001, the BL on 0x011 —
+   * BL frames lose every arbitration during a host burst). Crucially
+   * the FDCAN drop is *silent*: HAL_FDCAN_AddMessageToTxFifoQ already
+   * returned HAL_OK (the frame entered the queue cleanly), so
+   * send_raw has no signal that the on-wire transmission failed —
+   * meanwhile bl_isotp_tx_next has already advanced tx->seq for the
+   * lost frame. The visible symptom on the wire is CF emissions with
+   * a 1 → 3 → 5 → 7 sequence (issue #94 Bug B).
+   *
+   * Worse, repeated TX failures eventually push the FDCAN node into
+   * error-passive / bus-off — at which point the BL stops ACKing
+   * incoming host frames, and the host's MAC retransmits its CFs
+   * until it gives up. That's Bug A in the same issue: "BL silently
+   * dropped a CF the host sent three times".
+   *
+   * Both bugs go away with AutoRetransmission ENABLE: FDCAN retries
+   * a lost-arbitration frame until it wins the bus or hits a real
+   * protocol error. Pre-cubeMX default left this DISABLE; the
+   * bootloader's deployment context (multi-node CAN bus with always-
+   * active peers) makes ENABLE the right setting. Audit pass:
+   * confirmed no place in the project depends on "no retry"
+   * behaviour. */
+  hfdcan2.Init.AutoRetransmission = ENABLE;
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
   hfdcan2.Init.NominalPrescaler = 6;
@@ -452,7 +476,21 @@ static void Bootloader_MainLoop(void) {
 			}
 		}
 
-		HAL_Delay(1);
+		/* NO HAL_Delay() here — the previous `HAL_Delay(1)` capped the
+		 * main loop at 1 kHz, which made the BL drain FDCAN RX_FIFO0 at
+		 * 1 kHz. At 500 kbps the host emits classic-CAN CFs at ~3 kHz
+		 * (one frame every ~330 µs), so RX_FIFO0 (depth 16) overflowed
+		 * mid-burst on every multi-frame WRITE_CHUNK. The
+		 * reassembler then saw a sequence gap and NACKed with
+		 * BL_NACK_TRANSPORT_ERROR — issue #94 Bug A (the bench-side
+		 * symptom that the AutoRetransmission fix didn't address).
+		 *
+		 * Polling at MHz scale is fine here: the bootloader is wall-
+		 * powered, has no power budget to defend, and the bl_*_tick
+		 * functions above all enforce their own emission cadences
+		 * internally so they don't get noisy under a fast loop. The
+		 * audit-follow-up "drain in ISR" remains a future option but
+		 * isn't needed once the artificial throttle is removed. */
 	}
 }
 

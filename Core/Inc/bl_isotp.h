@@ -100,6 +100,20 @@ typedef struct {
     uint16_t received;                      /* bytes filled into buf so far    */
     uint8_t  next_seq;                      /* expected CF sequence 0..15      */
     uint32_t deadline_ms;                   /* HAL_GetTick() target            */
+    /* Diagnostics carried OUT of bl_isotp_rx_feed when a frame is
+     * rejected, so the dispatcher can DTC-log the failure context
+     * without bl_isotp depending on bl_dtc. All three reset to 0 by
+     * reset_idle() so stale values from a prior reassembly cannot
+     * bleed into the current error's DTC entry. Issue #94. */
+    uint8_t  last_err_expected;             /* BAD_SEQ: expected next_seq      */
+    uint8_t  last_err_observed;             /* BAD_SEQ: got_seq (masked low nib);
+                                             * BAD_PCI: 0                      */
+    uint8_t  last_err_raw;                  /* full data[0] byte of the frame
+                                             * that triggered the reject
+                                             * (added in v2 so the host can
+                                             * tell when the BL saw a frame
+                                             * different from the one a clean
+                                             * candump suggests was sent)     */
     uint8_t  buf[BL_ISOTP_MAX_MSG];
 } bl_isotp_rx_t;
 

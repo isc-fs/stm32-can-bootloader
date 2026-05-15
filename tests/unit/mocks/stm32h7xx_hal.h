@@ -145,6 +145,20 @@ HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,
                                                 uint8_t *data);
 
+/* RX FIFO selectors. The chip-side HAL exposes FDCAN_RX_FIFO0 /
+ * FDCAN_RX_FIFO1 as opaque tokens — values don't matter for the host
+ * tests, just that they exist as distinct identifiers. */
+#define FDCAN_RX_FIFO0                  0x00000000U
+#define FDCAN_RX_FIFO1                  0x00000080U
+
+/* Returns the number of messages currently waiting in the given RX
+ * FIFO. The host mock returns 0 by default — the dispatcher
+ * instrumentation in bl_proto's log_isotp_error reads this to encode
+ * "FIFO fill at error" into the DTC context. Tests that want to
+ * simulate a near-full FIFO at error time can install a smarter
+ * fake. */
+uint32_t HAL_FDCAN_GetRxFifoFillLevel(FDCAN_HandleTypeDef *h, uint32_t fifo);
+
 /* Returns the number of empty slots in the TX FIFO/queue. The mock
  * always reports "fully drained" (= queue depth from main.c) so
  * bl_proto's wait_tx_drain loop exits in zero iterations during host

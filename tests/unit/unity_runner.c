@@ -85,6 +85,8 @@ void test_dispatch_node_to_host_direction_is_silently_dropped(void);
 void test_dispatch_wrong_destination_is_silently_dropped(void);
 void test_dispatch_zero_length_frame_is_silently_dropped(void);
 void test_dispatch_bad_pci_emits_nack_transport_error(void);
+void test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error(void);
+void test_dispatch_write_chunk_262byte_37cf_padded_last_cf(void);
 void test_dispatch_valid_sf_pci_passes_pci_gate(void);
 
 /* ---- test_bl_app_validate.c ---- */
@@ -168,6 +170,8 @@ int main(void)
     RUN_TEST(test_dispatch_wrong_destination_is_silently_dropped);
     RUN_TEST(test_dispatch_zero_length_frame_is_silently_dropped);
     RUN_TEST(test_dispatch_bad_pci_emits_nack_transport_error);
+    RUN_TEST(test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error);
+    RUN_TEST(test_dispatch_write_chunk_262byte_37cf_padded_last_cf);
     RUN_TEST(test_dispatch_valid_sf_pci_passes_pci_gate);
 
     /* test_bl_app_validate.c */
