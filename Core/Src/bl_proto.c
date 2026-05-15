@@ -257,14 +257,21 @@ static void log_isotp_error(bl_isotp_rx_status_t st)
 {
     uint32_t fifo_fill =
         HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0);
+
+    /* v2 encoding: drop fifo_fill from the DTC context (already known
+     * to be near-zero from the first bench-replay — see #94) and use
+     * that byte slot for the raw data[0] of the failing frame.
+     * fifo_fill stays in the log-ring message for completeness. */
     uint32_t ctx =
-        ((uint32_t)(uint8_t)st          << 24) |
-        ((uint32_t)g_rx.last_err_expected <<  16) |
-        ((uint32_t)g_rx.last_err_observed <<   8) |
-        ((uint32_t)(fifo_fill & 0xFFU)         );
+        ((uint32_t)(uint8_t)st              << 24) |
+        ((uint32_t)g_rx.last_err_raw        << 16) |
+        ((uint32_t)g_rx.last_err_expected   <<  8) |
+        ((uint32_t)g_rx.last_err_observed        );
+
     bl_dtc_log(BL_DTC_ISOTP_ERROR, BL_DTC_SEV_WARN, ctx);
-    bl_log_warn("isotp err st=%u exp=0x%02X got=0x%02X fifo=%u",
+    bl_log_warn("isotp err st=%u raw=0x%02X exp=0x%02X got=0x%02X fifo=%u",
                 (unsigned int)st,
+                (unsigned int)g_rx.last_err_raw,
                 (unsigned int)g_rx.last_err_expected,
                 (unsigned int)g_rx.last_err_observed,
                 (unsigned int)fifo_fill);

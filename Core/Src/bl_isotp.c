@@ -18,13 +18,16 @@
 
 static void reset_idle(bl_isotp_rx_t *rx)
 {
-    rx->state        = BL_ISOTP_STATE_IDLE;
-    rx->peer         = 0U;
-    rx->initial_type = 0U;
-    rx->total_len    = 0U;
-    rx->received     = 0U;
-    rx->next_seq     = 0U;
-    rx->deadline_ms  = 0U;
+    rx->state             = BL_ISOTP_STATE_IDLE;
+    rx->peer              = 0U;
+    rx->initial_type      = 0U;
+    rx->total_len         = 0U;
+    rx->received          = 0U;
+    rx->next_seq          = 0U;
+    rx->deadline_ms       = 0U;
+    rx->last_err_expected = 0U;
+    rx->last_err_observed = 0U;
+    rx->last_err_raw      = 0U;
     /* rx->buf is left untouched — consumers must read from it using
      * rx->received before the caller resets state. */
 }
@@ -138,7 +141,8 @@ static bl_isotp_rx_status_t handle_cf(bl_isotp_rx_t *rx,
      * for the timeout. Issue #68 first bullet. */
     if (length < 2U) {
         rx->last_err_expected = 0U;
-        rx->last_err_observed = (length > 0U) ? data[0] : 0U;
+        rx->last_err_observed = 0U;
+        rx->last_err_raw      = (length > 0U) ? data[0] : 0U;
         return BL_ISOTP_ERR_BAD_PCI;
     }
 
@@ -146,6 +150,7 @@ static bl_isotp_rx_status_t handle_cf(bl_isotp_rx_t *rx,
     if (seq != rx->next_seq) {
         rx->last_err_expected = rx->next_seq;
         rx->last_err_observed = seq;
+        rx->last_err_raw      = data[0];
         return BL_ISOTP_ERR_BAD_SEQ;
     }
 

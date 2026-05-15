@@ -48,17 +48,35 @@
 #define BL_DTC_ISOTP_ERROR      0x0030U  /* bl_isotp_rx_feed returned an error
                                           * code the dispatcher converted to
                                           * NACK(TRANSPORT_ERROR or TIMEOUT).
-                                          * context_data packs diagnostic info
-                                          * — high byte = bl_isotp_rx_status_t,
-                                          * byte 2 = expected next_seq (only
-                                          * meaningful for BAD_SEQ; 0 otherwise),
-                                          * byte 1 = received seq / PCI byte
-                                          * (BAD_SEQ → got_seq, BAD_PCI →
-                                          * data[0], else 0), low byte = FDCAN
-                                          * RX_FIFO0 fill level at error
-                                          * detection (0..16 on the chip).
-                                          * High fill values point at FIFO
-                                          * overflow as the root cause. #94. */
+                                          * context_data v2 encoding (LE-packed):
+                                          *   byte 3 (high) = bl_isotp_rx_status_t
+                                          *                   (2=BAD_PCI, 3=BAD_SEQ,
+                                          *                   4=OVERFLOW, 5=NO_FF,
+                                          *                   6=TIMEOUT)
+                                          *   byte 2        = last_err_raw — full
+                                          *                   data[0] byte of the
+                                          *                   frame that triggered
+                                          *                   the reject. For a
+                                          *                   CF this is the PCI
+                                          *                   byte (high nibble
+                                          *                   0x2, low nibble =
+                                          *                   sequence). Bench-
+                                          *                   visibility into
+                                          *                   what the BL actually
+                                          *                   saw vs what the
+                                          *                   candump shows the
+                                          *                   host sent.
+                                          *   byte 1        = last_err_expected
+                                          *                   (BAD_SEQ: expected
+                                          *                   next_seq; else 0)
+                                          *   byte 0 (low)  = last_err_observed
+                                          *                   (BAD_SEQ: got_seq
+                                          *                   nibble; else 0)
+                                          * FDCAN RX FIFO fill is dropped from
+                                          * the DTC encoding in v2 (already ruled
+                                          * out as the root cause on first
+                                          * bench-replay; left in the log-ring
+                                          * message for completeness). #94. */
 
 /* ---- Entry layout (20 bytes, no padding) ---- */
 typedef struct {
