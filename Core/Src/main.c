@@ -476,7 +476,21 @@ static void Bootloader_MainLoop(void) {
 			}
 		}
 
-		HAL_Delay(1);
+		/* NO HAL_Delay() here — the previous `HAL_Delay(1)` capped the
+		 * main loop at 1 kHz, which made the BL drain FDCAN RX_FIFO0 at
+		 * 1 kHz. At 500 kbps the host emits classic-CAN CFs at ~3 kHz
+		 * (one frame every ~330 µs), so RX_FIFO0 (depth 16) overflowed
+		 * mid-burst on every multi-frame WRITE_CHUNK. The
+		 * reassembler then saw a sequence gap and NACKed with
+		 * BL_NACK_TRANSPORT_ERROR — issue #94 Bug A (the bench-side
+		 * symptom that the AutoRetransmission fix didn't address).
+		 *
+		 * Polling at MHz scale is fine here: the bootloader is wall-
+		 * powered, has no power budget to defend, and the bl_*_tick
+		 * functions above all enforce their own emission cadences
+		 * internally so they don't get noisy under a fast loop. The
+		 * audit-follow-up "drain in ISR" remains a future option but
+		 * isn't needed once the artificial throttle is removed. */
 	}
 }
 
