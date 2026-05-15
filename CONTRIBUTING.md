@@ -23,28 +23,53 @@ or diagnose a brick in the pit, you want
 
 ## Branches
 
-```
-main  ──●──────────────●──▶  validated releases only
-        ↑              ↑
-dev   ──●───●───●───●──●──▶  continuous integration
-        ↑   ↑       ↑
-       feat/1  fix/1  feat/2
+```mermaid
+%%{init: {'gitGraph': {'showCommitLabel': true, 'mainBranchName': 'main'}} }%%
+gitGraph
+    commit id: "v0.x"
+    branch dev
+    checkout dev
+    commit id: "dev tip"
+    branch feat/N-frame-layout
+    checkout feat/N-frame-layout
+    commit id: "wire format"
+    commit id: "tests"
+    checkout dev
+    merge feat/N-frame-layout tag: "PR merged"
+    branch fix/N-isotp-deadline
+    checkout fix/N-isotp-deadline
+    commit id: "encapsulate deadline"
+    checkout dev
+    merge fix/N-isotp-deadline tag: "PR merged"
+    branch docs/N-refresh
+    checkout docs/N-refresh
+    commit id: "doc update"
+    checkout dev
+    merge docs/N-refresh tag: "PR merged"
+    checkout main
+    merge dev tag: "v1.0.0 release"
 ```
 
 - **`main`** — production. Only merges from `dev` after full bench
-  validation. Don't work here.
-- **`dev`** — integration. Don't work here either.
-- **Feature / fix branches** are cut from `dev`, PR'd back to `dev`,
-  reviewed, merged, deleted. Two name formats, both with a short
-  kebab-case title so the branch purpose is visible at a glance:
+  validation. Don't work here. Required-status-check protected;
+  `dev → main` is the release-cut PR.
+- **`dev`** — integration. Don't work here either. Required-status-
+  check protected; every `feat/fix/docs` branch PRs into it.
+- **Feature / fix / docs branches** are cut from `dev`, PR'd back to
+  `dev`, reviewed, merged, deleted. Three name formats, both with a
+  short kebab-case title so the branch purpose is visible at a glance:
+
   ```
   feat/<n>-<short-title>   → new functionality
   fix/<n>-<short-title>    → bug fix
   docs/<n>-<short-title>   → documentation changes only
   ```
-  Counters are independent (`feat/5-…` and `fix/5-…` can coexist).
-  Pick the next number by filtering issues by label and looking at
-  the highest closed one.
+
+  Counters are **independent per-type** (`feat/5-…` and `fix/5-…`
+  can coexist; `docs/1-…` is the first docs branch ever). Pick the
+  next number by filtering issues by label and looking at the
+  highest closed one — or run
+  `git log --all --pretty=format:'%s' | grep -oE '<type>/[0-9]+' | sort -V | tail -1`.
 
 ## The tracking issue
 
