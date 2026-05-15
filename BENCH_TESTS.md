@@ -3,9 +3,14 @@
 Tests that prove the bootloader's protection layers fire on real
 silicon — not just in unit tests against the in-process stub.
 
-**Run once per hardware revision.** Log the outcome somewhere that
-outlives the current operator (sticker on the jig, spreadsheet,
-PR comment that pins the last known-good date).
+**Standing tests, run once per hardware revision.** Log the outcome
+somewhere that outlives the current operator (sticker on the jig,
+spreadsheet, PR comment that pins the last known-good date).
+
+**For per-release verification** of behavioural changes between dev
+and main, see [`RELEASE_BENCH.md`](RELEASE_BENCH.md) — that doc is
+the mechanical per-PR checklist and supersedes ad-hoc bench testing
+during a release cut.
 
 Prerequisites: a board provisioned per
 [PROVISIONING.md §1](PROVISIONING.md#1-fresh-board-provisioning-first-time)
