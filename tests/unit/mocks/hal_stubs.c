@@ -199,6 +199,18 @@ const mock_fdcan_frame_t *mock_fdcan_get(int index)
     return &g_fdcan_frames[index];
 }
 
+uint32_t HAL_FDCAN_GetRxFifoFillLevel(FDCAN_HandleTypeDef *h, uint32_t fifo)
+{
+    (void)h;
+    (void)fifo;
+    /* Host tests don't simulate RX FIFO occupancy — return 0 so the
+     * dispatcher's log_isotp_error packs a "FIFO empty" byte into the
+     * DTC context. Tests that want to assert on the instrumentation's
+     * encoding under a non-empty FIFO can wrap this with a smarter
+     * fake. */
+    return 0U;
+}
+
 uint32_t HAL_FDCAN_GetTxFifoFreeLevel(FDCAN_HandleTypeDef *h)
 {
     (void)h;
