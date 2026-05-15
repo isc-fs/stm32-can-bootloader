@@ -135,3 +135,80 @@ jobs:
           ASAN_OPTIONS:  detect_leaks=1:abort_on_error=1:strict_string_checks=1:check_initialization_order=1:detect_stack_use_after_return=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ctest --test-dir build-tests-san --output-on-failure
+
+  host-coverage:
+    # Re-builds the Unity suite with --coverage instrumentation, runs
+    # the tests, and reports per-file line coverage on the bl_*.c
+    # modules. Fails if any module drops below the floor.
+    #
+    # Floor is deliberately conservative (50%) for the first landing
+    # so we can observe actual numbers without breaking PRs. Once a
+    # baseline is established, bump per-file in a follow-up.
+    #
+    # The HTML report is uploaded as an artifact so devs can download
+    # it and look at the un-covered lines visually.
+    name: Host coverage
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps + gcovr
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build build-essential lcov
+          pip install --user gcovr==7.2
+
+      - name: Configure with --coverage
+        run: |
+          cmake -B build-tests-cov -S tests/unit -G Ninja \
+            -DCMAKE_C_FLAGS_INIT='--coverage -O0 -g' \
+            -DCMAKE_EXE_LINKER_FLAGS_INIT='--coverage'
+
+      - name: Build
+        run: cmake --build build-tests-cov
+
+      - name: Run tests
+        run: ctest --test-dir build-tests-cov --output-on-failure
+
+      - name: Generate coverage report
+        # Filter to Core/Src/bl_*.c only — we care about BL module
+        # coverage, not the test files or Unity itself.
+        run: |
+          gcovr --root . \
+            --filter 'Core/Src/bl_' \
+            --print-summary \
+            --txt /tmp/coverage.txt \
+            --html-details /tmp/coverage.html \
+            --json-summary /tmp/coverage.json \
+            build-tests-cov
+          echo
+          echo '=== per-file (txt) ==='
+          cat /tmp/coverage.txt
+
+      - name: Enforce floor (50% line coverage on each bl_*.c)
+        # 50% is the very initial floor — observe CI's actual numbers
+        # and tighten per-file in a follow-up PR.
+        run: |
+          gcovr --root . \
+            --filter 'Core/Src/bl_' \
+            --fail-under-line 50 \
+            build-tests-cov
+
+      - name: Write step summary
+        run: |
+          {
+            echo "## Host coverage summary"
+            echo ''
+            echo '```'
+            cat /tmp/coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: /tmp/coverage.html*
+          retention-days: 14
