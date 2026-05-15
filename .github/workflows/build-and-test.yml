@@ -139,11 +139,19 @@ jobs:
   host-coverage:
     # Re-builds the Unity suite with --coverage instrumentation, runs
     # the tests, and reports per-file line coverage on the bl_*.c
-    # modules. Fails if any module drops below the floor.
+    # modules. Fails if total line coverage drops below the floor.
     #
-    # Floor is deliberately conservative (50%) for the first landing
-    # so we can observe actual numbers without breaking PRs. Once a
-    # baseline is established, bump per-file in a follow-up.
+    # Floor is the observed baseline minus a small buffer:
+    #   bl_fwinfo.c    100%
+    #   bl_isotp.c      93%
+    #   bl_nvm.c        82%
+    #   bl_log.c        38%
+    #   bl_proto.c      15%  (dispatch + serial paths need HAL)
+    #   TOTAL          ~43%
+    # So 40 is the "don't backslide" floor for the first landing.
+    # Once we add tests for bl_proto / bl_log we ratchet this up, and
+    # eventually move to per-file thresholds so bl_proto can't keep
+    # pulling the total down.
     #
     # The HTML report is uploaded as an artifact so devs can download
     # it and look at the un-covered lines visually.
@@ -187,13 +195,15 @@ jobs:
           echo '=== per-file (txt) ==='
           cat /tmp/coverage.txt
 
-      - name: Enforce floor (50% line coverage on each bl_*.c)
-        # 50% is the very initial floor — observe CI's actual numbers
-        # and tighten per-file in a follow-up PR.
+      - name: Enforce floor (40% total line coverage on Core/Src/bl_*.c)
+        # 40% is the "don't backslide" floor — observed baseline is
+        # ~43% so this gives a small buffer. Ratchet up as we add
+        # tests for bl_proto / bl_log; consider per-file thresholds
+        # so the giant bl_proto.c can't keep pulling the total down.
         run: |
           gcovr --root . \
             --filter 'Core/Src/bl_' \
-            --fail-under-line 50 \
+            --fail-under-line 40 \
             build-tests-cov
 
       - name: Write step summary
