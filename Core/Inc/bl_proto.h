@@ -94,9 +94,42 @@ typedef enum {
 #define BL_NOTIFY_LOG               0xF2U  /* batched log entries from the bl_log ring */
 #define BL_NOTIFY_LIVE_DATA         0xF3U  /* 1..50 Hz 32-byte bootloader snapshot */
 
-/* ---- Protocol version advertised in CONNECT / DISCOVER replies ---- */
+/* ---- Protocol version advertised in CONNECT / DISCOVER replies ----
+ *
+ * MAJOR bumps on breaking changes (frame ID layout, opcode renumber,
+ * removed reply field). MINOR bumps on backward-compatible additions
+ * — new opcodes, new NACK codes a host can ignore, new observable
+ * behaviour that doesn't change anything the host previously saw.
+ *
+ * Minor 1 → 2 (this version) accumulates the changes shipped between
+ * v1.1.0 and the upcoming v1.2.0 release. The behavioural delta the
+ * host can actually observe:
+ *
+ *   - The dispatcher now NACKs malformed PCI frames with
+ *     BL_NACK_TRANSPORT_ERROR (rejected_opcode = 0) where it
+ *     previously dropped silently (#60). Hosts that treat the
+ *     silent-drop and timeout cases identically see no behavioural
+ *     change; hosts that distinguish them gain immediate diagnostic
+ *     feedback.
+ *   - bl_isotp now NACKs a zero-payload CF with TRANSPORT_ERROR
+ *     immediately rather than stalling reassembly until the 1-second
+ *     deadline (#68 first bullet).
+ *   - bl_health.flash_write_count is now a live persistent counter
+ *     (incremented on every bl_flash_{write,erase} success and
+ *     stashed in NVM under BL_NVM_KEY_FLASH_WRITE_COUNT) where it
+ *     used to be hard-coded to zero. Host-visible: the field in the
+ *     32-byte health record stops always reading 0.
+ *   - OB_APPLY_WRP no longer emits a NACK after its positive ACK on
+ *     the "OB_Launch unexpectedly returned" path (#68 OB bullet).
+ *     Hosts that treated ACK-then-NACK as a session-tear signal stop
+ *     seeing the contradictory pair.
+ *
+ * None of these break a v0.1-compliant host — every change is purely
+ * additive observable behaviour. Hosts negotiating CONNECT see the
+ * new minor and can opt into asserting on the new responses; those
+ * that don't, keep working. */
 #define BL_PROTO_VERSION_MAJOR      0U
-#define BL_PROTO_VERSION_MINOR      1U
+#define BL_PROTO_VERSION_MINOR      2U
 
 /* ---- Session watchdog ----
  * A session that stays silent for this long is considered dead: the
