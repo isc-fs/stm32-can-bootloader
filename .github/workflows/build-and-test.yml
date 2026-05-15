@@ -222,3 +222,94 @@ jobs:
           name: coverage-html
           path: /tmp/coverage.html*
           retention-days: 14
+
+  clang-tidy:
+    # Runs clang-tidy only on lines this PR touched (via the upstream
+    # clang-tidy-diff.py helper). That keeps the gate adoptable without a
+    # big-bang cleanup PR for pre-existing warnings — only *new* issues
+    # introduced by the diff fail the build.
+    #
+    # We re-use the host-tests CMake project to generate
+    # compile_commands.json. It's the only CMake target that compiles
+    # the bl_*.c modules on a host with stubs, so its database has the
+    # right -I/-D for clang-tidy to parse them. Firmware-only TUs
+    # (main.c, stm32h7xx_hal_msp.c) are out of scope for now;
+    # cross-compiling them through clang-tidy is a follow-up.
+    #
+    # Why PR-only (`if:` below): the diff is computed against
+    # `github.base_ref`, which is only defined for pull_request events.
+    # On push events the BL doesn't have a stable "base" — the gate just
+    # skips.
+    name: clang-tidy (changed lines)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need enough history to compute the diff against the base
+          # branch. `fetch-depth: 0` pulls the full history; cheap on a
+          # small repo and avoids surprise shallow-clone issues.
+          fetch-depth: 0
+
+      - name: Install clang-tidy + build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy-15 cmake ninja-build build-essential
+          # Expose a stable `clang-tidy` name so clang-tidy-diff.py picks
+          # up the right binary without having to pass -clang-tidy-binary
+          # everywhere.
+          sudo update-alternatives --install \
+            /usr/bin/clang-tidy clang-tidy /usr/bin/clang-tidy-15 100
+
+      - name: Configure tests with compile_commands.json
+        run: |
+          cmake -B build-tests -S tests/unit -G Ninja \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+
+      - name: Build (so generated headers exist for the AST)
+        run: cmake --build build-tests
+
+      - name: Run clang-tidy on diff vs ${{ github.base_ref }}
+        # clang-tidy-diff.py (shipped with clang-tools-15) reads a unified
+        # diff on stdin and only runs clang-tidy on lines the diff
+        # touched, so PRs aren't blocked by pre-existing tech debt.
+        #
+        # Filter paths: only Core/Src/*.c and Core/Inc/*.h — that's the
+        # scope of files the host-tests CMake actually has compile entries
+        # for. Outside that scope clang-tidy can't resolve the right
+        # flags and would emit spurious "file not in compile DB" errors.
+        run: |
+          git fetch --no-tags --depth=50 origin "${{ github.base_ref }}"
+          BASE_SHA=$(git merge-base HEAD "origin/${{ github.base_ref }}")
+          echo "Diffing against $BASE_SHA (origin/${{ github.base_ref }})"
+
+          # clang-tidy-diff.py lives in one of two places depending on the
+          # apt package layout; probe both.
+          DIFF_SCRIPT=/usr/share/clang/clang-tidy-diff.py
+          if [ ! -x "$DIFF_SCRIPT" ]; then
+            DIFF_SCRIPT=/usr/lib/llvm-15/share/clang/clang-tidy-diff.py
+          fi
+          if [ ! -x "$DIFF_SCRIPT" ]; then
+            echo "Could not find clang-tidy-diff.py" >&2
+            exit 1
+          fi
+          echo "Using $DIFF_SCRIPT"
+
+          # -p1 strips the a/ b/ prefix that `git diff` prepends.
+          # -path build-tests points clang-tidy at our compile_commands.
+          # -regex limits which file types the script will scan.
+          git diff -U0 "$BASE_SHA" HEAD -- \
+              'Core/Src/*.c' 'Core/Inc/*.h' \
+            | "$DIFF_SCRIPT" -p1 -path build-tests -regex '.*\.(c|h)' \
+            | tee tidy-output.txt
+
+          # clang-tidy-diff.py doesn't propagate clang-tidy's non-zero
+          # exit, so we have to detect warnings ourselves. WarningsAsErrors
+          # in .clang-tidy makes every issue an error — grep both.
+          if grep -E '(warning|error):' tidy-output.txt > /dev/null; then
+            echo "::error::clang-tidy reported issues on changed lines — see log above"
+            exit 1
+          fi
+          echo "clang-tidy: no issues on changed lines"

@@ -1,0 +1,76 @@
+---
+# Bootloader clang-tidy config.
+#
+# Scope: the CI gate (`.github/workflows/build-and-test.yml` → `clang-tidy`
+# job) runs clang-tidy-diff so warnings only fail the build on lines this
+# PR actually touched. That means we can land this config without first
+# doing a big-bang cleanup of the existing tree — tightening checks costs
+# nothing on untouched code, and PRs are nudged toward the rules going
+# forward.
+#
+# Why each family is on:
+#   bugprone-*           correctness — bugprone-unused-return-value would
+#                        have caught the discarded HAL_FDCAN_AddMessageTo-
+#                        TxFifoQ return that drove Bug B in issue #94.
+#   readability-*        naming / brace / declaration style.
+#   cert-*               CERT C secure-coding rules.
+#   clang-analyzer-*     null-deref / leaks / use-after-free.
+#   misc-*               misc gotchas (unused-using-decls etc.).
+#
+# Carve-outs — never disable a check without writing the why next to it:
+#   readability-magic-numbers       Embedded register constants are
+#                                   intentionally inline; pulling each
+#                                   one into a named #define hurts
+#                                   readability more than it helps.
+#   readability-isolate-declaration Stylistic; codebase already keeps
+#                                   declarations short by convention.
+#   readability-identifier-length   ARM HAL APIs use short names (msp,
+#                                   id, n); the rule's 1–3-char minimum
+#                                   is too aggressive for this codebase.
+#   readability-braces-around-statements
+#                                   The codebase uses K&R single-line
+#                                   ifs intentionally for guard clauses;
+#                                   forcing braces hurts diff churn.
+#   bugprone-easily-swappable-parameters
+#                                   Heuristic that flags any two adjacent
+#                                   same-type params — far too noisy.
+#   bugprone-reserved-identifier    STM32 HAL macros use `_foo` style and
+#                                   trip this check via transitive headers.
+#   bugprone-macro-parentheses      Most BL macros are simple value
+#                                   constants where the parens harm
+#                                   readability. Selective fix in code,
+#                                   not a global gate.
+#   cert-err34-c                    We use atoi-style parsing in the
+#                                   serial-cli command handlers
+#                                   deliberately; the inputs are
+#                                   developer-typed, not untrusted.
+#   cert-dcl16-c                    L/U suffix on every integer literal
+#                                   is pedantic for this codebase.
+#   misc-no-recursion               Occasional recursion in test
+#                                   helpers (mock_flash, nvm sim).
+#   misc-include-cleaner            Noisy on STM32 HAL transitive
+#                                   headers; needs a separate cleanup PR.
+#
+# HeaderFilterRegex: only emit diagnostics for headers inside Core/Inc/bl_*.
+# Without this, transitively-included HAL / CMSIS headers would generate
+# thousands of warnings irrelevant to our changes.
+Checks: >
+  bugprone-*,
+  readability-*,
+  cert-*,
+  clang-analyzer-*,
+  misc-*,
+  -readability-magic-numbers,
+  -readability-isolate-declaration,
+  -readability-identifier-length,
+  -readability-braces-around-statements,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-reserved-identifier,
+  -bugprone-macro-parentheses,
+  -cert-err34-c,
+  -cert-dcl16-c,
+  -misc-no-recursion,
+  -misc-include-cleaner
+WarningsAsErrors: '*'
+HeaderFilterRegex: 'Core/Inc/bl_.*'
+FormatStyle: none
