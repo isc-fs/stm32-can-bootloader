@@ -35,11 +35,22 @@ adapter.
 
 ## Quick status
 
-**v1.0.0** — feature-complete against the v1.0.0 host-tool contract.
-All of Phases 1–4 shipped: frame layout, ISO-TP, core opcodes,
-flash opcodes, session + watchdog, health + DTC + log + live data,
-option bytes + WRP. Phase 5 (signed images, replay counter,
-encrypted transport) is deferred pending a deployment-model change.
+**v1.0.x** — feature-complete against the v1.0.0 host-tool contract,
+plus a hardening pass covering: ISO-TP deadline encapsulation,
+CF-length-1 stall fix, dispatcher NACK on malformed PCI, BL→APP
+jump barriers + IRQ window, SP-range predicate unified across
+`CheckApplication` and `JumpToApplication`, BKPSRAM log-ring
+defence-in-depth, persistent `flash_write_count` in the health
+record, TX-FIFO drain before terminal opcodes, OB protocol-
+invariant cleanup. Phases 1–4 (frame layout, ISO-TP, core opcodes,
+flash opcodes, session watchdog, health + DTC + log + live data,
+option bytes + WRP) all shipped. Phase 5 (signed images, replay
+counter, encrypted transport) is deferred pending a deployment-
+model change.
+
+**Test surface**: 65 host-side unit tests cover ISO-TP, NVM, log,
+fwinfo, dispatcher gates, ID parsing, app-stack validation. See
+[`tests/unit/README.md`](tests/unit/README.md).
 
 ---
 
