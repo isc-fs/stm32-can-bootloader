@@ -229,7 +229,7 @@ void test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error(void)
         const mock_fdcan_frame_t *f = mock_fdcan_get(i);
         TEST_ASSERT_NOT_NULL(f);
         if (frame_is_nack_with_code(f, (uint8_t)BL_NACK_TRANSPORT_ERROR)) {
-            char detail[160];
+            char detail[256];
             (void)snprintf(detail, sizeof(detail),
                 "BL emitted NACK(TRANSPORT_ERROR) at TX frame %d/%d "
                 "(rejected_opcode=0x%02X). Issue #94 regression — "
@@ -305,7 +305,7 @@ void test_dispatch_write_chunk_262byte_37cf_padded_last_cf(void)
         const mock_fdcan_frame_t *f = mock_fdcan_get(i);
         TEST_ASSERT_NOT_NULL(f);
         if (frame_is_nack_with_code(f, (uint8_t)BL_NACK_TRANSPORT_ERROR)) {
-            char detail[200];
+            char detail[256];
             (void)snprintf(detail, sizeof(detail),
                 "BL emitted NACK(TRANSPORT_ERROR) at TX frame %d/%d "
                 "(rejected_opcode=0x%02X). Issue #94 regression: the "
