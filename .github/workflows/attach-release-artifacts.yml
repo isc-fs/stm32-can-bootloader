@@ -1,0 +1,88 @@
+name: Attach release artifacts
+
+# Fires when a GitHub release is published, builds the firmware from
+# the release's tag, and uploads the three artifact formats
+# (.elf / .bin / .hex) onto the release page. The release notes,
+# pre-release flag, target commit etc. all stay owned by the human
+# who created the release — this workflow only attaches binaries.
+#
+# Why a separate workflow instead of folding into build-and-test.yml:
+#
+#  - build-and-test.yml runs on every push/PR and uploads to the
+#    workflow run's artefact store (14-day retention, not visible
+#    on the release page). That's the right behaviour for branch
+#    CI — release-grade binaries should live on the release itself.
+#
+#  - Triggering on `release: published` means the release exists
+#    (so `gh release upload` has a target) and notes have already
+#    been written (so the operator sees the upload as a clean
+#    addition, not a flicker mid-publish).
+#
+#  - Same toolchain pin as build-and-test.yml (arm-none-eabi-gcc
+#    14.3.Rel1) — if that drifts, both workflows update together.
+#
+# Authorisation: GITHUB_TOKEN gets contents:write through the
+# `permissions:` block below so it can upload to the release. No
+# personal-access-token needed.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  attach:
+    name: Build + attach binaries to ${{ github.event.release.tag_name }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout the release's tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Install arm-none-eabi toolchain
+        uses: carlosperate/arm-none-eabi-gcc-action@v1
+        with:
+          release: '14.3.Rel1'
+
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Configure Release build
+        run: cmake --preset Release
+
+      - name: Build firmware
+        run: cmake --build build/Release
+
+      - name: Report flash usage
+        run: arm-none-eabi-size --format=berkeley build/Release/CAN_BL.elf
+
+      - name: Upload artifacts to the release
+        # --clobber overwrites existing assets with matching names so
+        # re-running this workflow against an existing release (e.g.
+        # because the first attempt's runner failed) is idempotent.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.release.tag_name }}" \
+            build/Release/CAN_BL.elf \
+            build/Release/CAN_BL.bin \
+            build/Release/CAN_BL.hex \
+            --clobber
+
+      - name: Summarise
+        run: |
+          {
+            echo "## Attached to release ${{ github.event.release.tag_name }}"
+            echo ""
+            echo "| Asset | Size |"
+            echo "|---|---:|"
+            for f in build/Release/CAN_BL.elf build/Release/CAN_BL.bin build/Release/CAN_BL.hex; do
+              size=$(stat -c%s "$f")
+              echo "| \`$(basename "$f")\` | $size B |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
