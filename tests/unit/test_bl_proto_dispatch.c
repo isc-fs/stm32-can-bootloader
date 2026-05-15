@@ -32,7 +32,9 @@
 #include "stm32h7xx_hal.h"   /* mock_fdcan_* */
 #include "unity.h"
 
+#include <stdbool.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 /* Build a host-to-us dispatcher id. `BL_NODE_ID` is the compile-time
@@ -135,6 +137,109 @@ void test_dispatch_bad_pci_emits_nack_transport_error(void)
      * unsigned-literal warning some compilers throw on a TEST_ASSERT
      * arg with mixed widths. */
     TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_NACK_TRANSPORT_ERROR, tx->data[3]);
+}
+
+
+/* ---- Issue #94: multi-frame WRITE_CHUNK should NOT emit TRANSPORT_ERROR ---- */
+
+/* Helper: returns true iff the captured frame is a NACK with the given
+ * code byte. A node→host SF NACK reaches the wire as:
+ *   data[0] = SF PCI with len-nibble = 3   (0x03)
+ *   data[1] = msg_type = BL_MSG_NACK       (0x02)
+ *   data[2] = rejected_opcode
+ *   data[3] = nack_code
+ * Anything that doesn't match the SF NACK shape returns false. */
+static bool frame_is_nack_with_code(const mock_fdcan_frame_t *f, uint8_t code)
+{
+    if (f == (const mock_fdcan_frame_t *)0) return false;
+    if ((f->data[0] & 0xF0U) != 0x00U)      return false; /* not SF */
+    if (f->data[1] != (uint8_t)BL_MSG_NACK) return false;
+    return f->data[3] == code;
+}
+
+void test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error(void)
+{
+    /* Regression test for issue #94. The bench-side flasher emitted a
+     * multi-frame WRITE_CHUNK as `FF + 19 CFs` with the candump-
+     * observed PCI sequence `10 → 21..2F → 20..23`, and the BL replied
+     * with NACK(opcode=0xFF, code=BL_NACK_TRANSPORT_ERROR=0x0A). That
+     * NACK signature pinpoints bl_proto.c:1166's default arm of the
+     * switch on bl_isotp_rx_feed's return — i.e. the reassembler
+     * itself returned one of BAD_PCI / BAD_SEQ / OVERFLOW / NO_FF for
+     * a frame in this sequence.
+     *
+     * Static analysis (issue thread) couldn't pin down which frame in
+     * the sequence trips the BL. This test feeds the exact wire shape
+     * and asserts that no captured TX frame is a NACK with the
+     * TRANSPORT_ERROR code. If it passes, the regression isn't in the
+     * BL's reassembler logic for a clean wire trace — the bug lives in
+     * the bench bridge / driver / host framing. If it fails, the
+     * failing frame index pinpoints the BL-side defect.
+     *
+     * The reassembled payload at the dispatcher level is 134 bytes:
+     *   [0]      msg_type = BL_MSG_CMD        (0x00)
+     *   [1]      opcode   = BL_CMD_FLASH_WRITE (0x11)
+     *   [2..5]   addr     = 0x08020000        (LE)
+     *   [6..133] chunk    = 128 bytes of arbitrary data
+     *
+     * After the FF the BL emits FC(CTS). After every CF except the
+     * last it stays quiet. After CF19 it dispatches to handle_flash_
+     * write; without a prior CONNECT the handler emits
+     * NACK(BAD_SESSION) — that's expected (the test isn't about
+     * session state) and is tolerated by the assertion (we only flag
+     * TRANSPORT_ERROR). */
+    bl_proto_id_t id = host_to_us();
+
+    /* === FF: PCI=0x10, total=134 (0x86), first 6 payload bytes === */
+    uint8_t ff[8];
+    ff[0] = 0x10U;                      /* FF PCI, length-high-nibble = 0 */
+    ff[1] = 0x86U;                      /* length low byte = 134          */
+    ff[2] = (uint8_t)BL_MSG_CMD;
+    ff[3] = (uint8_t)BL_CMD_FLASH_WRITE;
+    ff[4] = 0x00U;                      /* addr LE byte 0                 */
+    ff[5] = 0x00U;                      /* addr LE byte 1                 */
+    ff[6] = 0x02U;                      /* addr LE byte 2                 */
+    ff[7] = 0x08U;                      /* addr LE byte 3 → 0x08020000    */
+    bl_proto_dispatch(&id, ff, 8U);
+
+    /* === 18 full CFs: PCI 0x21..0x2F, then 0x20..0x22 (seq 1..15, 0..2) === */
+    for (uint8_t i = 0U; i < 18U; i++) {
+        uint8_t seq = (uint8_t)((i + 1U) & 0x0FU);  /* 1..15, 0, 1, 2 */
+        uint8_t cf[8];
+        cf[0] = (uint8_t)(0x20U | seq);
+        for (uint8_t j = 1U; j < 8U; j++) {
+            cf[j] = (uint8_t)(0xA0U + i);            /* arbitrary payload */
+        }
+        bl_proto_dispatch(&id, cf, 8U);
+    }
+
+    /* === 19th CF: PCI 0x23 (seq=3), 2 data bytes (DLC=3) === */
+    uint8_t cf_last[3];
+    cf_last[0] = 0x23U;
+    cf_last[1] = 0xDEU;
+    cf_last[2] = 0xADU;
+    bl_proto_dispatch(&id, cf_last, 3U);
+
+    /* Assert: no captured frame is a NACK with TRANSPORT_ERROR.
+     * A NACK with a DIFFERENT code (e.g. BAD_SESSION from
+     * handle_flash_write after MSG_COMPLETE dispatched) is fine —
+     * that isn't the regression we're hunting. */
+    int n = mock_fdcan_tx_count();
+    for (int i = 0; i < n; i++) {
+        const mock_fdcan_frame_t *f = mock_fdcan_get(i);
+        TEST_ASSERT_NOT_NULL(f);
+        if (frame_is_nack_with_code(f, (uint8_t)BL_NACK_TRANSPORT_ERROR)) {
+            char detail[160];
+            (void)snprintf(detail, sizeof(detail),
+                "BL emitted NACK(TRANSPORT_ERROR) at TX frame %d/%d "
+                "(rejected_opcode=0x%02X). Issue #94 regression — "
+                "bl_isotp_rx_feed returned an error inside the "
+                "WRITE_CHUNK reassembly for a wire shape that should "
+                "reassemble cleanly.",
+                i, n, f->data[2]);
+            TEST_FAIL_MESSAGE(detail);
+        }
+    }
 }
 
 
