@@ -6,9 +6,13 @@
  *
  * These knobs are set at build time (typically via `-DBL_NODE_ID=0x3`
  * from the toolchain) and describe a specific board's identity on the
- * CAN bus. Phase 4 will add an NVM-backed override for BL_NODE_ID so
- * the same firmware image can be provisioned to different nodes, but
- * for now the ID is baked in at compile time.
+ * CAN bus. The compile-time `BL_NODE_ID` is the *fallback*; the
+ * effective ID at runtime is resolved by `bl_node_id_get()`
+ * (see `bl_node_id.h`), which prefers a 1-byte override stored under
+ * `BL_NVM_KEY_NODE_ID` in sector 7 when one is present and valid.
+ * That lets one firmware image be provisioned to many boards from
+ * the host side without rebuild + reflash. Callers that need the
+ * effective ID must use `bl_node_id_get()`, NOT this macro.
  */
 
 #include <stdint.h>
