@@ -12,6 +12,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_memmap.h"
+#include "bl_node_id.h"
 #include "bl_nvm.h"
 #include "bl_obyte.h"
 #include "bl_proto.h"
@@ -160,7 +161,7 @@ void bl_health_tick(uint32_t now_ms)
 
     uint8_t payload[7] = {
         BL_NOTIFY_HEARTBEAT,
-        (uint8_t)BL_NODE_ID,
+        bl_node_id_get(),
         g_reset_cause,
         (uint8_t)(flags & 0xFFU),
         (uint8_t)(uptime         & 0xFFU),
