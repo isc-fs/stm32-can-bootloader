@@ -276,11 +276,16 @@ jobs:
         # diff on stdin and only runs clang-tidy on lines the diff
         # touched, so PRs aren't blocked by pre-existing tech debt.
         #
-        # Filter paths: only Core/Src/*.c and Core/Inc/*.h — that's the
-        # scope of files the host-tests CMake actually has compile entries
-        # for. Outside that scope clang-tidy can't resolve the right
-        # flags and would emit spurious "file not in compile DB" errors.
+        # Scope: only files that ACTUALLY have entries in the host-tests
+        # `compile_commands.json` are passed to git-diff. Firmware-only
+        # TUs (`main.c`, `bl_health.c`, etc.) can't be parsed by host
+        # clang because of HAL macro / header dependencies; including
+        # them would surface "use of undeclared identifier RCC_RSR_*"
+        # parser errors that have nothing to do with the PR. We derive
+        # the file list at runtime from the compile DB so this stays in
+        # sync as host-tests grows.
         run: |
+          set -euo pipefail
           git fetch --no-tags --depth=50 origin "${{ github.base_ref }}"
           BASE_SHA=$(git merge-base HEAD "origin/${{ github.base_ref }}")
           echo "Diffing against $BASE_SHA (origin/${{ github.base_ref }})"
@@ -297,18 +302,38 @@ jobs:
           fi
           echo "Using $DIFF_SCRIPT"
 
+          # Derive the in-DB file list. `compile_commands.json` stores
+          # absolute paths; strip the workspace prefix to get the same
+          # relative form `git diff` produces, then keep only the BL
+          # sources (drop the Unity / mocks TUs — clang-tidy them is
+          # noise). Headers are included via the matching `bl_*.h`
+          # glob; they're not in the DB themselves but get pulled in
+          # transitively when a TU includes them.
+          mapfile -t CT_SOURCES < <(
+            jq -r '.[].file' build-tests/compile_commands.json \
+              | sed "s|^$GITHUB_WORKSPACE/||" \
+              | grep -E '^Core/Src/bl_.*\.c$' \
+              | sort -u
+          )
+          CT_PATHS=("${CT_SOURCES[@]}" 'Core/Inc/bl_*.h')
+          echo "Tidy scope (${#CT_PATHS[@]} entries):"
+          printf '  %s\n' "${CT_PATHS[@]}"
+
           # -p1 strips the a/ b/ prefix that `git diff` prepends.
           # -path build-tests points clang-tidy at our compile_commands.
           # -regex limits which file types the script will scan.
-          git diff -U0 "$BASE_SHA" HEAD -- \
-              'Core/Src/*.c' 'Core/Inc/*.h' \
+          git diff -U0 "$BASE_SHA" HEAD -- "${CT_PATHS[@]}" \
             | "$DIFF_SCRIPT" -p1 -path build-tests -regex '.*\.(c|h)' \
             | tee tidy-output.txt
 
-          # clang-tidy-diff.py doesn't propagate clang-tidy's non-zero
-          # exit, so we have to detect warnings ourselves. WarningsAsErrors
-          # in .clang-tidy makes every issue an error — grep both.
-          if grep -E '(warning|error):' tidy-output.txt > /dev/null; then
+          # Only count *check findings* — those carry a `[check-name]`
+          # tag at the end of the line. Raw parser errors don't (and
+          # shouldn't be possible since we just filtered the diff to
+          # files in the compile DB, but defence in depth).
+          # WarningsAsErrors: '*' in .clang-tidy makes each finding
+          # print as `error: … [check-name]`, so the regex catches
+          # both warning and error severities.
+          if grep -E '(warning|error):.*\[[^]]+\]' tidy-output.txt > /dev/null; then
             echo "::error::clang-tidy reported issues on changed lines — see log above"
             exit 1
           fi
