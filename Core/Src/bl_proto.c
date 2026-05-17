@@ -31,6 +31,7 @@
 #include "bl_live.h"
 #include "bl_log.h"
 #include "bl_memmap.h"
+#include "bl_node_id.h"
 #include "bl_nvm.h"
 #include "bl_obyte.h"
 #include "main.h"
@@ -95,7 +96,7 @@ static void session_timeout(void)
 
 bool bl_proto_addressed_to_us(uint8_t dst)
 {
-    return (dst == BL_NODE_ID) || (dst == BL_PROTO_NODE_BROADCAST);
+    return (dst == bl_node_id_get()) || (dst == BL_PROTO_NODE_BROADCAST);
 }
 
 /* Map a 0..8 byte count onto the `FDCAN_DLC_BYTES_N` encoding the
@@ -154,17 +155,18 @@ static void wait_tx_drain(uint32_t max_ms)
 }
 
 /* Send one raw CAN frame — always from us (the node) back to the host.
- * The ID is the constant `BL_PROTO_DIR_NODE_TO_HOST | BL_NODE_ID`;
- * the new wire format has no concept of per-peer node→host addressing
- * (there's exactly one host, and its reserved ID is 0x0 which doesn't
- * show up in any node→host ID). `data` holds `length` valid bytes.
- * Any TX-queue full condition is swallowed silently — the host's
- * session timeout is the backstop. */
+ * The ID is `BL_PROTO_DIR_NODE_TO_HOST | <id>`, where <id> is the
+ * resolved node ID (NVM override or compile-time default — see
+ * `bl_node_id_get()`). The new wire format has no concept of
+ * per-peer node→host addressing (there's exactly one host, and its
+ * reserved ID is 0x0 which doesn't show up in any node→host ID).
+ * `data` holds `length` valid bytes. Any TX-queue full condition is
+ * swallowed silently — the host's session timeout is the backstop. */
 static void send_raw(const uint8_t *data, uint8_t length)
 {
     FDCAN_TxHeaderTypeDef tx = { 0 };
     tx.Identifier          = bl_proto_build_id(BL_PROTO_DIRECTION_NODE_TO_HOST,
-                                               BL_NODE_ID);
+                                               bl_node_id_get());
     tx.IdType              = FDCAN_STANDARD_ID;
     tx.TxFrameType         = FDCAN_DATA_FRAME;
     tx.DataLength          = dlc_bytes_to_fdcan(length);
@@ -348,7 +350,7 @@ static void handle_discover(uint8_t peer)
                   * signature symmetry with the other handlers */
     uint8_t resp[4] = {
         BL_CMD_DISCOVER,
-        BL_NODE_ID,
+        bl_node_id_get(),
         BL_PROTO_VERSION_MAJOR,
         BL_PROTO_VERSION_MINOR,
     };

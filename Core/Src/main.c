@@ -33,6 +33,7 @@
 #include "bl_health.h"
 #include "bl_live.h"
 #include "bl_log.h"
+#include "bl_node_id.h"
 #include "bl_nvm.h"
 #include "bl_obyte.h"
 #include "bl_proto.h"
@@ -350,6 +351,13 @@ static void Bootloader_Init(void) {
 	 * log from scratch. */
 	bl_nvm_init();
 
+	/* Resolve the effective node ID now that NVM is queryable. Reads
+	 * BL_NVM_KEY_NODE_ID if present, validates it, and caches the
+	 * result for `bl_node_id_get()`. Must happen BEFORE the FDCAN
+	 * filter config below — the filter is built from the resolved ID
+	 * and is set up only once at boot. */
+	bl_node_id_init_from_nvm();
+
 	/* Boot-time WRP self-check. Production-provisioned units are
 	 * expected to have sector 0 (the bootloader) WRP-protected; a
 	 * missing latch is not fatal but it earns a WARN log line so the
@@ -495,8 +503,10 @@ static void Bootloader_MainLoop(void) {
 }
 
 /* Configure FDCAN2 filters so FIFO0 only receives host→node frames
- * addressed to this board's BL_NODE_ID or the broadcast address 0xF.
- * Under the fix/12 wire format the 11-bit ID layout is
+ * addressed to this board's resolved node ID (`bl_node_id_get()` —
+ * NVM override if present, compile-time `BL_NODE_ID` otherwise) or
+ * the broadcast address 0xF. Under the fix/12 wire format the 11-bit
+ * ID layout is
  *
  *   bits 10..5 = 0   (reserved)
  *   bit  4     = 0   (host→node; node→host is 1 and must be rejected)
@@ -521,10 +531,11 @@ static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void) {
 	filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
 	filter.FilterID2    = BL_PROTO_ID_VALID_MASK;
 
-	/* Unicast: host → this node. ID = BL_PROTO_DIR_HOST_TO_NODE | BL_NODE_ID
-	 * (direction bit is 0; just the low nibble). */
+	/* Unicast: host → this node. ID = BL_PROTO_DIR_HOST_TO_NODE | <id>
+	 * where <id> is the resolved node ID (NVM override or compile-time
+	 * default). Direction bit is 0; just the low nibble. */
 	filter.FilterIndex = 0U;
-	filter.FilterID1   = BL_NODE_ID & BL_PROTO_NODE_MASK;
+	filter.FilterID1   = bl_node_id_get() & BL_PROTO_NODE_MASK;
 	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
 	if (st != HAL_OK) {
 		return st;
