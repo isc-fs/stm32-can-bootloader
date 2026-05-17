@@ -89,6 +89,19 @@ void test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error(void)
 void test_dispatch_write_chunk_262byte_37cf_padded_last_cf(void);
 void test_dispatch_valid_sf_pci_passes_pci_gate(void);
 
+/* ---- test_bl_node_id.c ---- */
+void test_node_id_falls_back_to_compile_time_on_empty_nvm(void);
+void test_node_id_falls_back_on_zero_host_value(void);
+void test_node_id_falls_back_on_broadcast_value(void);
+void test_node_id_falls_back_on_out_of_range_value(void);
+void test_node_id_falls_back_on_multi_byte_value(void);
+void test_node_id_uses_valid_nvm_override(void);
+void test_node_id_accepts_min_unicast(void);
+void test_node_id_accepts_max_unicast(void);
+void test_node_id_init_is_idempotent(void);
+void test_node_id_reinit_picks_up_nvm_changes(void);
+void test_node_id_reinit_after_tombstone_restores_default(void);
+
 /* ---- test_bl_app_validate.c ---- */
 void test_app_stack_dtcm_base_accepted(void);
 void test_app_stack_dtcm_interior_accepted(void);
@@ -173,6 +186,19 @@ int main(void)
     RUN_TEST(test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error);
     RUN_TEST(test_dispatch_write_chunk_262byte_37cf_padded_last_cf);
     RUN_TEST(test_dispatch_valid_sf_pci_passes_pci_gate);
+
+    /* test_bl_node_id.c */
+    RUN_TEST(test_node_id_falls_back_to_compile_time_on_empty_nvm);
+    RUN_TEST(test_node_id_falls_back_on_zero_host_value);
+    RUN_TEST(test_node_id_falls_back_on_broadcast_value);
+    RUN_TEST(test_node_id_falls_back_on_out_of_range_value);
+    RUN_TEST(test_node_id_falls_back_on_multi_byte_value);
+    RUN_TEST(test_node_id_uses_valid_nvm_override);
+    RUN_TEST(test_node_id_accepts_min_unicast);
+    RUN_TEST(test_node_id_accepts_max_unicast);
+    RUN_TEST(test_node_id_init_is_idempotent);
+    RUN_TEST(test_node_id_reinit_picks_up_nvm_changes);
+    RUN_TEST(test_node_id_reinit_after_tombstone_restores_default);
 
     /* test_bl_app_validate.c */
     RUN_TEST(test_app_stack_dtcm_base_accepted);
