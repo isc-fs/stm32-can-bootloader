@@ -141,17 +141,24 @@ jobs:
     # the tests, and reports per-file line coverage on the bl_*.c
     # modules. Fails if total line coverage drops below the floor.
     #
-    # Floor is the observed baseline minus a small buffer:
+    # Floor is the observed baseline minus a small buffer. Numbers
+    # ratchet up as test coverage grows; see commit history of this
+    # block for the journey.
+    #
+    # Observed baseline (this PR — bl_proto dispatch coverage added):
     #   bl_fwinfo.c    100%
-    #   bl_isotp.c      93%
-    #   bl_nvm.c        82%
-    #   bl_log.c        38%
-    #   bl_proto.c      15%  (dispatch + serial paths need HAL)
-    #   TOTAL          ~43%
-    # So 40 is the "don't backslide" floor for the first landing.
-    # Once we add tests for bl_proto / bl_log we ratchet this up, and
-    # eventually move to per-file thresholds so bl_proto can't keep
-    # pulling the total down.
+    #   bl_isotp.c      95%
+    #   bl_node_id.c    93%  (added v1.3.0)
+    #   bl_nvm.c        83%
+    #   bl_log.c        57%
+    #   bl_proto.c      31%  (jumped from 15% with dispatch tests)
+    #   TOTAL          ~56%
+    # So 50% is the "don't backslide" floor here — 6 pp of buffer
+    # below the observed total, comfortably above the previous 40%.
+    # Next ratchet wants either more bl_proto handler coverage
+    # (FLASH_*, OB_*, RESET/JUMP TX-drain) or a switch to per-file
+    # thresholds so bl_proto's still-large gap can't pull the total
+    # down later. See the issue tracker for the follow-up.
     #
     # The HTML report is uploaded as an artifact so devs can download
     # it and look at the un-covered lines visually.
@@ -195,15 +202,16 @@ jobs:
           echo '=== per-file (txt) ==='
           cat /tmp/coverage.txt
 
-      - name: Enforce floor (40% total line coverage on Core/Src/bl_*.c)
-        # 40% is the "don't backslide" floor — observed baseline is
-        # ~43% so this gives a small buffer. Ratchet up as we add
-        # tests for bl_proto / bl_log; consider per-file thresholds
-        # so the giant bl_proto.c can't keep pulling the total down.
+      - name: Enforce floor (50% total line coverage on Core/Src/bl_*.c)
+        # 50% is the post-dispatch-tests floor — observed baseline is
+        # ~56% so this gives 6 pp of headroom. Ratchet again when the
+        # remaining bl_proto handlers (FLASH_*, OB_*, RESET/JUMP) gain
+        # coverage; consider per-file thresholds so bl_proto's
+        # still-large gap can't pull the total down later.
         run: |
           gcovr --root . \
             --filter 'Core/Src/bl_' \
-            --fail-under-line 40 \
+            --fail-under-line 50 \
             build-tests-cov
 
       - name: Write step summary
