@@ -352,10 +352,14 @@ jobs:
     # Release) job that reports absolute sizes via `arm-none-eabi-size`,
     # which is enough for direct-push observability.
     #
-    # Thresholds (per segment, in bytes) live in the script step below
-    # and are deliberately on the loose side — a normal feature PR
-    # should land well under 2 KB of .text and 256 B of bss/data. Tune
-    # them tighter once we have a few PRs of data.
+    # Thresholds (per segment, in bytes) live in the script step below.
+    # They're tuned to "this PR meaningfully grew the firmware — is
+    # that intentional?" rather than "we have arbitrary headroom".
+    # Observed legitimate deltas across releases (each = a single
+    # feature PR that didn't bloat the binary):
+    #   v1.3.0 / PR #112 (NVM node-id override)  text +140 / data +4 / bss +4
+    # Anything above the thresholds below is in genuinely-large-change
+    # territory and wants a reviewer eye on it.
     name: Firmware size delta
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-22.04
@@ -400,12 +404,15 @@ jobs:
           set -euo pipefail
 
           # Tunable per-segment regression thresholds, in bytes.
-          # Loose for the first landing — tighten once we have a few
-          # PRs of baseline data. Anything legitimately bigger than
-          # these wants reviewer scrutiny anyway.
-          TEXT_MAX_INCREASE=2048
-          DATA_MAX_INCREASE=256
-          BSS_MAX_INCREASE=256
+          # Tightened from the v1.2.0 first-landing values
+          # (2048 / 256 / 256) after observing several release cycles
+          # of legitimate change deltas — see the header comment for
+          # the numbers. text 1024 is still ~4 % of the current image;
+          # data 64 catches any meaningful new global; bss 128 catches
+          # surprise framework / RTOS allocations.
+          TEXT_MAX_INCREASE=1024
+          DATA_MAX_INCREASE=64
+          BSS_MAX_INCREASE=128
 
           parse_size() {
             arm-none-eabi-size --format=berkeley "$1" \
