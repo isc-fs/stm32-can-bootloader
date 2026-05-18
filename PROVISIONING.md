@@ -17,9 +17,9 @@ PR it rather than keeping the correction in your head.
 
 ---
 
-## 📢 In a hurry? Jump to §4 (Recovery)
+## 📢 In a hurry? Jump to §5 (Recovery)
 
-Most people open this file during an incident. §4 is the single
+Most people open this file during an incident. §5 is the single
 most-read section; glance there first.
 
 ---
@@ -170,7 +170,113 @@ Same as Step 1.4.
 
 ---
 
-## 3. RDP policy
+## 3. Changing the node ID via NVM (v1.3.0+)
+
+Each board's 4-bit node ID lives in two places after v1.3.0:
+
+1. **Compile-time `BL_NODE_ID`** — the fallback, set by
+   `-DBL_NODE_ID=0x…` at build time (see Step 1.1). Always valid
+   (the build asserts `0x1..0xE`).
+2. **NVM-backed override** — a 1-byte entry under
+   `BL_NVM_KEY_NODE_ID = 0x0001` in sector 7. When present and
+   valid, the bootloader prefers this byte over the compile-time
+   default at every boot.
+
+This lets a fleet share one firmware image: SWD-flash the same
+`.bin` to every board, then write a different node ID per board over
+CAN. No per-board build, no per-board reflash. The mechanism is
+documented in detail in
+[`ARCHITECTURE.md § Node ID provisioning and FDCAN filtering`](ARCHITECTURE.md#node-id-provisioning-and-fdcan-filtering).
+
+> ⚠️ Pre-v1.3.0 bootloaders defined the same key but **never read it
+> back at boot**. Writing key `0x0001` on a v1.2.0 or older board has
+> no observable effect; the board keeps answering at its compile-time
+> ID until you reflash with v1.3.0+.
+
+### Step 3.1 — Write the override
+
+Talk to the board at its **current** ID — the one it's answering at
+right now, which may still be the compile-time default if the board
+was just flashed:
+
+```sh
+# Replace 0x1 (current ID) and 0x2 (new ID) for your case.
+cf --node-id 0x1 config nvm write 0x0001 0x02
+```
+
+Value format is a `0x`-prefixed hex blob of exactly **1 byte**
+(`0x00..0xFF`); anything else gets parsed as UTF-8 and won't survive
+the BL's validation. The BL accepts only `0x01..0x0E` — `0x00` is
+the host's reserved ID and `0x0F` is the broadcast pseudo-node, both
+rejected with a silent fall-back to `BL_NODE_ID` on next boot.
+
+### Step 3.2 — Round-trip verify
+
+Don't trust a write you haven't read back. The host's NVM-read
+opcode returns the latest live entry for the key:
+
+```sh
+cf --node-id 0x1 config nvm read 0x0001
+```
+
+Expected output:
+
+```
+key 0x0001 → 1 byte: 02
+```
+
+If the read says `key not found in NVM` the write didn't land — most
+likely cause is the value was malformed (decimal instead of hex, or
+more than one byte) and `cf` rejected it before sending the frame.
+
+### Step 3.3 — Reboot the board
+
+The override only takes effect on the next `bl_nvm_init` →
+`bl_node_id_init_from_nvm` cycle, which happens once at boot. Two
+options:
+
+```sh
+# Option A — over CAN, if your app cooperates (depends on what's
+# in sector 1..6 right now).
+cf --node-id 0x1 diagnose reset
+
+# Option B — physical power-cycle. Always works; required if no app
+# is installed yet.
+```
+
+> ℹ️ A `cf config nvm write --reset` flag is tracked at
+> [isc-fs/can-flasher#231](https://github.com/isc-fs/can-flasher/issues/231)
+> to wrap steps 3.1 and 3.3 into one call. Until that lands, the
+> two-step dance above is the official workflow.
+
+### Step 3.4 — Confirm the new ID is live
+
+```sh
+cf discover
+```
+
+Should now show the board at the new ID (`0x02` in the example).
+`cf --node-id 0x2 diagnose health` is a stronger check — it walks
+through `CONNECT` at the new ID and reads back the heartbeat, which
+contains the resolved node ID in byte 1.
+
+### Step 3.5 — Clear the override (rollback)
+
+To return a board to its compile-time `BL_NODE_ID`, write a
+zero-length tombstone under the same key:
+
+```sh
+cf --node-id 0x2 config nvm erase 0x0001
+```
+
+After reboot the BL re-reads NVM, finds no live entry, and falls
+back to `BL_NODE_ID`. Useful if a bad override took effect (e.g.
+collision with another board) and you want the deterministic
+compile-time identity back without a SWD reflash.
+
+---
+
+## 4. RDP policy
 
 STM32 read-protection has three levels. Current project policy:
 
@@ -189,7 +295,7 @@ watching.
 
 ---
 
-## 4. Recovery — when things go wrong
+## 5. Recovery — when things go wrong
 
 ### "Board responds to `cf discover` but refuses CONNECT"
 
@@ -235,7 +341,7 @@ faults leave a WARN or ERROR line explaining the cause.
 
 ---
 
-## 5. Quick reference — commands by goal
+## 6. Quick reference — commands by goal
 
 | Goal | Command |
 |------|---------|
@@ -247,3 +353,5 @@ faults leave a WARN or ERROR line explaining the cause.
 | Dump BL logs live | `cf diagnose log-stream` |
 | Show health record | `cf diagnose health` |
 | Read option bytes | `cf config ob read` |
+| Set runtime node-id override (v1.3.0+) | `cf --node-id <current> config nvm write 0x0001 <new>` then reboot |
+| Clear node-id override (back to compile-time) | `cf --node-id <current> config nvm erase 0x0001` then reboot |
