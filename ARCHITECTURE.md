@@ -74,6 +74,7 @@ flowchart TD
 
     isotp["bl_isotp<br/>SF/FF/CF reassembly + segmentation"]:::util
     nvm["bl_nvm<br/>log-structured KV in sector 7"]:::util
+    node_id["bl_node_id<br/>NVM-backed node-id override"]:::util
     dtc["bl_dtc<br/>32-entry DTC table in BKPSRAM"]:::util
     obyte["bl_obyte<br/>option-byte read + apply-WRP"]:::util
     fwinfo["bl_fwinfo<br/>app-record validation"]:::util
@@ -84,6 +85,7 @@ flowchart TD
     proto --> isotp
     proto --> flash
     proto --> nvm
+    proto --> node_id
     proto --> dtc
     proto --> obyte
     proto --> fwinfo
@@ -94,10 +96,12 @@ flowchart TD
     flash --> nvm
     flash --> health
     health --> nvm
+    health --> node_id
     live --> dtc
     live --> obyte
     live --> health
     log --> health
+    node_id --> nvm
 
     flash --> hal
     nvm --> hal
@@ -239,20 +243,55 @@ This section documents only what BL does on top of that contract.
 
 ### Node ID provisioning and FDCAN filtering
 
-Each board's 4-bit node ID is a compile-time constant `BL_NODE_ID`,
-defined in [`Core/Inc/bl_config.h`](Core/Inc/bl_config.h) and
-overridden per board via `-DBL_NODE_ID=0x…`. Values `0x0` (host)
-and `0xF` (broadcast) are reserved; valid IDs are `0x1..0xE`. An
-NVM-backed override (reserved key `0x0001`) lets the same image be
-provisioned to different nodes without rebuilding.
+Each board's 4-bit node ID has two possible sources:
 
-Two classic-mask FDCAN filters are installed on FIFO0 during
-`Bootloader_Init`: `dst == BL_NODE_ID` (unicast) and `dst == 0xF`
-(broadcast). Non-matching standard IDs, non-matching extended IDs
-and all remote frames are rejected at the peripheral and never
-reach software. The dispatcher keeps a defence-in-depth
-`bl_proto_addressed_to_us` check so any future software-routed path
-stays honest.
+1. **Compile-time `BL_NODE_ID`** in
+   [`Core/Inc/bl_config.h`](Core/Inc/bl_config.h), set per board via
+   `-DBL_NODE_ID=0x…`. The build asserts `0x1..0xE` (`0x0` is the
+   host's reserved ID; `0xF` is broadcast). This is the fallback.
+2. **NVM-backed override** under reserved key
+   `BL_NVM_KEY_NODE_ID = 0x0001` in sector 7. When present and
+   valid, this overrides the compile-time default. That lets the
+   same firmware image be provisioned to many boards from the host
+   side without a rebuild + SWD reflash — see
+   [`PROVISIONING.md §3`](PROVISIONING.md#3-changing-the-node-id-via-nvm-v130).
+
+Resolution happens once during `Bootloader_Init`, in
+`bl_node_id_init_from_nvm()`
+([`Core/Src/bl_node_id.c`](Core/Src/bl_node_id.c)), immediately
+after `bl_nvm_init()` and **before** the FDCAN filter is
+configured. The cached resolved ID is exposed by
+`bl_node_id_get()`, which is the single source of truth for every
+site that needs the ID: the FDCAN RX filter, the dispatcher's
+`bl_proto_addressed_to_us`, every TX frame ID build, the DISCOVER
+reply, and the heartbeat's node-id byte. Reads from `bl_node_id_get`
+are safe from RX IRQ context (single static byte load).
+
+Validation on the NVM-stored byte is intentionally strict — any
+malformed entry silently falls back to the compile-time
+`BL_NODE_ID` rather than refusing to boot. The fallback is always
+known-good (the build asserts it), so a bad override should never
+make a board unrecoverable. Rejection cases:
+
+- value length ≠ 1 byte
+- byte == `0x00` (host's reserved ID)
+- byte == `0x0F` (broadcast pseudo-node — a node responding from
+  it would race every reply on the bus)
+- byte ∈ `0x10..0xFF` (out of the 4-bit destination field; the
+  FDCAN mask would silently truncate to an unrelated low nibble)
+
+Two classic-mask FDCAN filters are then installed on FIFO0:
+`dst == bl_node_id_get()` (unicast) and `dst == 0xF` (broadcast).
+Non-matching standard IDs, non-matching extended IDs and all remote
+frames are rejected at the peripheral and never reach software. The
+dispatcher keeps a defence-in-depth `bl_proto_addressed_to_us`
+check so any future software-routed path stays honest.
+
+A new node-id override only takes effect on the next boot — the
+filter is built once at init and not re-applied at runtime.
+Hot-swapping a node's identity mid-session would silently
+desynchronise the host's filter state, which is far worse than the
+operator having to reboot once.
 
 ### ISO-TP transport (BL-side policy)
 

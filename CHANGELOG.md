@@ -12,6 +12,138 @@ the PR titles between consecutive tags.
 
 ---
 
+## v1.3.0 — NVM-backed node-id override + CI hardening
+
+**Wire protocol**: unchanged at `0.2`. No host upgrade required.
+
+Single user-facing feature: the bootloader's node ID can now be
+provisioned over the wire via the host's NVM-write opcode, eliminating
+the per-board rebuild-and-SWD-reflash step. Everything else this
+release ships is internal CI hardening; no firmware behaviour change
+beyond the override path.
+
+### Highlights
+
+- **Runtime node-id override** (PR #112). The bootloader consumes
+  `BL_NVM_KEY_NODE_ID = 0x0001` at boot and prefers a valid 1-byte
+  override over the compile-time `BL_NODE_ID`. Surfaced on the
+  IFS08 HIL bench (isc-fs/IFS08-CE-AMS#123) — operator couldn't
+  reprovision MLC1 without a full BL rebuild. New module
+  `Core/{Inc,Src}/bl_node_id.{h,c}` owns the resolution + caching;
+  the FDCAN RX filter, every TX call site (`bl_proto`, `bl_health`),
+  and the dispatcher addressed-to-us check all go through
+  `bl_node_id_get()` now. Validation rules (length must be 1 byte;
+  value must be in `0x1..0xE`) make a corrupt NVM entry fall back
+  silently to the compile-time default — the override path can
+  never brick a node.
+- **CI suite grew to 7 required gates.** Four new jobs landed
+  between v1.2.0 and this release (sanitizers, coverage, clang-tidy
+  diff, firmware-size delta — see below). All seven jobs are now
+  required checks on `dev` and `main` per branch protection.
+- **Releases auto-attach firmware artifacts.** This is the first
+  release where the `attach-release-artifacts` workflow fires on
+  `release: published` and uploads `CAN_BL.{elf,bin,hex}` to the
+  release page within ≈3 minutes (PR #100).
+
+### Wire-surface changes (protocol v0.2)
+
+**None.** `BL_PROTO_VERSION_MAJOR.MINOR` stays at `0.2`.
+`CMD_NVM_WRITE` / `CMD_NVM_READ` for key `0x0001` were already
+defined in v1.2.0; only the bootloader's internal boot-time consumer
+of the stored value is new in v1.3.0. A v0.2 host doesn't see any
+new opcodes, NACK codes, or frame shapes.
+
+### Reliability + correctness
+
+- **Silent fall-back on invalid NVM byte.** The override accepts
+  only well-formed values; anything else (length ≠ 1, byte `0x0`,
+  byte `0xF`, byte `0x10..0xFF`) is ignored and the BL boots at the
+  compile-time default. 11 unit tests in `test_bl_node_id.c` cover
+  every rejection path plus idempotent re-init and the
+  tombstone-restores-default flow.
+
+### Infrastructure / CI
+
+- **`Host unit tests (ASan + UBSan)`** (PR #104) — second host-test
+  build wired with `-fsanitize=address,undefined` +
+  `-fno-sanitize-recover=all` so UAF / OOB / signed-overflow /
+  shift-out-of-range / null-deref are caught on every PR.
+- **`Host coverage`** (PR #105, retuned for landing) — runs the
+  test suite under `--coverage`, reports per-file `bl_*.c` numbers
+  via `gcovr 7.2`, fails if total line coverage drops below 40 %.
+  Floor will ratchet up as bl_proto / bl_log gain tests.
+- **`clang-tidy (changed lines)`** (PR #108) — `bugprone-* +
+  readability-* + cert-* + clang-analyzer-* + misc-*` (with
+  carve-outs documented inline in `.clang-tidy`) applied only to
+  lines a PR touches via `clang-tidy-diff.py`. Diff-scope filter
+  refined in v1.3.0 to drive off `compile_commands.json` so the
+  gate doesn't false-fail on firmware-only TUs (#112).
+- **`Firmware size delta`** (PR #110) — builds the Release preset
+  on both the PR head and the base branch, posts a delta table to
+  the PR's step summary, fails if `text +2048 B` / `data +256 B`
+  / `bss +256 B` is exceeded. Loose thresholds for first landing.
+- **`attach-release-artifacts.yml`** (PR #100) — release workflow
+  described in *Highlights* above.
+- **`close-on-dev-merge.yml`** (PR #102) — Pass 2 added that
+  closes the branch's `[<head-ref>]` tracking issue when a dev PR
+  merges, alongside the existing `Closes #N` keyword scan.
+
+### Backward compatibility
+
+A v0.2 host tool ([can-flasher](https://github.com/isc-fs/can-flasher))
+keeps working unchanged:
+
+- **No opcodes added, renumbered, or removed.**
+- `CONNECT` semantics unchanged.
+- `CMD_NVM_WRITE` to key `0x0001` (which the host could already
+  send) now persists across reboot **and** is consumed by the BL
+  on the next boot — a v0.2 host that wasn't aware of this path
+  experiences no change in behaviour.
+- A board provisioned at v1.2.0 with a stale or bad NVM entry
+  under key `0x0001` will simply fall back to the compile-time
+  `BL_NODE_ID` on v1.3.0 first-boot — no manual cleanup needed.
+
+### Companion-tool sync
+
+The host CLI [`isc-fs/can-flasher`](https://github.com/isc-fs/can-flasher)
+already supports `config nvm write 0x0001 <hex_byte>` end-to-end;
+the workflow works today with one operator-friction caveat: there's
+no post-write auto-reset, so the operator power-cycles the board
+manually after the NVM write. Tracked at
+[`isc-fs/can-flasher#231`](https://github.com/isc-fs/can-flasher/issues/231)
+along with a proposed `node-id` named alias and a fix for stale
+`--key`/`--value` examples in `docs/USAGE.md`.
+
+### Memory budget
+
+- Bootloader image: 24 348 B `.text` / 128 KB sector 0 (≈ **19 %
+  used**) — net `+140 B` of `.text` vs v1.2.0 for the new
+  `bl_node_id` TU and its callers.
+- `.data`: 108 B (+4 B for the cached node-id byte + alignment).
+- `.bss`: 4 228 B (+4 B alignment shadow).
+- Well inside the new firmware-size delta gate's thresholds.
+
+### Operator notes (bench)
+
+If you're updating an existing board to v1.3.0:
+
+1. Flash the v1.3.0 `CAN_BL.bin` from the release page **with the
+   matching `-DBL_NODE_ID=<addr>`** for that carrier (the binary
+   in the release is built at `BL_NODE_ID = 0x1`; rebuild from the
+   `v1.3.0` tag if your board needs a different boot-default).
+2. After first boot, `can-flasher --node-id <current> config nvm
+   write 0x0001 <new_addr>` persists the override.
+3. Round-trip verify with `can-flasher --node-id <current> config
+   nvm read 0x0001` before rebooting.
+4. Power-cycle the board (no over-CAN reset yet — see
+   `can-flasher#231`).
+5. `can-flasher discover` should now see the new ID.
+
+See `PROVISIONING.md §3` for the same workflow with explanatory
+context.
+
+---
+
 ## v1.2.0 — Reliability + observability hardening
 
 **Wire protocol**: `0.1` → `0.2` (backward-compatible; v0.1 hosts keep
