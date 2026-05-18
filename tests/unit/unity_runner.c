@@ -88,6 +88,19 @@ void test_dispatch_bad_pci_emits_nack_transport_error(void);
 void test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error(void);
 void test_dispatch_write_chunk_262byte_37cf_padded_last_cf(void);
 void test_dispatch_valid_sf_pci_passes_pci_gate(void);
+void test_handle_connect_valid_version_acks_and_latches_session(void);
+void test_handle_connect_wrong_major_nacks_protocol_version(void);
+void test_handle_connect_short_args_nacks_unsupported(void);
+void test_handle_disconnect_clears_session_latch(void);
+void test_handle_discover_uses_discover_reply_type_not_ack(void);
+void test_session_gate_flash_erase_without_connect_nacks_bad_session(void);
+void test_session_gate_flash_write_without_connect_nacks_bad_session(void);
+void test_session_gate_nvm_read_without_connect_nacks_bad_session(void);
+void test_session_gate_log_stream_start_without_connect_nacks_bad_session(void);
+void test_handle_nvm_read_returns_value_for_pre_written_key(void);
+void test_handle_nvm_read_unknown_key_nacks_not_found(void);
+void test_handle_nvm_write_persists_value_visible_to_nvm_read_api(void);
+void test_dispatch_unknown_opcode_nacks_unsupported(void);
 
 /* ---- test_bl_node_id.c ---- */
 void test_node_id_falls_back_to_compile_time_on_empty_nvm(void);
@@ -186,6 +199,19 @@ int main(void)
     RUN_TEST(test_dispatch_write_chunk_19cf_sequence_does_not_emit_transport_error);
     RUN_TEST(test_dispatch_write_chunk_262byte_37cf_padded_last_cf);
     RUN_TEST(test_dispatch_valid_sf_pci_passes_pci_gate);
+    RUN_TEST(test_handle_connect_valid_version_acks_and_latches_session);
+    RUN_TEST(test_handle_connect_wrong_major_nacks_protocol_version);
+    RUN_TEST(test_handle_connect_short_args_nacks_unsupported);
+    RUN_TEST(test_handle_disconnect_clears_session_latch);
+    RUN_TEST(test_handle_discover_uses_discover_reply_type_not_ack);
+    RUN_TEST(test_session_gate_flash_erase_without_connect_nacks_bad_session);
+    RUN_TEST(test_session_gate_flash_write_without_connect_nacks_bad_session);
+    RUN_TEST(test_session_gate_nvm_read_without_connect_nacks_bad_session);
+    RUN_TEST(test_session_gate_log_stream_start_without_connect_nacks_bad_session);
+    RUN_TEST(test_handle_nvm_read_returns_value_for_pre_written_key);
+    RUN_TEST(test_handle_nvm_read_unknown_key_nacks_not_found);
+    RUN_TEST(test_handle_nvm_write_persists_value_visible_to_nvm_read_api);
+    RUN_TEST(test_dispatch_unknown_opcode_nacks_unsupported);
 
     /* test_bl_node_id.c */
     RUN_TEST(test_node_id_falls_back_to_compile_time_on_empty_nvm);
