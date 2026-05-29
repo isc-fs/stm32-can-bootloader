@@ -113,11 +113,24 @@ void bl_live_stream_stop(void) { }
 
 
 /* ---- bl_obyte ---- */
+/* Observable for #125 C4 tests: record the last mask actually passed
+ * to apply (i.e. that survived the handler's validation) + a call
+ * count, so a test can assert a rejected mask never reached the
+ * option-byte layer. */
+static uint32_t g_apply_wrp_last_mask = 0xFFFFFFFFU;
+static int      g_apply_wrp_calls     = 0;
+
 bl_ob_rc_t bl_obyte_apply_wrp(uint32_t sector_bitmap)
 {
-    (void)sector_bitmap;
+    g_apply_wrp_last_mask = sector_bitmap;
+    g_apply_wrp_calls++;
     return BL_OB_OK;
 }
+
+uint32_t mock_ob_apply_wrp_last_mask(void) { return g_apply_wrp_last_mask; }
+int      mock_ob_apply_wrp_calls(void)     { return g_apply_wrp_calls; }
+void     mock_ob_apply_wrp_reset(void)     { g_apply_wrp_last_mask = 0xFFFFFFFFU;
+                                             g_apply_wrp_calls = 0; }
 
 bl_ob_rc_t bl_obyte_read(bl_ob_status_t *out)
 {
@@ -128,6 +141,21 @@ bl_ob_rc_t bl_obyte_read(bl_ob_status_t *out)
 }
 
 
-/* ---- Bootloader_* entry points (declared in main.h) ---- */
-void    Bootloader_JumpToApplication(void) { }
-uint8_t Bootloader_CheckApplication(void)  { return 0U; }
+/* ---- Bootloader_* entry points (declared in main.h) ----
+ *
+ * Jump is observable so tests can assert whether the BL handed off to
+ * the app (e.g. the #125 C2 session-timeout-no-jump guard). On real
+ * hardware Bootloader_JumpToApplication never returns; in the host
+ * harness it just records the call and returns so the test can
+ * continue. CheckApplication returns "valid app present" (0) by
+ * default; mock_set_check_application() overrides it for tests that
+ * need the no-valid-app branch. */
+static int     g_jump_count   = 0;
+static uint8_t g_check_app_rv = 0U;
+
+void Bootloader_JumpToApplication(void) { g_jump_count++; }
+uint8_t Bootloader_CheckApplication(void)  { return g_check_app_rv; }
+
+int  mock_bootloader_jump_count(void)        { return g_jump_count; }
+void mock_bootloader_reset(void)             { g_jump_count = 0; g_check_app_rv = 0U; }
+void mock_set_check_application(uint8_t rv)  { g_check_app_rv = rv; }
