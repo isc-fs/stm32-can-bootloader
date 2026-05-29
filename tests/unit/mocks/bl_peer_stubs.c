@@ -58,6 +58,12 @@ bl_flash_status_t bl_flash_erase(uint32_t start,
     if (sectors_erased != NULL) {
         *sectors_erased = 0U;
     }
+    /* #125 H6: mirror the real bl_flash_erase, which times the erase
+     * and records its duration. The real timing (DWT) lives in the
+     * firmware-only bl_flash.c; here we just record 0 ms so the
+     * dispatcher-level plumbing test (FLASH_ERASE → a duration is
+     * recorded) still validates against the stubbed flash layer. */
+    bl_health_record_flash_op_ms(0U);
     return BL_FLASH_OK;
 }
 

@@ -323,6 +323,15 @@ static void Bootloader_Init(void) {
 	LED_OK_ON();
 	LED_ERR_OFF();
 
+	/* #125 H6: enable the DWT cycle counter, used by bl_flash_erase to
+	 * time the erase. HAL_GetTick can't measure it — on the single-bank
+	 * H733 the CPU stalls on instruction fetch for the whole erase, so
+	 * SysTick interrupts starve and the tick barely advances. CYCCNT is
+	 * clock-driven and counts through the stall. Set once, here. */
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0U;
+	DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
+
 	/* Latch the reset cause before anything else has a chance to clear
 	 * RCC->RSR. Health reporting depends on this surviving the rest of
 	 * the boot sequence. */

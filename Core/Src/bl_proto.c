@@ -767,14 +767,12 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
     uint32_t sectors = 0U;
     bl_log_info("FLASH_ERASE start=0x%08X len=0x%X",
                 (unsigned int)start, (unsigned int)length);
-    /* #125 H6 probe: time the erase — the longest blocking op in the
-     * BL, and the number that determines a safe IWDG period before we
-     * enable the watchdog. Wrap-safe unsigned subtraction. The max is
-     * surfaced in the health record (max_flash_op_ms). */
-    uint32_t erase_t0 = HAL_GetTick();
+    /* #125 H6: the erase duration is timed INSIDE bl_flash_erase (via
+     * DWT — HAL_GetTick can't measure it: the single-bank H733 stalls
+     * the CPU on instruction fetch for the whole erase, starving
+     * SysTick) and recorded into the health record's max_flash_op_ms.
+     * Don't time it here — HAL_GetTick would read ~1 ms regardless. */
     bl_flash_status_t st = bl_flash_erase(start, length, &sectors);
-    uint32_t erase_ms = HAL_GetTick() - erase_t0;
-    bl_health_record_flash_op_ms(erase_ms);
     if (st != BL_FLASH_OK) {
         if (st == BL_FLASH_ERR_HARDWARE) {
             bl_dtc_log(BL_DTC_FLASH_HW, BL_DTC_SEV_ERROR, start);
@@ -785,8 +783,8 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
         send_nack(BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
         return;
     }
-    bl_log_info("FLASH_ERASE ok (%u sectors, %u ms)",
-                (unsigned int)sectors, (unsigned int)erase_ms);
+    bl_log_info("FLASH_ERASE ok (%u sectors); see health.max_flash_op_ms",
+                (unsigned int)sectors);
 
     uint8_t resp[1] = { BL_CMD_FLASH_ERASE };
     send_ack(resp, (uint16_t)sizeof(resp));

@@ -97,9 +97,29 @@ bl_flash_status_t bl_flash_erase(uint32_t start,
         return BL_FLASH_ERR_HARDWARE;
     }
 
+    /* #125 H6: time the erase with the DWT cycle counter, NOT
+     * HAL_GetTick. The H733 is single-bank, so erasing any sector
+     * stalls the CPU's instruction fetch from flash for the WHOLE
+     * erase (no read-while-write within a bank). During that stall
+     * SysTick interrupts can't be serviced, so HAL_GetTick advances by
+     * only ~1 tick regardless of the true erase duration — which is
+     * why the first bench measurement read 1 ms. DWT->CYCCNT is
+     * clock-driven and keeps counting through the stall, giving real
+     * elapsed time. CYCCNT is enabled once at boot in Bootloader_Init.
+     * The 32-bit subtraction is wrap-safe. */
     uint32_t page_error = 0U;
+    uint32_t cyc0 = DWT->CYCCNT;
     HAL_StatusTypeDef st = HAL_FLASHEx_Erase(&eraseInit, &page_error);
+    uint32_t cyc_elapsed = DWT->CYCCNT - cyc0;
     HAL_FLASH_Lock();
+
+    /* cycles → ms (SystemCoreClock is the core clock in Hz; /1000 is
+     * cycles per ms). Recorded even on a failed erase — it still
+     * consumed time and is informative for sizing the IWDG. */
+    uint32_t cyc_per_ms = SystemCoreClock / 1000U;
+    if (cyc_per_ms > 0U) {
+        bl_health_record_flash_op_ms(cyc_elapsed / cyc_per_ms);
+    }
 
     if (st != HAL_OK) {
         return BL_FLASH_ERR_HARDWARE;
