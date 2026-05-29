@@ -144,6 +144,39 @@ void bl_health_tick(uint32_t now_ms)
         return;
     }
 
+    /* #123: do NOT inject a heartbeat into an active host exchange.
+     *
+     * The heartbeat is a 7-byte payload → 8-byte message → an ISO-TP
+     * First Frame + Consecutive Frame (multi-frame TX). Emitting it
+     * during a sustained CAN flash drops a multi-frame NOTIFY onto the
+     * bus in the middle of the host's WRITE_CHUNK stream. Because the
+     * BL advertises ISO-TP Flow Control with BlockSize=0 (see
+     * bl_isotp.h — "no real backpressure, FC(Wait) during flash is
+     * feat/8 work"), the host streams a whole chunk without pausing
+     * and the BL has no flow-control lever to resync if the heartbeat
+     * perturbs the exchange. The observed failure: the reassembly is
+     * stranded and trips the 1 s transport timeout → NACK 0x09. The
+     * 13 KB (~10 %) failure clustering on the bench is exactly the
+     * 1 Hz heartbeat period at the measured flash throughput.
+     *
+     * Fix: the heartbeat exists to prove liveness on an OTHERWISE-IDLE
+     * link. During an active exchange the host already sees a steady
+     * ACK stream, so the heartbeat is redundant there. Suppress it
+     * until the link has been quiet for a full interval. `session_age`
+     * is "ms since the last RX frame that passed the PCI gate"
+     * (bl_proto touches it on every received frame), so during a
+     * flash — frames arriving every few ms — this stays well under
+     * the interval and no heartbeat is emitted. Once flashing stops
+     * and the bus idles a full interval, heartbeats resume.
+     *
+     * Re-anchor the scheduler while suppressed so the first post-flash
+     * heartbeat lands a full interval after the bus goes quiet rather
+     * than firing instantly. */
+    if (bl_proto_session_age_ms(now_ms) < BL_HEALTH_HEARTBEAT_INTERVAL_MS) {
+        g_last_heartbeat_ms = now_ms;
+        return;
+    }
+
     uint32_t elapsed = now_ms - g_last_heartbeat_ms;
     if (elapsed < BL_HEALTH_HEARTBEAT_INTERVAL_MS) {
         return;

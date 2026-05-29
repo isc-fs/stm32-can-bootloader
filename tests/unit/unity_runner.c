@@ -101,6 +101,8 @@ void test_handle_nvm_read_returns_value_for_pre_written_key(void);
 void test_handle_nvm_read_unknown_key_nacks_not_found(void);
 void test_handle_nvm_write_persists_value_visible_to_nvm_read_api(void);
 void test_dispatch_unknown_opcode_nacks_unsupported(void);
+void test_send_notify_suppressed_while_reassembly_in_flight(void);
+void test_send_notify_emitted_when_idle(void);
 
 /* ---- test_bl_node_id.c ---- */
 void test_node_id_falls_back_to_compile_time_on_empty_nvm(void);
@@ -212,6 +214,8 @@ int main(void)
     RUN_TEST(test_handle_nvm_read_unknown_key_nacks_not_found);
     RUN_TEST(test_handle_nvm_write_persists_value_visible_to_nvm_read_api);
     RUN_TEST(test_dispatch_unknown_opcode_nacks_unsupported);
+    RUN_TEST(test_send_notify_suppressed_while_reassembly_in_flight);
+    RUN_TEST(test_send_notify_emitted_when_idle);
 
     /* test_bl_node_id.c */
     RUN_TEST(test_node_id_falls_back_to_compile_time_on_empty_nvm);
