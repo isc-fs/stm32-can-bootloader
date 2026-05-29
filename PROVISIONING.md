@@ -140,15 +140,39 @@ there were. Updates go through SWD.
 
 ### Step 2.1 — Clear WRP
 
-WRP cleared by writing the "no sectors protected" mask. Via
-CubeProgrammer (easier UI) or CLI:
+> ⚠️ **STM32H72x/H73x WRP is per-sector `WRPSn` bits, NOT the
+> `WRP1A_STRT/END` range syntax used on F4/F7/L4.** A WRP'd sector 0
+> silently rejects both erase and program; CubeProgrammer then fails
+> verify with a data mismatch at `0x08000004` (the reset vector) while
+> the *old* bootloader stays in flash. **Mass / "Full chip erase" does
+> NOT clear WRP** on the H7 (WRP lives in the option bytes, and the
+> protected sector can't be erased) — you must reprogram the WRP
+> option byte to unprotect, as below.
+
+**CubeProgrammer GUI (recommended):**
+
+1. Connect via ST-LINK, open the **OB** (Option Bytes) panel.
+2. Expand **Write Protection**. On the H73x each sector has a `WRPSn`
+   bit (`1` = unprotected, `0` = protected). Sector 0 will read
+   protected.
+3. Set every sector you are not deliberately protecting to
+   **unprotected** — simplest is to set the whole write-protection
+   field to all-ones (all 8 sectors unprotected).
+4. **Apply.** The option-byte reprogram triggers a device reset.
+
+**CLI:** the exact field name varies by CubeProgrammer version, so
+read it first rather than guessing (the old `WRP1A_STRT/END` form does
+**not** apply to this part):
 
 ```sh
-STM32_Programmer_CLI -c port=SWD \
-                     -ob WRP1A_STRT=0x7F WRP1A_END=0x00 \
-                     -ob WRP1B_STRT=0x7F WRP1B_END=0x00
+# 1. See the current option bytes + the exact WRP field name:
+STM32_Programmer_CLI -c port=SWD -ob displ
 
-# Always verify:
+# 2. Set that field to all-unprotected (field name from step 1,
+#    e.g. WRPS / nWRP — value 0xFF = all 8 sectors unprotected):
+STM32_Programmer_CLI -c port=SWD -ob <WRP_FIELD>=0xFF
+
+# 3. Verify nothing reads protected before proceeding:
 STM32_Programmer_CLI -c port=SWD -ob displ
 ```
 
@@ -315,6 +339,26 @@ nothing reaches the dispatcher.
 2. Within the 2 s auto-jump window, spam `cf discover` to cancel
    auto-jump and keep the BL on.
 3. Once BL responds, re-flash or debug the application.
+
+### "CubeProgrammer fails verify at `0x08000004` after an SWD BL flash"
+
+Symptom: erase + download report success, then **`Error: Data
+mismatch found at address 0x08000004`** (often `0x9D` instead of the
+expected reset-vector byte) and `Download verification failed`.
+
+Cause: **sector 0 is write-protected (WRP).** The erase and program
+were silently rejected, so the *old* bootloader is still in flash —
+the mismatch is at the reset vector, the first word that differs
+between the old and new image (the stack-pointer word at `0x08000000`
+usually matches, which is why the first reported mismatch is at
+`+4`). This is the expected state on any board that has had
+`apply-wrp` run on it (e.g. a provisioned production unit, or a bench
+board after testing WRP).
+
+Fix: clear WRP per [§2.1](#step-21--clear-wrp) (reprogram the `WRPSn`
+option byte — **not** "Full chip erase", which can't clear WRP on the
+H7), then reflash. On a bench / iteration board, leave WRP off
+afterward.
 
 ### "WRP is stuck on and I need to update the BL"
 
