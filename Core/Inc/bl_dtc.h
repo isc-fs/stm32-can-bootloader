@@ -77,6 +77,13 @@
                                           * out as the root cause on first
                                           * bench-replay; left in the log-ring
                                           * message for completeness). #94. */
+#define BL_DTC_FDCAN_BUSOFF     0x0040U  /* FDCAN entered Bus_Off and the main
+                                          * loop performed a Stop/Start recovery
+                                          * (issue #125 C1). context_data = the
+                                          * recovery-attempt count at the time of
+                                          * this event. WARN severity — recovery
+                                          * is automatic; the DTC is a breadcrumb
+                                          * that the bus had a hard fault. */
 
 /* ---- Entry layout (20 bytes, no padding) ---- */
 typedef struct {

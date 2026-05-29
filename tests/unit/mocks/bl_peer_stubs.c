@@ -58,6 +58,12 @@ bl_flash_status_t bl_flash_erase(uint32_t start,
     if (sectors_erased != NULL) {
         *sectors_erased = 0U;
     }
+    /* #125 H6: mirror the real bl_flash_erase, which times the erase
+     * and records its duration. The real timing (DWT) lives in the
+     * firmware-only bl_flash.c; here we just record 0 ms so the
+     * dispatcher-level plumbing test (FLASH_ERASE → a duration is
+     * recorded) still validates against the stubbed flash layer. */
+    bl_health_record_flash_op_ms(0U);
     return BL_FLASH_OK;
 }
 
@@ -94,6 +100,16 @@ void bl_health_fill_record(bl_health_record_t *out)
         memset(out, 0, sizeof(*out));
     }
 }
+
+/* #125 H6 probe: observable stub. `handle_flash_erase` (real, in the
+ * test build) calls this with the measured erase duration. The timing
+ * value is 0 in the host harness (the flash stub returns instantly and
+ * the mock tick doesn't auto-advance), so tests assert it was *called*
+ * — i.e. the probe plumbing is wired — not a specific duration. */
+static int g_flash_op_ms_calls = 0;
+void bl_health_record_flash_op_ms(uint32_t ms) { (void)ms; g_flash_op_ms_calls++; }
+int  mock_flash_op_ms_calls(void)              { return g_flash_op_ms_calls; }
+void mock_flash_op_ms_reset(void)              { g_flash_op_ms_calls = 0; }
 
 
 /* ---- bl_live ---- */

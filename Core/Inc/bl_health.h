@@ -55,7 +55,14 @@ typedef struct {
     uint32_t flash_write_count; /* offset 12 — 0 until Phase 4 NVM     */
     uint32_t dtc_count;         /* offset 16 — 0 until feat/12-dtc     */
     uint32_t last_dtc_code;     /* offset 20 — 0 until feat/12-dtc     */
-    uint32_t reserved[2];       /* offset 24..31 — zero                */
+    uint32_t fdcan_recovery_count; /* offset 24 — FDCAN bus-off Stop/Start
+                                    *             recoveries this boot (#125 C1).
+                                    *             Formerly reserved[0]; byte
+                                    *             layout unchanged.            */
+    uint32_t max_flash_op_ms;   /* offset 28 — longest blocking flash op
+                                 *             (erase) observed this boot, ms
+                                 *             (#125 H6 probe — sizes the future
+                                 *             IWDG period). Formerly reserved[1]. */
 } bl_health_record_t;
 
 _Static_assert(sizeof(bl_health_record_t) == BL_HEALTH_RECORD_SIZE,
@@ -81,6 +88,19 @@ uint32_t bl_health_flags(void);
 
 /* Fill the 32-byte health record with current state. */
 void bl_health_fill_record(bl_health_record_t *out);
+
+/* #125 C1: record one FDCAN bus-off Stop/Start recovery attempt.
+ * Bumps the per-boot counter surfaced in the health record + returns
+ * nothing; the caller (main-loop bus-off poll) also logs a DTC. */
+void bl_health_record_fdcan_recovery(void);
+uint32_t bl_health_fdcan_recovery_count(void);
+
+/* #125 H6 probe: report the duration (ms) of a completed blocking
+ * flash op (sector erase). Tracks the per-boot maximum, surfaced in
+ * the health record so the bench can read the worst-case erase time
+ * and we can size the IWDG period correctly before enabling it. */
+void bl_health_record_flash_op_ms(uint32_t ms);
+uint32_t bl_health_max_flash_op_ms(void);
 
 /* Main-loop tick. Called every iteration with HAL_GetTick(). Emits
  * NOTIFY_HEARTBEAT once per second while a session is active; no-op
