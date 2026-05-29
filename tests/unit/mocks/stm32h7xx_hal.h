@@ -192,4 +192,14 @@ int  mock_flash_erase_call_count(void);
 void mock_set_tick(uint32_t t);
 void mock_advance_tick(uint32_t dt);
 
+/* Bootloader jump observability (bl_peer_stubs.c) — for #125 C2 tests. */
+int  mock_bootloader_jump_count(void);
+void mock_bootloader_reset(void);
+void mock_set_check_application(uint8_t rv);
+
+/* OB_APPLY_WRP observability (bl_peer_stubs.c) — for #125 C4 tests. */
+uint32_t mock_ob_apply_wrp_last_mask(void);
+int      mock_ob_apply_wrp_calls(void);
+void     mock_ob_apply_wrp_reset(void);
+
 #endif /* STM32H7XX_HAL_H */
