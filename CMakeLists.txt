@@ -51,6 +51,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bl_fwinfo.c
     Core/Src/bl_health.c
     Core/Src/bl_dtc.c
+    Core/Src/bl_fault.c
     Core/Src/bl_log.c
     Core/Src/bl_live.c
     Core/Src/bl_node_id.c

@@ -30,6 +30,7 @@
 #include "bl_memmap.h"
 #include "bl_config.h"
 #include "bl_dtc.h"
+#include "bl_fault.h"
 #include "bl_health.h"
 #include "bl_live.h"
 #include "bl_log.h"
@@ -350,6 +351,20 @@ static void Bootloader_Init(void) {
 	bl_log_info("bootloader up (reset_cause=%u)",
 	            (unsigned int)bl_health_reset_cause());
 
+	/* #125 H6 (reset-on-spin): if the previous boot ended in a
+	 * controlled reboot from a terminal fault (a CPU fault handler,
+	 * Error_Handler, or a failed FDCAN init), bl_fault left a
+	 * reset-surviving breadcrumb. Log it now — in this safe post-reset
+	 * context, where bl_dtc_log's NOTIFY path is fine — so the cause is
+	 * visible via `diagnose dtc` / health.last_dtc_code. One-shot:
+	 * take_pending clears it. */
+	uint8_t fault_reason = BL_FAULT_NONE;
+	if (bl_fault_take_pending(&fault_reason)) {
+		bl_dtc_log(BL_DTC_CPU_FAULT, BL_DTC_SEV_FATAL, (uint32_t)fault_reason);
+		bl_log_error("recovered from fault reboot (reason=%u)",
+		             (unsigned int)fault_reason);
+	}
+
 	/* Zero the live-data counters. The snapshot is pulled together on
 	 * demand in bl_live_tick, so no persistent state needs initialising
 	 * beyond this. */
@@ -381,15 +396,17 @@ static void Bootloader_Init(void) {
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */
 	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
+		/* #125 H6: a failed FDCAN bring-up used to spin here forever —
+		 * the board went dead with no CAN, unflashable. Reboot instead;
+		 * a transient init failure self-recovers, and the breadcrumb
+		 * surfaces a BL_DTC_CPU_FAULT next boot. */
 		LED_ERR_ON();
-		while (1) {
-		}
+		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
 
 	if (HAL_FDCAN_Start(&hfdcan2) != HAL_OK) {
 		LED_ERR_ON();
-		while (1) {
-		}
+		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
 
 	/* NOTE on FDCAN interrupts: the main loop drains RX_FIFO0 by
@@ -824,10 +841,13 @@ static uint8_t Bootloader_IsBootRequestActive(void) {
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-	/* User can add his own implementation to report the HAL error return state */
+	/* #125 H6: HAL failures (mostly clock config in SystemClock_Config)
+	 * used to spin here forever — a marginal HSE would leave the board
+	 * dead before CAN even started. Reboot instead so a transient
+	 * failure self-recovers; a hard failure loops slowly (bl_fault's
+	 * dwell) and stays SWD-recoverable. */
 	__disable_irq();
-	while (1) {
-	}
+	bl_fault_reboot(BL_FAULT_ERROR_HANDLER);
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT
