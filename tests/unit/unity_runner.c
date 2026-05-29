@@ -18,6 +18,7 @@ void setUp(void)
     mock_flash_reset();
     mock_bootloader_reset();   /* clear jump counter + reset CheckApplication rv */
     mock_ob_apply_wrp_reset(); /* clear OB_APPLY_WRP mask/call record (#125 C4) */
+    mock_flash_op_ms_reset();  /* clear flash-op-duration probe record (#125 H6) */
 }
 
 void tearDown(void)
@@ -110,6 +111,7 @@ void test_session_timeout_clean_diagnostic_session_still_jumps(void);
 void test_ob_apply_wrp_rejects_non_bootloader_sector(void);
 void test_ob_apply_wrp_accepts_bootloader_sector(void);
 void test_ob_apply_wrp_forces_sector0_when_mask_zero(void);
+void test_flash_erase_records_op_duration(void);
 
 /* ---- test_bl_node_id.c ---- */
 void test_node_id_falls_back_to_compile_time_on_empty_nvm(void);
@@ -228,6 +230,7 @@ int main(void)
     RUN_TEST(test_ob_apply_wrp_rejects_non_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_accepts_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_forces_sector0_when_mask_zero);
+    RUN_TEST(test_flash_erase_records_op_duration);
 
     /* test_bl_node_id.c */
     RUN_TEST(test_node_id_falls_back_to_compile_time_on_empty_nvm);

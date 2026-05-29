@@ -924,3 +924,25 @@ void test_ob_apply_wrp_forces_sector0_when_mask_zero(void)
     TEST_ASSERT_EQUAL_INT(1, mock_ob_apply_wrp_calls());
     TEST_ASSERT_EQUAL_UINT32(0x01U, mock_ob_apply_wrp_last_mask()); /* forced to sector 0 */
 }
+
+/* ---- #125 H6 probe: FLASH_ERASE reports its duration ---- */
+
+void test_flash_erase_records_op_duration(void)
+{
+    /* The erase-duration probe (H6) brackets bl_flash_erase with
+     * HAL_GetTick and reports the elapsed ms to bl_health, which
+     * surfaces the per-boot max in the health record so the bench can
+     * read the worst-case erase time (→ sizes the future IWDG period).
+     * Host-side the duration is 0 (instant stub + frozen mock tick),
+     * so we assert the plumbing fired: handle_flash_erase called the
+     * recorder exactly once.
+     *
+     * FLASH_ERASE args = start_le32 + length_le32 = 8 bytes → the
+     * message is 10 bytes, so it arrives as FF + CF (multi-frame). */
+    prime_session();
+    uint8_t eargs[8] = { 0x00U, 0x00U, 0x02U, 0x08U,   /* start = 0x08020000 */
+                         0x00U, 0x00U, 0x02U, 0x00U };  /* length = 0x20000   */
+    send_cmd_multiframe((uint8_t)BL_CMD_FLASH_ERASE, eargs, 8U);
+
+    TEST_ASSERT_EQUAL_INT(1, mock_flash_op_ms_calls());
+}
