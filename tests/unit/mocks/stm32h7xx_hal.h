@@ -202,4 +202,8 @@ uint32_t mock_ob_apply_wrp_last_mask(void);
 int      mock_ob_apply_wrp_calls(void);
 void     mock_ob_apply_wrp_reset(void);
 
+/* Flash-op-duration probe observability (bl_peer_stubs.c) — #125 H6. */
+int  mock_flash_op_ms_calls(void);
+void mock_flash_op_ms_reset(void);
+
 #endif /* STM32H7XX_HAL_H */

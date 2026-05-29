@@ -35,6 +35,12 @@ static uint32_t g_last_heartbeat_ms   = 0U;
  * to bl_health_fill_record. */
 static uint32_t g_flash_write_count   = 0U;
 
+/* #125 C1/H6 instrumentation, per-boot, RAM-only (not persisted —
+ * these are live diagnostics for the bench, surfaced in the health
+ * record's formerly-reserved fields). */
+static uint32_t g_fdcan_recovery_count = 0U;
+static uint32_t g_max_flash_op_ms      = 0U;
+
 /* Map an RCC->RSR snapshot to a single BL_RESET_* value.
  *
  * In normal operation only one flag is set per reset cycle because
@@ -127,10 +133,32 @@ void bl_health_fill_record(bl_health_record_t *out)
     out->reset_cause       = (uint32_t)g_reset_cause;
     out->flags             = bl_health_flags();
     out->flash_write_count = g_flash_write_count;
-    out->dtc_count         = (uint32_t)bl_dtc_count();
-    out->last_dtc_code     = (uint32_t)bl_dtc_last_code();
-    out->reserved[0]       = 0U;
-    out->reserved[1]       = 0U;
+    out->dtc_count            = (uint32_t)bl_dtc_count();
+    out->last_dtc_code        = (uint32_t)bl_dtc_last_code();
+    out->fdcan_recovery_count = g_fdcan_recovery_count;
+    out->max_flash_op_ms      = g_max_flash_op_ms;
+}
+
+void bl_health_record_fdcan_recovery(void)
+{
+    g_fdcan_recovery_count++;
+}
+
+uint32_t bl_health_fdcan_recovery_count(void)
+{
+    return g_fdcan_recovery_count;
+}
+
+void bl_health_record_flash_op_ms(uint32_t ms)
+{
+    if (ms > g_max_flash_op_ms) {
+        g_max_flash_op_ms = ms;
+    }
+}
+
+uint32_t bl_health_max_flash_op_ms(void)
+{
+    return g_max_flash_op_ms;
 }
 
 void bl_health_tick(uint32_t now_ms)
