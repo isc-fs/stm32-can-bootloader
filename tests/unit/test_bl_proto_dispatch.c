@@ -794,3 +794,133 @@ void test_send_notify_emitted_when_idle(void)
     TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_ISOTP_PCI_FF, (uint8_t)(tx->data[0] & 0xF0U));
     TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_MSG_NOTIFY,   tx->data[2]);
 }
+
+/* ---- #125 C2: session-timeout must not auto-jump after a flash ---- */
+
+void test_session_timeout_after_flash_does_not_jump(void)
+{
+    /* The nightmare path: host starts reflashing (FLASH_WRITE), then
+     * the link drops. 30 s later the session watchdog fires. The OLD
+     * app metadata still validates (it's only rewritten on the host's
+     * explicit FLASH_VERIFY), so pre-fix the BL would auto-jump into a
+     * half-written binary — recoverable only by SWD. The flash-dirty
+     * latch must suppress that jump and keep the BL in listen mode. */
+    mock_set_tick(1000U);
+    prime_session();                       /* CONNECT at t=1000 */
+
+    /* A FLASH_WRITE marks the session flash-dirty (addr = BL_APP_BASE
+     * 0x08020000 LE + one data byte). */
+    uint8_t wargs[5] = { 0x00U, 0x00U, 0x02U, 0x08U, 0xAAU };
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+    mock_fdcan_reset();
+
+    /* Host vanishes past the session timeout, then the watchdog ticks. */
+    mock_advance_tick(31000U);
+    bl_proto_tick(HAL_GetTick());
+
+    TEST_ASSERT_EQUAL_INT(0, mock_bootloader_jump_count());   /* did NOT jump */
+    TEST_ASSERT_FALSE(bl_proto_session_active());             /* session torn down */
+}
+
+void test_session_timeout_clean_diagnostic_session_still_jumps(void)
+{
+    /* Regression guard the other way: a pure CONNECT + (no flash)
+     * session that times out SHOULD still hand control to a valid app,
+     * so a one-off diagnostic poke doesn't strand the board in the
+     * bootloader. Only flash-dirty sessions suppress the jump. */
+    mock_set_tick(1000U);
+    prime_session();                       /* CONNECT only, no flash */
+
+    mock_advance_tick(31000U);
+    bl_proto_tick(HAL_GetTick());
+
+    TEST_ASSERT_EQUAL_INT(1, mock_bootloader_jump_count());   /* jumped to valid app */
+    TEST_ASSERT_FALSE(bl_proto_session_active());
+}
+
+/* ---- #125 C4: OB_APPLY_WRP sector-bitmap validation ---- */
+
+/* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + one CF and
+ * dispatch both. Covers 8..13-byte messages (FF carries 6 bytes, CF
+ * up to 7) — enough for the 10-byte OB_APPLY_WRP (token + bitmap)
+ * which doesn't fit a single SF. Not a general segmenter. */
+static void send_cmd_multiframe(uint8_t opcode, const uint8_t *args, uint8_t args_len)
+{
+    bl_proto_id_t id = host_to_us();
+    uint8_t total = (uint8_t)(2U + args_len);   /* msg_type + opcode + args */
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(13U, total);
+
+    uint8_t msg[16] = { 0 };
+    msg[0] = (uint8_t)BL_MSG_CMD;
+    msg[1] = opcode;
+    for (uint8_t i = 0U; i < args_len; i++) {
+        msg[2U + i] = args[i];
+    }
+
+    /* FF: PCI high nibble = 0x1, 12-bit total length, then 6 bytes. */
+    uint8_t ff[8];
+    ff[0] = (uint8_t)(BL_ISOTP_PCI_FF | ((total >> 8) & 0x0FU));
+    ff[1] = (uint8_t)(total & 0xFFU);
+    for (uint8_t i = 0U; i < 6U; i++) {
+        ff[2U + i] = msg[i];
+    }
+    bl_proto_dispatch(&id, ff, 8U);
+
+    /* CF seq 1: the remaining bytes. */
+    uint8_t rem = (uint8_t)(total - 6U);
+    uint8_t cf[8];
+    cf[0] = (uint8_t)(BL_ISOTP_PCI_CF | 0x01U);
+    for (uint8_t i = 0U; i < rem; i++) {
+        cf[1U + i] = msg[6U + i];
+    }
+    bl_proto_dispatch(&id, cf, (uint8_t)(1U + rem));
+}
+
+/* The valid OB_APPLY_WRP token (BL_OB_APPLY_TOKEN = 0x00505257, "WRP\0")
+ * as little-endian wire bytes. */
+#define OB_TOKEN_LE  0x57U, 0x52U, 0x50U, 0x00U
+
+void test_ob_apply_wrp_rejects_non_bootloader_sector(void)
+{
+    /* The permanent-brick path: a host (bug or finger-trouble) asks to
+     * WRP an app sector. Pre-fix the BL would WRP it and reset, after
+     * which the ECU can never be reflashed over CAN. The validation
+     * must NACK and the request must never reach the option-byte
+     * layer. */
+    prime_session();
+    uint8_t args[8] = { OB_TOKEN_LE, 0x02U, 0x00U, 0x00U, 0x00U }; /* mask = sector 1 */
+    send_cmd_multiframe((uint8_t)BL_CMD_OB_APPLY_WRP, args, 8U);
+
+    int n = mock_fdcan_tx_count();
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, n);
+    const mock_fdcan_frame_t *tx = mock_fdcan_get(n - 1);   /* last reply = the NACK */
+    TEST_ASSERT_NOT_NULL(tx);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_MSG_NACK,         tx->data[1]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_CMD_OB_APPLY_WRP, tx->data[2]);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_NACK_UNSUPPORTED, tx->data[3]);
+    TEST_ASSERT_EQUAL_INT(0, mock_ob_apply_wrp_calls());   /* never reached OB layer */
+}
+
+void test_ob_apply_wrp_accepts_bootloader_sector(void)
+{
+    /* The intended use: token only (SF) → default mask 0x01 → applies
+     * to exactly sector 0. */
+    prime_session();
+    uint8_t args[4] = { OB_TOKEN_LE };
+    send_cmd_sf((uint8_t)BL_CMD_OB_APPLY_WRP, args, 4U);
+
+    TEST_ASSERT_EQUAL_INT(1, mock_ob_apply_wrp_calls());
+    TEST_ASSERT_EQUAL_UINT32(0x01U, mock_ob_apply_wrp_last_mask());
+}
+
+void test_ob_apply_wrp_forces_sector0_when_mask_zero(void)
+{
+    /* A host that explicitly passes mask 0x00 must NOT end up shipping
+     * an unprotected bootloader — bit 0 is forced on. */
+    prime_session();
+    uint8_t args[8] = { OB_TOKEN_LE, 0x00U, 0x00U, 0x00U, 0x00U }; /* mask = 0 */
+    send_cmd_multiframe((uint8_t)BL_CMD_OB_APPLY_WRP, args, 8U);
+
+    TEST_ASSERT_EQUAL_INT(1, mock_ob_apply_wrp_calls());
+    TEST_ASSERT_EQUAL_UINT32(0x01U, mock_ob_apply_wrp_last_mask()); /* forced to sector 0 */
+}
