@@ -736,3 +736,61 @@ void test_dispatch_unknown_opcode_nacks_unsupported(void)
     TEST_ASSERT_EQUAL_UINT8(0x99U,                       tx->data[2]);
     TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_NACK_UNSUPPORTED, tx->data[3]);
 }
+
+/* ---- #123 (general fix): NOTIFY suppression during reassembly ---- */
+
+void test_send_notify_suppressed_while_reassembly_in_flight(void)
+{
+    /* Regression guard for audit finding H1 / issue #123. While an
+     * inbound multi-frame transfer is mid-flight (g_rx in WAIT_CF), an
+     * unsolicited NOTIFY (heartbeat / live-data / log / DTC — all route
+     * through bl_proto_send_notify) must NOT be emitted: dropping a
+     * multi-frame NOTIFY onto the bus mid-WRITE_CHUNK strands the
+     * host's transfer (BlockSize=0 → no pacing) → 1 s timeout → NACK
+     * 0x09. This is exactly the failure the bench saw. */
+    reset_session_and_tx();
+
+    /* Feed a First Frame so the reassembler enters WAIT_CF. total=134
+     * (0x86) means it now expects CFs. The FF itself triggers one
+     * FC(CTS) reply — clear it so the assertion sees only what the
+     * NOTIFY does (or doesn't) emit. */
+    bl_proto_id_t id = host_to_us();
+    uint8_t ff[8] = { 0x10U, 0x86U, (uint8_t)BL_MSG_CMD,
+                      (uint8_t)BL_CMD_FLASH_WRITE, 0x00U, 0x00U, 0x02U, 0x08U };
+    bl_proto_dispatch(&id, ff, 8U);
+    TEST_ASSERT_EQUAL_UINT16(6U, bl_proto_isotp_rx_progress()); /* WAIT_CF, 6 bytes in */
+    mock_fdcan_reset();
+
+    /* A heartbeat-shaped NOTIFY while mid-reassembly → suppressed. */
+    uint8_t notify[7] = { 0xF0U, 0x01U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U };
+    bl_proto_send_notify(notify, (uint16_t)sizeof(notify));
+    TEST_ASSERT_EQUAL_INT(0, mock_fdcan_tx_count());
+}
+
+void test_send_notify_emitted_when_idle(void)
+{
+    /* Control: with no reassembly in flight, the same NOTIFY DOES go
+     * out — confirms the gate only suppresses during WAIT_CF and
+     * doesn't silence heartbeats on an idle link.
+     *
+     * Note the 7-byte heartbeat payload becomes an 8-byte message
+     * (send_message prepends msg_type) which exceeds the 7-byte SF
+     * limit → it ships as FF + CF (2 frames). That multi-frame shape
+     * is precisely why an unsolicited heartbeat mid-transfer was so
+     * destructive in #123 — so the control asserts "emitted at all"
+     * rather than a specific frame count, keeping it robust to
+     * ISO-TP framing details covered by other tests. */
+    reset_session_and_tx();
+    TEST_ASSERT_EQUAL_UINT16(0U, bl_proto_isotp_rx_progress());
+
+    uint8_t notify[7] = { 0xF0U, 0x01U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U };
+    bl_proto_send_notify(notify, (uint16_t)sizeof(notify));
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, mock_fdcan_tx_count());
+    /* First frame is the ISO-TP FF: data[0]=FF PCI, data[1]=len low
+     * byte, data[2]=msg_type. Confirm it's a NOTIFY. */
+    const mock_fdcan_frame_t *tx = mock_fdcan_get(0);
+    TEST_ASSERT_NOT_NULL(tx);
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_ISOTP_PCI_FF, (uint8_t)(tx->data[0] & 0xF0U));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)BL_MSG_NOTIFY,   tx->data[2]);
+}
