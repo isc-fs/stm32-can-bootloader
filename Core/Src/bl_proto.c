@@ -1236,6 +1236,28 @@ bool bl_proto_session_active(void)
 
 void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
 {
+    /* #123 (general fix): never inject an unsolicited NOTIFY while an
+     * inbound multi-frame reassembly is in flight. The heartbeat is
+     * not the only emitter — NOTIFY_LIVE_DATA (multi-frame, up to
+     * 50 Hz), NOTIFY_LOG (multi-frame, up to 257 B) and NOTIFY_DTC
+     * all reach here, and any of them dropped onto the bus mid-
+     * WRITE_CHUNK strands the host's transfer exactly as the heartbeat
+     * did: with ISO-TP Flow Control BlockSize=0 the host streams a
+     * whole chunk without pausing, so a mid-transfer NOTIFY desyncs
+     * the exchange → 1 s reassembly timeout → NACK 0x09.
+     *
+     * Suppressing here (the single choke point for every NOTIFY)
+     * rather than per-emitter means a future NOTIFY source can't
+     * reintroduce the bug. A suppressed periodic NOTIFY is simply
+     * dropped — the next tick re-emits a fresh one once the bus is
+     * idle. `bl_proto_isotp_rx_progress() != 0` is true exactly while
+     * g_rx is in WAIT_CF (mid-reassembly). The heartbeat additionally
+     * has its own quiet-link gate in bl_health_tick covering the
+     * brief idle gaps between chunks. */
+    if (bl_proto_isotp_rx_progress() != 0U) {
+        return;
+    }
+
     /* NOTIFY always goes to the host. Unsolicited — does not
      * refresh the session watchdog. */
     send_message(BL_MSG_NOTIFY, payload, length);
