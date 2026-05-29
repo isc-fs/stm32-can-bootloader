@@ -382,6 +382,22 @@ static void Bootloader_Init(void) {
 		}
 	}
 
+	/* #125 M3: guard the issue #94 fix. AutoRetransmission MUST be
+	 * ENABLE or lost-arbitration frames are silently dropped while
+	 * tx->seq has already advanced — which corrupts multi-frame TX
+	 * sequencing on a contended bus (the #94 Bug B signature). That's
+	 * set in MX_FDCAN2_Init, but a CubeMX regeneration could flip it
+	 * back with no test catching it. Read the LIVE peripheral register
+	 * (CCCR.DAR = "Disable Automatic Retransmission") rather than the
+	 * RAM Init struct, so this actually reflects hardware state. DAR
+	 * set ⇒ retransmission disabled ⇒ regression. Log loudly; the BL
+	 * still runs (degraded) so the bus stays reachable to reflash a
+	 * corrected build. */
+	if ((hfdcan2.Instance->CCCR & FDCAN_CCCR_DAR) != 0U) {
+		bl_log_error("FDCAN AutoRetransmission DISABLED (CCCR.DAR set) — "
+		             "issue #94 regression; multi-frame TX will desync");
+	}
+
 	/* NOTE on FDCAN interrupts: the main loop drains RX_FIFO0 by
 	 * polling (HAL_FDCAN_GetRxFifoFillLevel + GetRxMessage below), so
 	 * we deliberately do NOT activate FDCAN_IT_RX_FIFO0_NEW_MESSAGE.
@@ -413,14 +429,32 @@ static void Bootloader_Init(void) {
 	}
 }
 
+/* #125 H3: max RX frames drained per main-loop pass. Sized to the
+ * RX_FIFO0 depth (MX_FDCAN2_Init's RxFifo0ElmtsNbr = 16) so a full
+ * FIFO can be cleared in one pass, while bounding the work so the
+ * per-pass ticks (session watchdog, bus-off recovery) always run. */
+#define BL_FDCAN_RX_DRAIN_BUDGET   16U
+
 static void Bootloader_MainLoop(void) {
 	FDCAN_RxHeaderTypeDef rxHeader;
 	uint8_t rxData[8];
 
 	while (1) {
-		/* Drain any pending frames — each one cancels the auto-jump and
-		 * is handed off to the protocol dispatcher. */
-		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0) {
+		/* Drain pending RX frames — each cancels the auto-jump and is
+		 * handed to the protocol dispatcher.
+		 *
+		 * #125 H3: drain up to a bounded BATCH per loop pass (the FIFO
+		 * is only 16 deep). The old one-frame-per-pass let RX_FIFO0
+		 * overflow after any stall — a blocking flash op, or the
+		 * per-tick work below — because the host streams CFs at ~3 kHz
+		 * during a multi-frame transfer. Draining a batch clears a
+		 * post-stall backlog in a single pass; the budget cap means a
+		 * continuous host flood still can't starve the ticks (session
+		 * watchdog, bus-off recovery) at the bottom of the loop. */
+		uint8_t rx_budget = BL_FDCAN_RX_DRAIN_BUDGET;
+		while (rx_budget > 0U &&
+		       HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0U) {
+			rx_budget--;
 			if (HAL_FDCAN_GetRxMessage(&hfdcan2,
 			FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
 
