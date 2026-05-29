@@ -66,6 +66,17 @@ static bool g_session_active = false;
  * are not watchdogged. */
 static uint32_t g_session_last_activity_ms = 0U;
 
+/* #125 C2: set once a FLASH_ERASE or FLASH_WRITE has run in the
+ * current session — i.e. the installed app image may now be
+ * partially overwritten. While set, a session timeout must NOT
+ * auto-jump into the app: the old metadata can still pass
+ * CheckApplication (it's only rewritten on the host's explicit
+ * FLASH_VERIFY), so a mid-flash link drop would otherwise launch a
+ * half-erased / half-written binary — and recovering from that needs
+ * SWD (open the sealed enclosure). Cleared on CONNECT (fresh session)
+ * and DISCONNECT. */
+static bool g_session_flash_dirty = false;
+
 static void session_touch_activity(void)
 {
     g_session_last_activity_ms = HAL_GetTick();
@@ -80,8 +91,27 @@ static void session_timeout(void)
     bl_dtc_log(BL_DTC_SESSION_TIMEOUT, BL_DTC_SEV_WARN, 0U);
     bl_log_warn("session timeout, tearing down");
 
+    bool was_flash_dirty = g_session_flash_dirty;
+
     g_session_active = false;
+    g_session_flash_dirty = false;
     bl_isotp_rx_init(&g_rx);
+
+    /* #125 C2: if a flash mutation happened this session, the host
+     * abandoned us mid-reflash. Do NOT jump — the app region may be
+     * half-programmed even though stale metadata still validates.
+     * Stay in listen mode so a reconnecting host can finish the
+     * flash. A clean unattended boot still auto-jumps via the
+     * cold-boot window in main.c; this only suppresses the
+     * post-interrupted-flash jump.
+     *
+     * For a pure-diagnostic session (CONNECT + health/discover, no
+     * flash), the original behaviour is preserved: hand control to a
+     * valid app so a one-off poke doesn't strand the board in BL. */
+    if (was_flash_dirty) {
+        bl_log_warn("flash-dirty session timed out; staying in bootloader");
+        return;
+    }
 
     /* Host abandoned us. If a valid application is installed, hand
      * control over; otherwise stay in listen mode for a future
@@ -316,6 +346,7 @@ static void handle_connect(uint8_t peer, const uint8_t *args, uint16_t args_len)
     }
 
     g_session_active = true;
+    g_session_flash_dirty = false;  /* fresh session: clear flash-dirty latch (#125 C2) */
     session_touch_activity();  /* arm the watchdog starting now */
 
     bl_log_info("CONNECT from 0x%X (host proto %u.%u)",
@@ -336,6 +367,7 @@ static void handle_disconnect(uint8_t peer, uint16_t args_len)
 {
     (void)args_len;
     g_session_active = false;
+    g_session_flash_dirty = false;  /* clean teardown: clear flash-dirty latch (#125 C2) */
     uint8_t resp[1] = { BL_CMD_DISCONNECT };
     send_ack(resp, (uint16_t)sizeof(resp));
 }
@@ -719,6 +751,10 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
         send_nack(BL_CMD_FLASH_ERASE, BL_NACK_BAD_SESSION);
         return;
     }
+    /* #125 C2: a flash mutation is now in progress — the app image may
+     * become inconsistent. Mark the session so a subsequent timeout
+     * won't auto-jump into a half-flashed binary. */
+    g_session_flash_dirty = true;
     if (args_len < 8U) {
         send_nack(BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
         return;
@@ -757,6 +793,9 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
         send_nack(BL_CMD_FLASH_WRITE, BL_NACK_BAD_SESSION);
         return;
     }
+    /* #125 C2: mark the app image as in-flux for the rest of this
+     * session (see handle_flash_erase + session_timeout). */
+    g_session_flash_dirty = true;
     if (args_len < 5U) {
         /* Need at least the address plus one data byte. */
         send_nack(BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
@@ -956,6 +995,25 @@ static void handle_ob_apply_wrp(uint8_t peer, const uint8_t *args, uint16_t args
     if (args_len >= 8U) {
         sector_bitmap = read_le32(&args[4]);
     }
+
+    /* #125 C4: this BL's WRP policy protects exactly the bootloader
+     * sector (0) and nothing else. WRP'ing an app sector (1..6) would
+     * make the ECU un-reflashable over CAN; WRP'ing the NVM sector (7)
+     * would break NVM compaction — and on recent H7 silicon WRP clears
+     * only via an external-debugger full chip erase (open the sealed
+     * enclosure). So we refuse any mask that asks to protect a
+     * non-bootloader sector rather than silently bricking
+     * re-flashability, and we always force bit 0 on so a host that
+     * passes 0x00 can't ship an unprotected bootloader. A future
+     * multi-sector provisioning need should be an explicit, separate
+     * opcode — never a free-form bitmap on the one-way WRP path. */
+    if ((sector_bitmap & ~0x01U) != 0U) {
+        bl_log_warn("OB_APPLY_WRP refused unsafe mask=0x%08X (only sector 0 permitted)",
+                    (unsigned int)sector_bitmap);
+        send_nack(BL_CMD_OB_APPLY_WRP, BL_NACK_UNSUPPORTED);
+        return;
+    }
+    sector_bitmap |= 0x01U;
 
     bl_log_warn("OB_APPLY_WRP committing mask=0x%08X (reset imminent)",
                 (unsigned int)sector_bitmap);

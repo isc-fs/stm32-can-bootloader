@@ -16,6 +16,8 @@
 void setUp(void)
 {
     mock_flash_reset();
+    mock_bootloader_reset();   /* clear jump counter + reset CheckApplication rv */
+    mock_ob_apply_wrp_reset(); /* clear OB_APPLY_WRP mask/call record (#125 C4) */
 }
 
 void tearDown(void)
@@ -103,6 +105,11 @@ void test_handle_nvm_write_persists_value_visible_to_nvm_read_api(void);
 void test_dispatch_unknown_opcode_nacks_unsupported(void);
 void test_send_notify_suppressed_while_reassembly_in_flight(void);
 void test_send_notify_emitted_when_idle(void);
+void test_session_timeout_after_flash_does_not_jump(void);
+void test_session_timeout_clean_diagnostic_session_still_jumps(void);
+void test_ob_apply_wrp_rejects_non_bootloader_sector(void);
+void test_ob_apply_wrp_accepts_bootloader_sector(void);
+void test_ob_apply_wrp_forces_sector0_when_mask_zero(void);
 
 /* ---- test_bl_node_id.c ---- */
 void test_node_id_falls_back_to_compile_time_on_empty_nvm(void);
@@ -216,6 +223,11 @@ int main(void)
     RUN_TEST(test_dispatch_unknown_opcode_nacks_unsupported);
     RUN_TEST(test_send_notify_suppressed_while_reassembly_in_flight);
     RUN_TEST(test_send_notify_emitted_when_idle);
+    RUN_TEST(test_session_timeout_after_flash_does_not_jump);
+    RUN_TEST(test_session_timeout_clean_diagnostic_session_still_jumps);
+    RUN_TEST(test_ob_apply_wrp_rejects_non_bootloader_sector);
+    RUN_TEST(test_ob_apply_wrp_accepts_bootloader_sector);
+    RUN_TEST(test_ob_apply_wrp_forces_sector0_when_mask_zero);
 
     /* test_bl_node_id.c */
     RUN_TEST(test_node_id_falls_back_to_compile_time_on_empty_nvm);
