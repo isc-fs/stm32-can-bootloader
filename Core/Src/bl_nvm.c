@@ -10,6 +10,7 @@
 
 #include "bl_nvm.h"
 
+#include "bl_iwdg.h"
 #include "bl_memmap.h"
 #include "stm32h7xx_hal.h"
 
@@ -59,6 +60,13 @@ static HAL_StatusTypeDef erase_nvm_sector(void)
     init.Banks     = FLASH_BANK_1;
     init.Sector    = BL_NVM_SECTOR;
     init.NbSectors = 1U;
+
+    /* #125 H6: kick the IWDG before this single-sector stall. Erasing
+     * sector 7 stalls the single-bank CPU for ~1.8 s (same mechanism as
+     * the app erase in bl_flash.c); one sector fits inside the ~8 s IWDG
+     * period, but refreshing first guarantees a full window and keeps the
+     * invariant clean — no CPU stall in the BL runs un-kicked. */
+    bl_iwdg_refresh();
 
     uint32_t page_error = 0U;
     return HAL_FLASHEx_Erase(&init, &page_error);
