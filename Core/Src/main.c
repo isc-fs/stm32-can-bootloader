@@ -31,6 +31,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_health.h"
+#include "bl_iwdg.h"
 #include "bl_live.h"
 #include "bl_log.h"
 #include "bl_node_id.h"
@@ -320,6 +321,15 @@ static void MX_GPIO_Init(void)
 /* ===================== BOOTLOADER CORE ========================= */
 
 static void Bootloader_Init(void) {
+	/* #125 H6: start (or re-period) the IWDG as the very FIRST thing we
+	 * do — see bl_iwdg.h. On an app->BL reset (the `002` re-enter-BL
+	 * trick) we inherit the app's tight ~100 ms watchdog, still running;
+	 * this re-periods it to the BL's ~8 s and reloads the counter within a
+	 * few ms of reset, well before the inherited period could fire. On a
+	 * cold boot it simply arms the watchdog. Everything below (NVM scan,
+	 * filter config) then runs under the BL's own generous period. */
+	bl_iwdg_start();
+
 	LED_OK_ON();
 	LED_ERR_OFF();
 
@@ -488,6 +498,13 @@ static void Bootloader_MainLoop(void) {
 	uint8_t rxData[8];
 
 	while (1) {
+		/* #125 H6: kick the hardware watchdog every iteration. The loop
+		 * body is sub-millisecond except when a dispatch triggers a flash
+		 * erase — and bl_flash_erase / bl_nvm refresh between sectors
+		 * themselves, so the longest gap between kicks is a single ~1.8 s
+		 * sector erase, well inside the ~8 s IWDG period. */
+		bl_iwdg_refresh();
+
 		/* Drain any pending frames — each one cancels the auto-jump and
 		 * is handed off to the protocol dispatcher. */
 		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0) {
@@ -660,6 +677,13 @@ void Bootloader_JumpToApplication(void) {
 	}
 
 	/* --- Disable peripherals and jump --- */
+
+	/* #125 H6: kick the watchdog once more right before handing off, so
+	 * the app inherits a full ~8 s window to reach its own IWDG re-init
+	 * (the AMS app gets there in ~50-70 ms; IFS08-CE-AMS#280). Must happen
+	 * BEFORE the __set_MSP below — once the stack pointer is swapped to the
+	 * app's stack we can no longer make ordinary function calls. */
+	bl_iwdg_refresh();
 
 	HAL_FDCAN_DeInit(&hfdcan2);
 	HAL_DeInit();

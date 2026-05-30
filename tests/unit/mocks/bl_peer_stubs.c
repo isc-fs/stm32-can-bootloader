@@ -21,6 +21,7 @@
 #include "bl_dtc.h"
 #include "bl_flash.h"
 #include "bl_health.h"
+#include "bl_iwdg.h"
 #include "bl_live.h"
 #include "bl_obyte.h"
 #include "main.h"
@@ -110,6 +111,19 @@ static int g_flash_op_ms_calls = 0;
 void bl_health_record_flash_op_ms(uint32_t ms) { (void)ms; g_flash_op_ms_calls++; }
 int  mock_flash_op_ms_calls(void)              { return g_flash_op_ms_calls; }
 void mock_flash_op_ms_reset(void)              { g_flash_op_ms_calls = 0; }
+
+
+/* ---- bl_iwdg ---- */
+/* Observable stub. The real bl_nvm.c (host-built) kicks the watchdog
+ * before its sector-7 erase (#125 H6, brick-avoidance), so tests assert
+ * the kick fires and can't silently regress. bl_iwdg_start is a pure
+ * no-op — it's only ever called from main.c, which isn't in the host
+ * build. */
+static int g_iwdg_refresh_calls = 0;
+void bl_iwdg_start(void)            { }
+void bl_iwdg_refresh(void)          { g_iwdg_refresh_calls++; }
+int  mock_iwdg_refresh_calls(void)  { return g_iwdg_refresh_calls; }
+void mock_iwdg_refresh_reset(void)  { g_iwdg_refresh_calls = 0; }
 
 
 /* ---- bl_live ---- */

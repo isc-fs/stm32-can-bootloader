@@ -136,6 +136,22 @@ void test_nvm_format_wipes_sector_and_resets_pointers(void)
     TEST_ASSERT_EQUAL_HEX32(0xFFFFFFFFU, meta[0]);
 }
 
+/* #125 H6 (brick-avoidance): every flash-sector stall in the NVM path must
+ * kick the IWDG first. A sector-7 erase stalls the single-bank H733 for
+ * ~1.8 s; without a refresh the watchdog could fire mid-erase and leave
+ * the unit unflashable over CAN. erase_nvm_sector() calls bl_iwdg_refresh
+ * before the HAL erase, so the format's single sector erase kicks it. */
+void test_nvm_erase_kicks_the_watchdog(void)
+{
+    seed_and_init();
+
+    /* Isolate the format's erase from any kicks during seeding. */
+    mock_iwdg_refresh_reset();
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_format());
+
+    TEST_ASSERT_GREATER_OR_EQUAL(1, mock_iwdg_refresh_calls());
+}
+
 /* ---- Patch-2 coverage: bl_nvm_compact_replace_meta() ---- */
 
 void test_nvm_compact_replace_meta_preserves_live_entries(void)
