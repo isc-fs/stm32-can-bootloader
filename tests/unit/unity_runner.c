@@ -18,6 +18,8 @@ void setUp(void)
     mock_flash_reset();
     mock_bootloader_reset();   /* clear jump counter + reset CheckApplication rv */
     mock_ob_apply_wrp_reset(); /* clear OB_APPLY_WRP mask/call record (#125 C4) */
+    mock_flash_op_ms_reset();  /* clear flash-op-duration probe record (#125 H6) */
+    mock_iwdg_refresh_reset(); /* clear IWDG-kick record (#125 H6) */
 }
 
 void tearDown(void)
@@ -70,6 +72,7 @@ void test_nvm_tombstone_hides_previous_value(void);
 void test_nvm_live_count_tracks_unique_keys(void);
 void test_nvm_value_too_long_rejects(void);
 void test_nvm_format_wipes_sector_and_resets_pointers(void);
+void test_nvm_erase_kicks_the_watchdog(void);
 void test_nvm_compact_replace_meta_preserves_live_entries(void);
 void test_nvm_compact_replace_meta_writes_caller_metadata(void);
 void test_nvm_compact_replace_meta_erases_old_metadata(void);
@@ -110,6 +113,7 @@ void test_session_timeout_clean_diagnostic_session_still_jumps(void);
 void test_ob_apply_wrp_rejects_non_bootloader_sector(void);
 void test_ob_apply_wrp_accepts_bootloader_sector(void);
 void test_ob_apply_wrp_forces_sector0_when_mask_zero(void);
+void test_flash_erase_records_op_duration(void);
 
 /* ---- test_bl_node_id.c ---- */
 void test_node_id_falls_back_to_compile_time_on_empty_nvm(void);
@@ -188,6 +192,7 @@ int main(void)
     RUN_TEST(test_nvm_live_count_tracks_unique_keys);
     RUN_TEST(test_nvm_value_too_long_rejects);
     RUN_TEST(test_nvm_format_wipes_sector_and_resets_pointers);
+    RUN_TEST(test_nvm_erase_kicks_the_watchdog);
     RUN_TEST(test_nvm_compact_replace_meta_preserves_live_entries);
     RUN_TEST(test_nvm_compact_replace_meta_writes_caller_metadata);
     RUN_TEST(test_nvm_compact_replace_meta_erases_old_metadata);
@@ -228,6 +233,7 @@ int main(void)
     RUN_TEST(test_ob_apply_wrp_rejects_non_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_accepts_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_forces_sector0_when_mask_zero);
+    RUN_TEST(test_flash_erase_records_op_duration);
 
     /* test_bl_node_id.c */
     RUN_TEST(test_node_id_falls_back_to_compile_time_on_empty_nvm);

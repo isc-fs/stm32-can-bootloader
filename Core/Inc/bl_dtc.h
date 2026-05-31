@@ -77,6 +77,22 @@
                                           * out as the root cause on first
                                           * bench-replay; left in the log-ring
                                           * message for completeness). #94. */
+#define BL_DTC_FDCAN_BUSOFF     0x0040U  /* FDCAN entered Bus_Off and the main
+                                          * loop performed a Stop/Start recovery
+                                          * (issue #125 C1). context_data = the
+                                          * recovery-attempt count at the time of
+                                          * this event. WARN severity — recovery
+                                          * is automatic; the DTC is a breadcrumb
+                                          * that the bus had a hard fault. */
+#define BL_DTC_CPU_FAULT        0x0050U  /* the previous boot ended in a
+                                          * controlled reboot from a terminal
+                                          * spin — a CPU fault handler,
+                                          * Error_Handler, or a failed FDCAN
+                                          * init (issue #125 H6 reset-on-spin).
+                                          * Logged once, after recovery, by
+                                          * Bootloader_Init. context_data =
+                                          * BL_FAULT_* reason (see bl_fault.h).
+                                          * FATAL severity. */
 
 /* ---- Entry layout (20 bytes, no padding) ---- */
 typedef struct {

@@ -167,11 +167,16 @@ static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
  * never sees the ACK before NVIC_SystemReset / OB_Launch fires.
  *
  * Free level equals the configured queue depth exactly when every
- * frame has been transmitted (or aborted; AutoRetransmission=DISABLE
- * means a frame the bus refused to ACK won't sit in the queue
- * forever). The fallback timeout keeps us from hanging the BL if
- * the bus is genuinely offline — better to reset / launch and let
- * the host detect via session timeout than to brick the device.
+ * frame has been transmitted. NOTE (#125 M4): AutoRetransmission is
+ * ENABLE on this BL (see MX_FDCAN2_Init / issue #94), so a frame that
+ * keeps losing arbitration is retried indefinitely rather than
+ * aborted — it WILL sit in the queue until it wins the bus or the
+ * node faults. The `max_ms` fallback is therefore the real bound: a
+ * timeout here means TX did NOT drain (bus contended or offline), not
+ * "drained cleanly." We proceed anyway — better to reset / launch and
+ * let the host detect via its session timeout than to hang the BL.
+ * (The earlier comment here described the AutoRetransmission=DISABLE
+ * behaviour, which is stale since the #94 fix flipped it to ENABLE.)
  *
  * Issue #68 ("HAL_Delay-based 'let ACK drain'" bullet). */
 static void wait_tx_drain(uint32_t max_ms)
@@ -211,7 +216,26 @@ static void send_raw(const uint8_t *data, uint8_t length)
      * still count the attempt; the host sees the attempt rate. */
     bl_live_frame_tx();
 
-    (void)HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data);
+    /* #125 H4: don't silently swallow a TX enqueue failure. A full TX
+     * FIFO (depth 16) under bus contention means a frame — possibly an
+     * FC(CTS) or an ACK — never reached the wire, which can wedge an
+     * in-flight transfer (the host waits for a reply that never comes).
+     * We deliberately do NOT add a blocking backpressure wait here: this
+     * runs in the main loop, and blocking would stall the RX drain — the
+     * exact #123 failure mode. Instead we surface it, edge-triggered
+     * (once per contiguous run of failures, re-armed on the next
+     * success) so a wedge is diagnosable in the log stream without
+     * spamming. A real backpressure mechanism + a drop counter/DTC is a
+     * bench-gated follow-up. */
+    static uint8_t s_tx_full = 0U;
+    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data) != HAL_OK) {
+        if (s_tx_full == 0U) {
+            s_tx_full = 1U;
+            bl_log_warn("FDCAN TX FIFO full — frame dropped (FC/ACK may be lost)");
+        }
+    } else {
+        s_tx_full = 0U;
+    }
 }
 
 /* Send a logical message to the host. Prepends the `msg_type` byte
@@ -767,6 +791,11 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
     uint32_t sectors = 0U;
     bl_log_info("FLASH_ERASE start=0x%08X len=0x%X",
                 (unsigned int)start, (unsigned int)length);
+    /* #125 H6: the erase duration is timed INSIDE bl_flash_erase (via
+     * DWT — HAL_GetTick can't measure it: the single-bank H733 stalls
+     * the CPU on instruction fetch for the whole erase, starving
+     * SysTick) and recorded into the health record's max_flash_op_ms.
+     * Don't time it here — HAL_GetTick would read ~1 ms regardless. */
     bl_flash_status_t st = bl_flash_erase(start, length, &sectors);
     if (st != BL_FLASH_OK) {
         if (st == BL_FLASH_ERR_HARDWARE) {
@@ -778,7 +807,8 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
         send_nack(BL_CMD_FLASH_ERASE, flash_status_to_nack(st));
         return;
     }
-    bl_log_info("FLASH_ERASE ok (%u sectors)", (unsigned int)sectors);
+    bl_log_info("FLASH_ERASE ok (%u sectors); see health.max_flash_op_ms",
+                (unsigned int)sectors);
 
     uint8_t resp[1] = { BL_CMD_FLASH_ERASE };
     send_ack(resp, (uint16_t)sizeof(resp));

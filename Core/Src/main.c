@@ -30,7 +30,9 @@
 #include "bl_memmap.h"
 #include "bl_config.h"
 #include "bl_dtc.h"
+#include "bl_fault.h"
 #include "bl_health.h"
+#include "bl_iwdg.h"
 #include "bl_live.h"
 #include "bl_log.h"
 #include "bl_node_id.h"
@@ -83,6 +85,7 @@ static void MX_FDCAN2_Init(void);
 static void Bootloader_Init(void);
 static void Bootloader_MainLoop(void);
 static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void);
+static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
 /* Bootloader_JumpToApplication / Bootloader_CheckApplication are declared
  * with external linkage in main.h so bl_proto.c can call them for
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
@@ -319,8 +322,26 @@ static void MX_GPIO_Init(void)
 /* ===================== BOOTLOADER CORE ========================= */
 
 static void Bootloader_Init(void) {
+	/* #125 H6: start (or re-period) the IWDG as the very FIRST thing we
+	 * do — see bl_iwdg.h. On an app->BL reset (the `002` re-enter-BL
+	 * trick) we inherit the app's tight ~100 ms watchdog, still running;
+	 * this re-periods it to the BL's ~8 s and reloads the counter within a
+	 * few ms of reset, well before the inherited period could fire. On a
+	 * cold boot it simply arms the watchdog. Everything below (NVM scan,
+	 * filter config) then runs under the BL's own generous period. */
+	bl_iwdg_start();
+
 	LED_OK_ON();
 	LED_ERR_OFF();
+
+	/* #125 H6: enable the DWT cycle counter, used by bl_flash_erase to
+	 * time the erase. HAL_GetTick can't measure it — on the single-bank
+	 * H733 the CPU stalls on instruction fetch for the whole erase, so
+	 * SysTick interrupts starve and the tick barely advances. CYCCNT is
+	 * clock-driven and counts through the stall. Set once, here. */
+	CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+	DWT->CYCCNT = 0U;
+	DWT->CTRL  |= DWT_CTRL_CYCCNTENA_Msk;
 
 	/* Latch the reset cause before anything else has a chance to clear
 	 * RCC->RSR. Health reporting depends on this surviving the rest of
@@ -339,6 +360,20 @@ static void Bootloader_Init(void) {
 	bl_log_init();
 	bl_log_info("bootloader up (reset_cause=%u)",
 	            (unsigned int)bl_health_reset_cause());
+
+	/* #125 H6 (reset-on-spin): if the previous boot ended in a
+	 * controlled reboot from a terminal fault (a CPU fault handler,
+	 * Error_Handler, or a failed FDCAN init), bl_fault left a
+	 * reset-surviving breadcrumb. Log it now — in this safe post-reset
+	 * context, where bl_dtc_log's NOTIFY path is fine — so the cause is
+	 * visible via `diagnose dtc` / health.last_dtc_code. One-shot:
+	 * take_pending clears it. */
+	uint8_t fault_reason = BL_FAULT_NONE;
+	if (bl_fault_take_pending(&fault_reason)) {
+		bl_dtc_log(BL_DTC_CPU_FAULT, BL_DTC_SEV_FATAL, (uint32_t)fault_reason);
+		bl_log_error("recovered from fault reboot (reason=%u)",
+		             (unsigned int)fault_reason);
+	}
 
 	/* Zero the live-data counters. The snapshot is pulled together on
 	 * demand in bl_live_tick, so no persistent state needs initialising
@@ -371,15 +406,33 @@ static void Bootloader_Init(void) {
 	/* Filters must be configured while the FDCAN is still in Init mode —
 	 * i.e. before HAL_FDCAN_Start. */
 	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
+		/* #125 H6: a failed FDCAN bring-up used to spin here forever —
+		 * the board went dead with no CAN, unflashable. Reboot instead;
+		 * a transient init failure self-recovers, and the breadcrumb
+		 * surfaces a BL_DTC_CPU_FAULT next boot. */
 		LED_ERR_ON();
-		while (1) {
-		}
+		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
 
 	if (HAL_FDCAN_Start(&hfdcan2) != HAL_OK) {
 		LED_ERR_ON();
-		while (1) {
-		}
+		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
+	}
+
+	/* #125 M3: guard the issue #94 fix. AutoRetransmission MUST be
+	 * ENABLE or lost-arbitration frames are silently dropped while
+	 * tx->seq has already advanced — which corrupts multi-frame TX
+	 * sequencing on a contended bus (the #94 Bug B signature). That's
+	 * set in MX_FDCAN2_Init, but a CubeMX regeneration could flip it
+	 * back with no test catching it. Read the LIVE peripheral register
+	 * (CCCR.DAR = "Disable Automatic Retransmission") rather than the
+	 * RAM Init struct, so this actually reflects hardware state. DAR
+	 * set ⇒ retransmission disabled ⇒ regression. Log loudly; the BL
+	 * still runs (degraded) so the bus stays reachable to reflash a
+	 * corrected build. */
+	if ((hfdcan2.Instance->CCCR & FDCAN_CCCR_DAR) != 0U) {
+		bl_log_error("FDCAN AutoRetransmission DISABLED (CCCR.DAR set) — "
+		             "issue #94 regression; multi-frame TX will desync");
 	}
 
 	/* NOTE on FDCAN interrupts: the main loop drains RX_FIFO0 by
@@ -413,14 +466,99 @@ static void Bootloader_Init(void) {
 	}
 }
 
+/* #125 C1: poll FDCAN protocol status and recover from Bus_Off.
+ *
+ * On Bus_Off the M_CAN sets CCCR.INIT and halts both TX and RX — the
+ * BL stops ACKing and the host's session dies; the device is
+ * unflashable over CAN until a power-cycle (and re-enters Bus_Off if
+ * the fault persists). Recovery is a Stop→Start: HAL_FDCAN_Stop puts
+ * the peripheral back to READY (INIT stays set), HAL_FDCAN_Start
+ * clears INIT and arms the M_CAN's automatic recovery (it rejoins
+ * after 128×11 consecutive recessive bits — ~2.8 ms of idle bus at
+ * 500 kbps). The two RX filters live in message RAM, which Stop/Start
+ * does NOT touch, so they survive — no need to reconfigure.
+ *
+ * Rate-limit: act on the transition INTO Bus_Off, then at most once
+ * per BL_FDCAN_BUSOFF_RETRY_MS while it persists. Without this, calling
+ * Stop/Start every loop iteration would continually restart the
+ * recovery sequence and the node would never actually rejoin.
+ *
+ * GetProtocolStatus is a cheap PSR register read; safe to poll every
+ * iteration. The Stop/Start only runs on an actual fault (rare).
+ *
+ * Observability (so the bench can confirm it fired): a per-boot
+ * recovery counter in the health record (`fdcan_recovery_count`), a
+ * BL_DTC_FDCAN_BUSOFF DTC carrying the attempt count, and a WARN log
+ * line. */
+#define BL_FDCAN_BUSOFF_RETRY_MS   100U
+
+static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
+	static uint8_t  s_was_busoff      = 0U;
+	static uint32_t s_last_attempt_ms = 0U;
+
+	FDCAN_ProtocolStatusTypeDef ps = { 0 };
+	if (HAL_FDCAN_GetProtocolStatus(&hfdcan2, &ps) != HAL_OK) {
+		return;
+	}
+
+	if (ps.BusOff == 0U) {
+		s_was_busoff = 0U;
+		return;
+	}
+
+	/* Bus_Off is set. Act on the first detection, then rate-limited. */
+	if (s_was_busoff != 0U &&
+	    (now_ms - s_last_attempt_ms) < BL_FDCAN_BUSOFF_RETRY_MS) {
+		return;
+	}
+	s_was_busoff      = 1U;
+	s_last_attempt_ms = now_ms;
+
+	/* Stop/Start to clear INIT and rejoin. Errors are non-fatal — we
+	 * retry on the next poll; nothing else we can do but keep trying. */
+	(void)HAL_FDCAN_Stop(&hfdcan2);
+	(void)HAL_FDCAN_Start(&hfdcan2);
+
+	bl_health_record_fdcan_recovery();
+	bl_dtc_log(BL_DTC_FDCAN_BUSOFF, BL_DTC_SEV_WARN,
+	           bl_health_fdcan_recovery_count());
+	bl_log_warn("FDCAN bus-off — Stop/Start recovery #%u",
+	            (unsigned int)bl_health_fdcan_recovery_count());
+}
+
+/* #125 H3: max RX frames drained per main-loop pass. Sized to the
+ * RX_FIFO0 depth (MX_FDCAN2_Init's RxFifo0ElmtsNbr = 16) so a full
+ * FIFO can be cleared in one pass, while bounding the work so the
+ * per-pass ticks (session watchdog, bus-off recovery) always run. */
+#define BL_FDCAN_RX_DRAIN_BUDGET   16U
+
 static void Bootloader_MainLoop(void) {
 	FDCAN_RxHeaderTypeDef rxHeader;
 	uint8_t rxData[8];
 
 	while (1) {
-		/* Drain any pending frames — each one cancels the auto-jump and
-		 * is handed off to the protocol dispatcher. */
-		if (HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0) {
+		/* #125 H6: kick the hardware watchdog every iteration. The loop
+		 * body is sub-millisecond except when a dispatch triggers a flash
+		 * erase — and bl_flash_erase / bl_nvm refresh between sectors
+		 * themselves, so the longest gap between kicks is a single ~1.8 s
+		 * sector erase, well inside the ~8 s IWDG period. */
+		bl_iwdg_refresh();
+
+		/* Drain pending RX frames — each cancels the auto-jump and is
+		 * handed to the protocol dispatcher.
+		 *
+		 * #125 H3: drain up to a bounded BATCH per loop pass (the FIFO
+		 * is only 16 deep). The old one-frame-per-pass let RX_FIFO0
+		 * overflow after any stall — a blocking flash op, or the
+		 * per-tick work below — because the host streams CFs at ~3 kHz
+		 * during a multi-frame transfer. Draining a batch clears a
+		 * post-stall backlog in a single pass; the budget cap means a
+		 * continuous host flood still can't starve the ticks (session
+		 * watchdog, bus-off recovery) at the bottom of the loop. */
+		uint8_t rx_budget = BL_FDCAN_RX_DRAIN_BUDGET;
+		while (rx_budget > 0U &&
+		       HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0U) {
+			rx_budget--;
 			if (HAL_FDCAN_GetRxMessage(&hfdcan2,
 			FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
 
@@ -467,6 +605,14 @@ static void Bootloader_MainLoop(void) {
 		bl_health_tick(tick_now);
 		bl_log_tick(tick_now);
 		bl_live_tick(tick_now);
+
+		/* #125 C1: FDCAN bus-off auto-recovery. If a hard bus fault
+		 * (sustained TX-arbitration loss, dominant-bit fault) drove
+		 * the node into Bus_Off, the M_CAN sets CCCR.INIT and stops
+		 * TX + RX — the BL would otherwise be permanently deaf until a
+		 * power-cycle, i.e. unflashable over CAN. This rejoins the bus
+		 * automatically. */
+		Bootloader_FdcanBusOffRecover(tick_now);
 
 		/* Auto-jump window: if we booted with a valid app and nobody
 		 * has talked to us before the deadline, hand control over. */
@@ -582,6 +728,13 @@ void Bootloader_JumpToApplication(void) {
 	}
 
 	/* --- Disable peripherals and jump --- */
+
+	/* #125 H6: kick the watchdog once more right before handing off, so
+	 * the app inherits a full ~8 s window to reach its own IWDG re-init
+	 * (the AMS app gets there in ~50-70 ms; IFS08-CE-AMS#280). Must happen
+	 * BEFORE the __set_MSP below — once the stack pointer is swapped to the
+	 * app's stack we can no longer make ordinary function calls. */
+	bl_iwdg_refresh();
 
 	HAL_FDCAN_DeInit(&hfdcan2);
 	HAL_DeInit();
@@ -746,10 +899,13 @@ static uint8_t Bootloader_IsBootRequestActive(void) {
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-	/* User can add his own implementation to report the HAL error return state */
+	/* #125 H6: HAL failures (mostly clock config in SystemClock_Config)
+	 * used to spin here forever — a marginal HSE would leave the board
+	 * dead before CAN even started. Reboot instead so a transient
+	 * failure self-recovers; a hard failure loops slowly (bl_fault's
+	 * dwell) and stays SWD-recoverable. */
 	__disable_irq();
-	while (1) {
-	}
+	bl_fault_reboot(BL_FAULT_ERROR_HANDLER);
   /* USER CODE END Error_Handler_Debug */
 }
 #ifdef USE_FULL_ASSERT

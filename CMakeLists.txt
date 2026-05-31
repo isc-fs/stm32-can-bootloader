@@ -51,11 +51,13 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bl_fwinfo.c
     Core/Src/bl_health.c
     Core/Src/bl_dtc.c
+    Core/Src/bl_fault.c
     Core/Src/bl_log.c
     Core/Src/bl_live.c
     Core/Src/bl_node_id.c
     Core/Src/bl_nvm.c
     Core/Src/bl_obyte.c
+    Core/Src/bl_iwdg.c
 )
 
 # Add include paths
@@ -79,6 +81,21 @@ target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
 if(DEFINED BL_NODE_ID)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         BL_NODE_ID=${BL_NODE_ID}
+    )
+endif()
+
+# Independent-watchdog knobs (#125 H6). Defaults live in bl_config.h; these
+# forward command-line overrides, e.g. `cmake -B build -DBL_IWDG_ENABLE=0`
+# to compile the watchdog out for bring-up, or -DBL_IWDG_RELOAD=1250 to
+# lengthen the period after bench measurement.
+if(DEFINED BL_IWDG_ENABLE)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        BL_IWDG_ENABLE=${BL_IWDG_ENABLE}
+    )
+endif()
+if(DEFINED BL_IWDG_RELOAD)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        BL_IWDG_RELOAD=${BL_IWDG_RELOAD}
     )
 endif()
 
