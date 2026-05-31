@@ -10,6 +10,7 @@
 #include "bl_flash.h"
 
 #include "bl_health.h"
+#include "bl_iwdg.h"
 #include "bl_memmap.h"
 #include "bl_nvm.h"
 #include "stm32h7xx_hal.h"
@@ -87,45 +88,72 @@ bl_flash_status_t bl_flash_erase(uint32_t start,
         return BL_FLASH_ERR_PROTECTED;
     }
 
-    FLASH_EraseInitTypeDef eraseInit = { 0 };
-    eraseInit.TypeErase = FLASH_TYPEERASE_SECTORS;
-    eraseInit.Banks     = FLASH_BANK_1;
-    eraseInit.Sector    = first_sector;
-    eraseInit.NbSectors = (last_sector - first_sector) + 1U;
-
     if (HAL_FLASH_Unlock() != HAL_OK) {
         return BL_FLASH_ERR_HARDWARE;
     }
 
-    /* #125 H6: time the erase with the DWT cycle counter, NOT
-     * HAL_GetTick. The H733 is single-bank, so erasing any sector
-     * stalls the CPU's instruction fetch from flash for the WHOLE
-     * erase (no read-while-write within a bank). During that stall
-     * SysTick interrupts can't be serviced, so HAL_GetTick advances by
-     * only ~1 tick regardless of the true erase duration — which is
-     * why the first bench measurement read 1 ms. DWT->CYCCNT is
-     * clock-driven and keeps counting through the stall, giving real
-     * elapsed time. CYCCNT is enabled once at boot in Bootloader_Init.
-     * The 32-bit subtraction is wrap-safe. */
-    uint32_t page_error = 0U;
-    uint32_t cyc0 = DWT->CYCCNT;
-    HAL_StatusTypeDef st = HAL_FLASHEx_Erase(&eraseInit, &page_error);
-    uint32_t cyc_elapsed = DWT->CYCCNT - cyc0;
-    HAL_FLASH_Lock();
-
-    /* cycles → ms (SystemCoreClock is the core clock in Hz; /1000 is
-     * cycles per ms). Recorded even on a failed erase — it still
-     * consumed time and is informative for sizing the IWDG. */
+    /* #125 H6: erase ONE sector per HAL call, kicking the IWDG between
+     * sectors.
+     *
+     * The H733 is single-bank, so erasing a sector stalls the CPU's
+     * instruction fetch from flash for the WHOLE erase (no read-while-
+     * write within a bank). The watchdog therefore CANNOT be refreshed
+     * mid-erase — only between sectors. A single multi-sector
+     * HAL_FLASHEx_Erase (what this used to do) would stall for the SUM of
+     * every sector — up to 6 x ~1.8 s ≈ 10.6 s for a full app erase — in
+     * one un-kickable call, tripping the ~8 s IWDG mid-erase and bricking
+     * the unit over CAN. One sector at a time bounds each stall to a
+     * single ~1.8 s erase, comfortably inside the period.
+     *
+     * Timing uses DWT->CYCCNT, NOT HAL_GetTick: during the stall SysTick
+     * starves and the tick barely advances (the original bench read of
+     * "1 ms" for a 128 KB erase). CYCCNT is clock-driven and counts
+     * through the stall; it is enabled once at boot in Bootloader_Init.
+     * The 32-bit subtraction is wrap-safe. bl_health_record_flash_op_ms
+     * keeps the per-boot MAX, so recording per sector captures the true
+     * worst-case single-sector duration that sizes the IWDG period. */
     uint32_t cyc_per_ms = SystemCoreClock / 1000U;
-    if (cyc_per_ms > 0U) {
-        bl_health_record_flash_op_ms(cyc_elapsed / cyc_per_ms);
+    uint32_t erased     = 0U;
+
+    for (uint32_t sector = first_sector; sector <= last_sector; sector++) {
+        /* Fresh full period immediately before this sector's stall. */
+        bl_iwdg_refresh();
+
+        FLASH_EraseInitTypeDef eraseInit = { 0 };
+        eraseInit.TypeErase = FLASH_TYPEERASE_SECTORS;
+        eraseInit.Banks     = FLASH_BANK_1;
+        eraseInit.Sector    = sector;
+        eraseInit.NbSectors = 1U;
+
+        uint32_t page_error = 0U;
+        uint32_t cyc0 = DWT->CYCCNT;
+        HAL_StatusTypeDef st = HAL_FLASHEx_Erase(&eraseInit, &page_error);
+        uint32_t cyc_elapsed = DWT->CYCCNT - cyc0;
+
+        /* cycles → ms. Recorded even on a failed erase — it still
+         * consumed time and is informative for sizing the IWDG. */
+        if (cyc_per_ms > 0U) {
+            bl_health_record_flash_op_ms(cyc_elapsed / cyc_per_ms);
+        }
+
+        if (st != HAL_OK) {
+            HAL_FLASH_Lock();
+            if (sectors_erased != (uint32_t *)0) {
+                *sectors_erased = erased;  /* sectors completed before the fault */
+            }
+            return BL_FLASH_ERR_HARDWARE;
+        }
+        erased++;
     }
 
-    if (st != HAL_OK) {
-        return BL_FLASH_ERR_HARDWARE;
-    }
+    /* The final sector's erase stalled the CPU for up to ~1.8 s; kick once
+     * more so the caller's ACK and the next main-loop refresh start with a
+     * full period of headroom. */
+    bl_iwdg_refresh();
+
+    HAL_FLASH_Lock();
     if (sectors_erased != (uint32_t *)0) {
-        *sectors_erased = eraseInit.NbSectors;
+        *sectors_erased = erased;
     }
     /* Count successful erases for the persistent flash_write_count
      * field in the health record. Once per call, not per sector —
