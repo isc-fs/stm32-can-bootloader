@@ -12,6 +12,88 @@ the PR titles between consecutive tags.
 
 ---
 
+## v1.5.0 — Fault-operational hardening
+
+**Wire protocol**: unchanged at `0.2`. No host upgrade required.
+
+The bootloader is the one component whose failure means opening a sealed
+ECU enclosure in the car. This release is the output of a full reliability
+audit (#125) around a single invariant: **the BL must never become
+unreachable or unflashable over CAN.** Every change is a recovery or
+self-protection mechanism, validated end-to-end on the HIL bench (#138).
+
+### Highlights
+
+- **Independent watchdog** (PR #137). The IWDG is now enabled (~8 s period)
+  as the hardware backstop against any hang software can't catch — an
+  interrupt-masked spin, a wedged loop. Sized to clear the worst
+  uninterruptible CPU stall, a single 128 KB sector erase (measured
+  1768 ms; bench-confirmed 1822 ms). `bl_flash_erase` was refactored to
+  erase **one sector per HAL call, kicking the watchdog between sectors**,
+  so a full multi-sector app erase (~10.6 s in one call) can't trip the
+  period mid-erase and brick the unit. The AMS application cooperates by
+  refreshing the inherited watchdog (IFS08-CE-AMS#280); after an IWDG or
+  fault reset the BL deliberately stays in the bootloader rather than
+  auto-jumping into a possibly-faulty app. Build knob `BL_IWDG_ENABLE`
+  (default on).
+
+- **Reboot on terminal CPU faults** (PR #135). The fault handlers
+  (HardFault / MemManage / BusFault / UsageFault / NMI), `Error_Handler`,
+  and a failed FDCAN init no longer spin forever — they leave a breadcrumb
+  in a `.noinit` RAM word and reboot (`bl_fault`), so a transient fault
+  recovers to a flashable BL instead of a dead board. The recovered reason
+  is logged as DTC `0x0050` (CPU_FAULT). Bench-confirmed: forced HardFault
+  and Error_Handler both reboot and log the DTC.
+
+- **FDCAN RX/TX robustness** (PR #133). RX_FIFO0 is drained in a bounded
+  batch (up to the 16-deep FIFO) per main-loop pass, so a post-stall
+  backlog can't overflow and desync ISO-TP reassembly; a full TX FIFO is
+  surfaced (edge-triggered log) instead of silently dropped; a boot-time
+  guard shouts if AutoRetransmission ever comes up disabled (the #94
+  regression signature).
+
+- **FDCAN bus-off auto-recovery + erase-duration probe** (PR #130). On
+  Bus_Off the BL performs a Stop/Start recovery (DTC `0x0040`, per-boot
+  counter) instead of going permanently deaf; the health record's former
+  reserved fields now carry `fdcan_recovery_count` and `max_flash_op_ms`
+  (same 32-byte layout — no host-side size change).
+
+- **Docs**: H72x/H73x WRP-clear procedure corrected (PR #131).
+
+### Bench validation (#138)
+
+On the AMS HIL bench: full flash cycle, no spurious IWDG, single-sector
+erase timing, deliberate spin → IWDG reset (`reset_cause = 0x04`), both
+fault paths → DTC `0x0050`, a 55 s six-sector flash session surviving the
+watchdog, and the app↔BL `002` handoff with no boot-loop.
+
+---
+
+## v1.4.0 — Field-brick prevention
+
+**Wire protocol**: unchanged at `0.2`.
+
+Two field-brick paths surfaced on the HIL bench, both closed (#125):
+
+- **Sustained-flash ISO-TP timeout** (PR #124). A 1 Hz multi-frame
+  `NOTIFY_HEARTBEAT` emitted mid-`WRITE_CHUNK` stranded reassembly on long
+  transfers; heartbeats (and all NOTIFYs) are now suppressed while a host
+  exchange is in flight.
+- **Two field bricks** (PR #127). A session timeout mid-flash no longer
+  auto-jumps into a half-written app (C2 flash-dirty latch), and
+  `OB_APPLY_WRP` can no longer self-lock a non-bootloader sector (C4 WRP
+  validation).
+
+---
+
+## v1.3.1 — CI / docs / tests catch-up
+
+**Wire protocol**: unchanged at `0.2`. No firmware behaviour change —
+required-CI promotion, a documentation sweep, a tighter firmware-size gate,
+and `bl_proto` dispatch tests with a ratcheted coverage floor.
+
+---
+
 ## v1.3.0 — NVM-backed node-id override + CI hardening
 
 **Wire protocol**: unchanged at `0.2`. No host upgrade required.
