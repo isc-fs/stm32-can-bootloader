@@ -144,6 +144,19 @@ SECTIONS
     __bss_end__ = _ebss;
   } >RAM_D1
 
+  /* .noinit — RAM that startup must NOT zero and that survives a
+   * system reset (NVIC_SystemReset leaves SRAM intact; only power-on
+   * clears it). Placed AFTER .bss so it sits outside [_sbss, _ebss),
+   * which is the range the startup code zeroes. NOLOAD = no flash
+   * backing. Holds bl_fault's reboot-reason breadcrumb (#125 H6). */
+  .noinit (NOLOAD) :
+  {
+    . = ALIGN(4);
+    *(.noinit)
+    *(.noinit*)
+    . = ALIGN(4);
+  } >RAM_D1
+
   /* Heap + stack (solo marcador, el stack real empieza en _estack en DTCMRAM) */
   ._user_heap_stack :
   {

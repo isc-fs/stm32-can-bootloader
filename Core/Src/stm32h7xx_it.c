@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bl_fault.h"   /* #125 H6: reboot on terminal CPU faults */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -69,7 +70,7 @@ extern FDCAN_HandleTypeDef hfdcan2;
 void NMI_Handler(void)
 {
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
-
+  bl_fault_reboot(BL_FAULT_NMI);   /* #125 H6: reboot, don't spin */
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
    while (1)
@@ -84,7 +85,7 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  bl_fault_reboot(BL_FAULT_HARDFAULT);   /* #125 H6: reboot, don't spin */
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
@@ -99,7 +100,7 @@ void HardFault_Handler(void)
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
-
+  bl_fault_reboot(BL_FAULT_MEMMANAGE);   /* #125 H6: reboot, don't spin */
   /* USER CODE END MemoryManagement_IRQn 0 */
   while (1)
   {
@@ -114,7 +115,7 @@ void MemManage_Handler(void)
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
-
+  bl_fault_reboot(BL_FAULT_BUSFAULT);   /* #125 H6: reboot, don't spin */
   /* USER CODE END BusFault_IRQn 0 */
   while (1)
   {
@@ -129,7 +130,7 @@ void BusFault_Handler(void)
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
-
+  bl_fault_reboot(BL_FAULT_USAGEFAULT);   /* #125 H6: reboot, don't spin */
   /* USER CODE END UsageFault_IRQn 0 */
   while (1)
   {

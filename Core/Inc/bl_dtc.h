@@ -84,6 +84,15 @@
                                           * this event. WARN severity — recovery
                                           * is automatic; the DTC is a breadcrumb
                                           * that the bus had a hard fault. */
+#define BL_DTC_CPU_FAULT        0x0050U  /* the previous boot ended in a
+                                          * controlled reboot from a terminal
+                                          * spin — a CPU fault handler,
+                                          * Error_Handler, or a failed FDCAN
+                                          * init (issue #125 H6 reset-on-spin).
+                                          * Logged once, after recovery, by
+                                          * Bootloader_Init. context_data =
+                                          * BL_FAULT_* reason (see bl_fault.h).
+                                          * FATAL severity. */
 
 /* ---- Entry layout (20 bytes, no padding) ---- */
 typedef struct {
