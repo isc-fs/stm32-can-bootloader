@@ -61,6 +61,7 @@
 #define BL_NVM_KEY_NODE_ID            0x0001U   /* 1-byte override for compile-time BL_NODE_ID */
 #define BL_NVM_KEY_CAN_BITRATE        0x0002U   /* future — CAN bitrate preference             */
 #define BL_NVM_KEY_FLASH_WRITE_COUNT  0x0003U   /* persistent counter of bl_flash_{write,erase} */
+#define BL_NVM_KEY_FDCAN_INSTANCE     0x0004U   /* 1-byte runtime override for BL_FDCAN_INSTANCE (#120 Phase B) */
 
 /* ---- Status codes ---- */
 typedef enum {
