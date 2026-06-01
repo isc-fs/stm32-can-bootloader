@@ -458,11 +458,18 @@ jobs:
           # (2048 / 256 / 256) after observing several release cycles
           # of legitimate change deltas — see the header comment for
           # the numbers. text 1024 is still ~4 % of the current image;
-          # data 64 catches any meaningful new global; bss 128 catches
-          # surprise framework / RTOS allocations.
+          # data 64 catches any meaningful new global.
+          #
+          # bss raised 128 -> 512 for #120 multi-FDCAN: selecting the bus
+          # instance (compile-time now, NVM-runtime in Phase B) means all
+          # three CubeMX FDCAN handles (hfdcan1/2/3, ~160 B each) are
+          # declared — about +328 B bss vs the single-instance baseline.
+          # 512 still catches surprise framework / RTOS / large-buffer
+          # allocations; once #120 lands on main its handles are in the
+          # baseline and this can tighten back toward 128.
           TEXT_MAX_INCREASE=1024
           DATA_MAX_INCREASE=64
-          BSS_MAX_INCREASE=128
+          BSS_MAX_INCREASE=512
 
           parse_size() {
             arm-none-eabi-size --format=berkeley "$1" \
