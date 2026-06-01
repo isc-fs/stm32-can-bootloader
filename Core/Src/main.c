@@ -31,6 +31,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_fault.h"
+#include "bl_fdcan.h"
 #include "bl_health.h"
 #include "bl_iwdg.h"
 #include "bl_live.h"
@@ -69,7 +70,9 @@ typedef void (*pFunction)(void);
 
 /* Private variables ---------------------------------------------------------*/
 
+FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan2;
+FDCAN_HandleTypeDef hfdcan3;
 
 /* USER CODE BEGIN PV */
 static uint8_t  g_AutoJumpEnabled  = 0U;
@@ -80,12 +83,15 @@ static uint32_t g_AutoJumpDeadline = 0U;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_FDCAN1_Init(void);
 static void MX_FDCAN2_Init(void);
+static void MX_FDCAN3_Init(void);
 /* USER CODE BEGIN PFP */
 static void Bootloader_Init(void);
 static void Bootloader_MainLoop(void);
-static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void);
 static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
+/* Bootloader_ConfigFdcanFilters moved to bl_fdcan_configure_filters in
+ * bl_fdcan.c (#120 Phase A) — see bl_fdcan.h. */
 /* Bootloader_JumpToApplication / Bootloader_CheckApplication are declared
  * with external linkage in main.h so bl_proto.c can call them for
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
@@ -128,7 +134,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_FDCAN1_Init();
   MX_FDCAN2_Init();
+  MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
 
 	Bootloader_Init();
@@ -208,6 +216,59 @@ void SystemClock_Config(void)
 }
 
 /**
+  * @brief FDCAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN1_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN1_Init 0 */
+
+  /* USER CODE END FDCAN1_Init 0 */
+
+  /* USER CODE BEGIN FDCAN1_Init 1 */
+
+  /* USER CODE END FDCAN1_Init 1 */
+  hfdcan1.Instance = FDCAN1;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan1.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
+  hfdcan1.Init.TransmitPause = DISABLE;
+  hfdcan1.Init.ProtocolException = DISABLE;
+  hfdcan1.Init.NominalPrescaler = 6;
+  hfdcan1.Init.NominalSyncJumpWidth = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 1;
+  hfdcan1.Init.NominalTimeSeg2 = 2;
+  hfdcan1.Init.DataPrescaler = 1;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 1;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+  hfdcan1.Init.MessageRAMOffset = 0;
+  hfdcan1.Init.StdFiltersNbr = 2;
+  hfdcan1.Init.ExtFiltersNbr = 1;
+  hfdcan1.Init.RxFifo0ElmtsNbr = 16;
+  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.RxFifo1ElmtsNbr = 16;
+  hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.RxBuffersNbr = 0;
+  hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.TxEventsNbr = 0;
+  hfdcan1.Init.TxBuffersNbr = 0;
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 16;
+  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN1_Init 2 */
+
+  /* USER CODE END FDCAN1_Init 2 */
+
+}
+
+/**
   * @brief FDCAN2 Initialization Function
   * @param None
   * @retval None
@@ -225,37 +286,13 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Instance = FDCAN2;
   hfdcan2.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
   hfdcan2.Init.Mode = FDCAN_MODE_NORMAL;
-  /* AutoRetransmission MUST be ENABLE for this bootloader. With it
-   * DISABLE, FDCAN drops any frame that loses arbitration to a
-   * higher-priority ID (the host sits on 0x001, the BL on 0x011 —
-   * BL frames lose every arbitration during a host burst). Crucially
-   * the FDCAN drop is *silent*: HAL_FDCAN_AddMessageToTxFifoQ already
-   * returned HAL_OK (the frame entered the queue cleanly), so
-   * send_raw has no signal that the on-wire transmission failed —
-   * meanwhile bl_isotp_tx_next has already advanced tx->seq for the
-   * lost frame. The visible symptom on the wire is CF emissions with
-   * a 1 → 3 → 5 → 7 sequence (issue #94 Bug B).
-   *
-   * Worse, repeated TX failures eventually push the FDCAN node into
-   * error-passive / bus-off — at which point the BL stops ACKing
-   * incoming host frames, and the host's MAC retransmits its CFs
-   * until it gives up. That's Bug A in the same issue: "BL silently
-   * dropped a CF the host sent three times".
-   *
-   * Both bugs go away with AutoRetransmission ENABLE: FDCAN retries
-   * a lost-arbitration frame until it wins the bus or hits a real
-   * protocol error. Pre-cubeMX default left this DISABLE; the
-   * bootloader's deployment context (multi-node CAN bus with always-
-   * active peers) makes ENABLE the right setting. Audit pass:
-   * confirmed no place in the project depends on "no retry"
-   * behaviour. */
-  hfdcan2.Init.AutoRetransmission = ENABLE;
+  hfdcan2.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
   hfdcan2.Init.NominalPrescaler = 6;
   hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 2;
-  hfdcan2.Init.NominalTimeSeg2 = 5;
+  hfdcan2.Init.NominalTimeSeg1 = 1;
+  hfdcan2.Init.NominalTimeSeg2 = 2;
   hfdcan2.Init.DataPrescaler = 1;
   hfdcan2.Init.DataSyncJumpWidth = 1;
   hfdcan2.Init.DataTimeSeg1 = 1;
@@ -285,6 +322,59 @@ static void MX_FDCAN2_Init(void)
 }
 
 /**
+  * @brief FDCAN3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN3_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN3_Init 0 */
+
+  /* USER CODE END FDCAN3_Init 0 */
+
+  /* USER CODE BEGIN FDCAN3_Init 1 */
+
+  /* USER CODE END FDCAN3_Init 1 */
+  hfdcan3.Instance = FDCAN3;
+  hfdcan3.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan3.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan3.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
+  hfdcan3.Init.TransmitPause = DISABLE;
+  hfdcan3.Init.ProtocolException = DISABLE;
+  hfdcan3.Init.NominalPrescaler = 6;
+  hfdcan3.Init.NominalSyncJumpWidth = 1;
+  hfdcan3.Init.NominalTimeSeg1 = 1;
+  hfdcan3.Init.NominalTimeSeg2 = 2;
+  hfdcan3.Init.DataPrescaler = 1;
+  hfdcan3.Init.DataSyncJumpWidth = 1;
+  hfdcan3.Init.DataTimeSeg1 = 1;
+  hfdcan3.Init.DataTimeSeg2 = 1;
+  hfdcan3.Init.MessageRAMOffset = 0;
+  hfdcan3.Init.StdFiltersNbr = 2;
+  hfdcan3.Init.ExtFiltersNbr = 1;
+  hfdcan3.Init.RxFifo0ElmtsNbr = 16;
+  hfdcan3.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.RxFifo1ElmtsNbr = 16;
+  hfdcan3.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.RxBuffersNbr = 0;
+  hfdcan3.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.TxEventsNbr = 0;
+  hfdcan3.Init.TxBuffersNbr = 0;
+  hfdcan3.Init.TxFifoQueueElmtsNbr = 16;
+  hfdcan3.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan3.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+  if (HAL_FDCAN_Init(&hfdcan3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN3_Init 2 */
+
+  /* USER CODE END FDCAN3_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -301,6 +391,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, OK_STATUS_Pin|ERR_STATUS_Pin, GPIO_PIN_RESET);
@@ -404,8 +495,11 @@ static void Bootloader_Init(void) {
 	}
 
 	/* Filters must be configured while the FDCAN is still in Init mode —
-	 * i.e. before HAL_FDCAN_Start. */
-	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
+	 * i.e. before HAL_FDCAN_Start. Filter shape is instance-agnostic;
+	 * `bl_fdcan_configure_filters` lives in bl_fdcan.c (#120 Phase A)
+	 * and accepts the resolved node-id directly so it doesn't have to
+	 * include bl_node_id.h itself. */
+	if (bl_fdcan_configure_filters(bl_node_id_get()) != HAL_OK) {
 		/* #125 H6: a failed FDCAN bring-up used to spin here forever —
 		 * the board went dead with no CAN, unflashable. Reboot instead;
 		 * a transient init failure self-recovers, and the breadcrumb
@@ -414,7 +508,7 @@ static void Bootloader_Init(void) {
 		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
 
-	if (HAL_FDCAN_Start(&hfdcan2) != HAL_OK) {
+	if (HAL_FDCAN_Start(bl_fdcan_get_handle()) != HAL_OK) {
 		LED_ERR_ON();
 		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
@@ -430,7 +524,7 @@ static void Bootloader_Init(void) {
 	 * set ⇒ retransmission disabled ⇒ regression. Log loudly; the BL
 	 * still runs (degraded) so the bus stays reachable to reflash a
 	 * corrected build. */
-	if ((hfdcan2.Instance->CCCR & FDCAN_CCCR_DAR) != 0U) {
+	if ((bl_fdcan_get_handle()->Instance->CCCR & FDCAN_CCCR_DAR) != 0U) {
 		bl_log_error("FDCAN AutoRetransmission DISABLED (CCCR.DAR set) — "
 		             "issue #94 regression; multi-frame TX will desync");
 	}
@@ -497,7 +591,7 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
 	static uint32_t s_last_attempt_ms = 0U;
 
 	FDCAN_ProtocolStatusTypeDef ps = { 0 };
-	if (HAL_FDCAN_GetProtocolStatus(&hfdcan2, &ps) != HAL_OK) {
+	if (HAL_FDCAN_GetProtocolStatus(bl_fdcan_get_handle(), &ps) != HAL_OK) {
 		return;
 	}
 
@@ -516,8 +610,8 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
 
 	/* Stop/Start to clear INIT and rejoin. Errors are non-fatal — we
 	 * retry on the next poll; nothing else we can do but keep trying. */
-	(void)HAL_FDCAN_Stop(&hfdcan2);
-	(void)HAL_FDCAN_Start(&hfdcan2);
+	(void)HAL_FDCAN_Stop(bl_fdcan_get_handle());
+	(void)HAL_FDCAN_Start(bl_fdcan_get_handle());
 
 	bl_health_record_fdcan_recovery();
 	bl_dtc_log(BL_DTC_FDCAN_BUSOFF, BL_DTC_SEV_WARN,
@@ -557,9 +651,9 @@ static void Bootloader_MainLoop(void) {
 		 * watchdog, bus-off recovery) at the bottom of the loop. */
 		uint8_t rx_budget = BL_FDCAN_RX_DRAIN_BUDGET;
 		while (rx_budget > 0U &&
-		       HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0U) {
+		       HAL_FDCAN_GetRxFifoFillLevel(bl_fdcan_get_handle(), FDCAN_RX_FIFO0) > 0U) {
 			rx_budget--;
-			if (HAL_FDCAN_GetRxMessage(&hfdcan2,
+			if (HAL_FDCAN_GetRxMessage(bl_fdcan_get_handle(),
 			FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
 
 				/* The bootloader only speaks classic 11-bit IDs; any
@@ -648,61 +742,10 @@ static void Bootloader_MainLoop(void) {
 	}
 }
 
-/* Configure FDCAN2 filters so FIFO0 only receives host→node frames
- * addressed to this board's resolved node ID (`bl_node_id_get()` —
- * NVM override if present, compile-time `BL_NODE_ID` otherwise) or
- * the broadcast address 0xF. Under the fix/12 wire format the 11-bit
- * ID layout is
- *
- *   bits 10..5 = 0   (reserved)
- *   bit  4     = 0   (host→node; node→host is 1 and must be rejected)
- *   bits 3..0  = destination node
- *
- * We use a mask filter that matches exactly five low bits
- * (`BL_PROTO_ID_VALID_MASK = 0x01F`), which pins bit 4 to 0 and the
- * low nibble to our node (or 0xF for broadcast). That rejects:
- *   - every node→host frame (bit 4 set)
- *   - frames addressed to a different node (low nibble mismatch)
- *   - malformed IDs with bits 5..10 set (unknown future extensions)
- *
- * Our own TX never loops back through this filter because it sits at
- * a different ID (direction bit 4 set), so the BL can't accidentally
- * receive its own replies. */
-static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void) {
-	FDCAN_FilterTypeDef filter = { 0 };
-	HAL_StatusTypeDef st;
-
-	filter.IdType       = FDCAN_STANDARD_ID;
-	filter.FilterType   = FDCAN_FILTER_MASK;
-	filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-	filter.FilterID2    = BL_PROTO_ID_VALID_MASK;
-
-	/* Unicast: host → this node. ID = BL_PROTO_DIR_HOST_TO_NODE | <id>
-	 * where <id> is the resolved node ID (NVM override or compile-time
-	 * default). Direction bit is 0; just the low nibble. */
-	filter.FilterIndex = 0U;
-	filter.FilterID1   = bl_node_id_get() & BL_PROTO_NODE_MASK;
-	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
-	if (st != HAL_OK) {
-		return st;
-	}
-
-	/* Broadcast: host → 0xF. */
-	filter.FilterIndex = 1U;
-	filter.FilterID1   = BL_PROTO_NODE_BROADCAST;
-	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
-	if (st != HAL_OK) {
-		return st;
-	}
-
-	/* Reject everything that doesn't match one of the two filters, and
-	 * reject remote frames outright — the protocol has no use for them. */
-	return HAL_FDCAN_ConfigGlobalFilter(&hfdcan2,
-	                                    FDCAN_REJECT,
-	                                    FDCAN_REJECT,
-	                                    FDCAN_REJECT_REMOTE,
-	                                    FDCAN_REJECT_REMOTE);
-}
+/* Bootloader_ConfigFdcanFilters body has moved to
+ * `bl_fdcan_configure_filters` in bl_fdcan.c (#120 Phase A). The
+ * filter geometry is instance-agnostic; the only thing that changed
+ * is the handle it operates on, which is what justified the move. */
 
 /* ===================== JUMP TO APPLICATION ====================== */
 
@@ -736,7 +779,7 @@ void Bootloader_JumpToApplication(void) {
 	 * app's stack we can no longer make ordinary function calls. */
 	bl_iwdg_refresh();
 
-	HAL_FDCAN_DeInit(&hfdcan2);
+	HAL_FDCAN_DeInit(bl_fdcan_get_handle());
 	HAL_DeInit();
 
 	/* Stop SysTick */

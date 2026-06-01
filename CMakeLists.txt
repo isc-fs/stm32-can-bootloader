@@ -52,6 +52,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     Core/Src/bl_health.c
     Core/Src/bl_dtc.c
     Core/Src/bl_fault.c
+    Core/Src/bl_fdcan.c
     Core/Src/bl_log.c
     Core/Src/bl_live.c
     Core/Src/bl_node_id.c
@@ -96,6 +97,14 @@ endif()
 if(DEFINED BL_IWDG_RELOAD)
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         BL_IWDG_RELOAD=${BL_IWDG_RELOAD}
+    )
+endif()
+
+# BL_FDCAN_INSTANCE (issue #120 Phase A). Selects which FDCAN peripheral
+# hosts the bootloader bus; default in bl_config.h is 2 (FDCAN2).
+if(DEFINED BL_FDCAN_INSTANCE)
+    target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
+        BL_FDCAN_INSTANCE=${BL_FDCAN_INSTANCE}
     )
 endif()
 

@@ -74,4 +74,23 @@
 #error "BL_IWDG_RELOAD must fit the 12-bit IWDG reload register (<= 4095)."
 #endif
 
+/* Which FDCAN peripheral on the H733 hosts the bootloader bus.
+ *
+ * Valid values are 1 (FDCAN1) and 2 (FDCAN2). FDCAN3 support is
+ * deferred pending hardware confirmation that the STM32H733ZGT6 in
+ * use actually exposes a third FDCAN instance — see issue #120 Open
+ * Question #1. Pin map per instance lives in `bl_fdcan.c`.
+ *
+ * Default is 2 to preserve pre-#120 behaviour; carriers that wire
+ * CAN to FDCAN1 override this at build time (`-DBL_FDCAN_INSTANCE=1`).
+ * Phase B of #120 will add an NVM-backed runtime override under
+ * `BL_NVM_KEY_FDCAN_INSTANCE`, mirroring the BL_NODE_ID mechanism. */
+#ifndef BL_FDCAN_INSTANCE
+#define BL_FDCAN_INSTANCE  2
+#endif
+
+#if (BL_FDCAN_INSTANCE != 1) && (BL_FDCAN_INSTANCE != 2)
+#error "BL_FDCAN_INSTANCE must be 1 or 2 (FDCAN3 not yet validated on H733 — see issue #120 Open Question #1)"
+#endif
+
 #endif /* BL_CONFIG_H */
