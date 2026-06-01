@@ -165,7 +165,7 @@ version, and the bootloader stamps the record.
 
 ```mermaid
 flowchart TD
-    reset((Reset)) --> init["Peripheral init<br/>clocks · GPIO · FDCAN2 · LEDs"]
+    reset((Reset)) --> init["Peripheral init<br/>clocks · GPIO · FDCAN1/2/3 · LEDs"]
     init --> bootreq{"RTC->BKP0R<br/>== BL_BOOT_REQ_MAGIC?"}
     bootreq -- yes --> clearmagic["Clear BKP0R<br/>(one-shot)"] --> listen["CAN-listen mode<br/>no auto-jump armed"]
     bootreq -- no --> checkapp{"Bootloader_CheckApplication()<br/>(magic + CRC32 + SP + entry)"}
@@ -193,7 +193,7 @@ Prose walk-through:
 
 1. **Reset** — MCU starts the bootloader (vector table at
    `0x08000000`).
-2. **Peripheral init** — clocks, GPIO, FDCAN2, status LEDs.
+2. **Peripheral init** — clocks, GPIO, FDCAN1/2/3, status LEDs.
 3. **Boot-request check** — read `RTC->BKP0R`. If it equals
    `BL_BOOT_REQ_MAGIC = 0xB00710AD`, clear it and stay in CAN-
    listen mode (the handshake an app uses to drop back in without
@@ -203,7 +203,7 @@ Prose walk-through:
    vector table (SP pointing to a valid RAM region, entry inside
    the app region). On success a 2-second auto-jump window is
    armed; any CAN frame received in that window cancels the jump.
-4. **Main loop** — polls FDCAN2 RX FIFO0 and dispatches frames;
+4. **Main loop** — polls all three FDCAN RX FIFO0s and dispatches frames;
    the auto-jump fires when its deadline elapses with no inbound
    traffic.
 5. **Jump to application** — deinit FDCAN and HAL, stop SysTick,
@@ -233,13 +233,53 @@ is one-shot, and disables the auto-jump for that session.
 
 ## CAN protocol
 
-Classic-CAN on FDCAN2, 11-bit standard IDs, ≤ 8 B payload per
+Classic-CAN on all three FDCAN peripherals (FDCAN1/2/3) at once,
+11-bit standard IDs, ≤ 8 B payload per
 frame. Protocol constants live in
 [`Core/Inc/bl_proto.h`](Core/Inc/bl_proto.h). Wire-level frame ID
 layout, message-type byte, ISO-TP PCI shapes and the full opcode
 table are specified in
 [can-flasher/REQUIREMENTS.md § CAN protocol specification](https://github.com/isc-fs/can-flasher/blob/main/REQUIREMENTS.md#can-protocol-specification).
 This section documents only what BL does on top of that contract.
+
+### Multi-bus FDCAN — the BL serves all three at once
+
+The BL runs its protocol on **FDCAN1, FDCAN2 and FDCAN3
+concurrently**: at boot it installs the RX filters on, and starts,
+every one; the main loop polls all three; and each reply is sent back
+out the bus the request arrived on (`bl_fdcan_set_active` /
+`bl_fdcan_get_handle` in
+[`Core/Src/bl_fdcan.c`](Core/Src/bl_fdcan.c)). There is no instance to
+select — one identical image works regardless of which FDCAN a board
+wires CAN to.
+
+**Why (deployment rationale).** The fleet runs several ECUs on a
+*single shared CAN bus*, but — through a hardware mismatch — each board
+taps that bus from a **different** FDCAN peripheral (one via FDCAN1,
+one via FDCAN2, one via FDCAN3) rather than a common one. A
+single-instance BL (say FDCAN2-only) can then only reach the ECU that
+taps the bus through *its* peripheral; the others are invisible over
+CAN and recoverable only via SWD — i.e. opening the sealed enclosure.
+Serving all three lets one image reach every ECU on the bus no matter
+which peripheral it uses, and stays correct if the hardware is later
+re-spun onto a common peripheral.
+
+Addressing on the shared bus is by **node ID** (next section): each ECU
+is burnt with a distinct `BL_NODE_ID`, so a frame for one node is
+filtered out by the others. The host enumerates every ECU with a
+broadcast `DISCOVER` (the replies arbitrate by ID) and then flashes
+each by its ID. Distinct IDs are mandatory — two ECUs sharing one would
+collide on every reply.
+
+Driving all three peripherals means the BL holds all three pin pairs
+(`PD0/PD1` = FDCAN1, `PB12/PB13` = FDCAN2, `PG10/PG9` = FDCAN3) as CAN
+on every board, so the *unused* pairs on a given board must be free
+(the current fleet's are). A board that repurposed one of those pins
+for another function would need that peripheral dropped from its build.
+The `.ioc` keeps all three configured identically — notably
+`AutoRetransmission = ENABLE` (the issue #94 fix) — and a boot-time
+guard logs loudly if any bus comes up with it disabled, so a CubeMX
+regeneration can't silently reintroduce the regression on one bus.
 
 ### Node ID provisioning and FDCAN filtering
 
@@ -280,8 +320,9 @@ make a board unrecoverable. Rejection cases:
 - byte ∈ `0x10..0xFF` (out of the 4-bit destination field; the
   FDCAN mask would silently truncate to an unrelated low nibble)
 
-Two classic-mask FDCAN filters are then installed on FIFO0:
-`dst == bl_node_id_get()` (unicast) and `dst == 0xF` (broadcast).
+Two classic-mask FDCAN filters are then installed on FIFO0 of **every
+bus** (see *Multi-bus FDCAN* above): `dst == bl_node_id_get()`
+(unicast) and `dst == 0xF` (broadcast).
 Non-matching standard IDs, non-matching extended IDs and all remote
 frames are rejected at the peripheral and never reach software. The
 dispatcher keeps a defence-in-depth `bl_proto_addressed_to_us`
