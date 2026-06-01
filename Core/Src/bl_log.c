@@ -304,6 +304,17 @@ void bl_log_tick(uint32_t now_ms)
         return;
     }
 
+    /* #147: only emit when the active bus's TX FIFO is fully drained.
+     * BL_LOG_DRAIN_BUDGET caps a NOTIFY_LOG to <= 15 ISO-TP frames, so an
+     * idle depth-16 queue always has room for the whole message; emitting
+     * into a partially-full queue could overrun it and drop frames mid-
+     * ISO-TP, which breaks the host's reassembly (the BadSeq seen on the
+     * bench, #147). Non-blocking — skip this tick and retry next; the ring
+     * keeps the unread bytes so nothing is lost. */
+    if (!bl_proto_tx_idle()) {
+        return;
+    }
+
     /* opcode + up to BL_LOG_DRAIN_BUDGET bytes of serialised entries. */
     uint8_t buf[1U + BL_LOG_DRAIN_BUDGET];
     buf[0] = BL_NOTIFY_LOG;
