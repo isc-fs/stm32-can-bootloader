@@ -1,56 +1,91 @@
 /*
  * bl_fdcan.c — FDCAN-instance selector (issue #120).
  *
- * The BL hosts its protocol on exactly one FDCAN peripheral, chosen by
- * BL_FDCAN_INSTANCE (1, 2 or 3 — see bl_config.h). The CubeMX-generated
- * MX_FDCAN{1,2,3}_Init (main.c) + HAL_FDCAN_MspInit (stm32h7xx_hal_msp.c)
- * own the actual peripheral / GPIO / clock / NVIC bring-up for all three
- * instances. This module is the thin selector that hands the rest of the
- * BL the *selected* instance's handle (bl_fdcan_get_handle) and configures
- * its RX filters (bl_fdcan_configure_filters). Every other TU stays
- * instance-agnostic.
+ * The BL hosts its protocol on exactly one FDCAN peripheral. Which one is
+ * resolved at boot from two sources, in priority order:
  *
- * Why select among the CubeMX hfdcanN handles rather than own a private
- * one: CubeMX rewrites MX_FDCANx_Init / HAL_FDCAN_MspInit unconditionally
- * on every "Generate Code", so anything that tried to *replace* them would
- * silently desync on the next regeneration (the bootloader would end up
- * driving an uninitialised handle). Selecting hfdcanN keeps this module
- * regeneration-proof.
+ *   1. NVM override:   a 1-byte entry under BL_NVM_KEY_FDCAN_INSTANCE
+ *      (sector 7). When present + well-formed (value 1, 2 or 3) it picks
+ *      the instance, so one firmware image can be provisioned to boards
+ *      that wire CAN to different FDCANs — no rebuild (Phase B).
+ *   2. Compile-time:   BL_FDCAN_INSTANCE from bl_config.h (default 2).
  *
- * Phase B (next): NVM-backed runtime override under
- * BL_NVM_KEY_FDCAN_INSTANCE — bl_fdcan_get_handle() resolves to a value
- * cached at boot rather than at link time; its callers don't change.
+ * bl_fdcan_init_from_nvm() does the resolution once at boot (after
+ * bl_nvm_init, alongside bl_node_id_init_from_nvm) and caches the result;
+ * bl_fdcan_get_handle() / bl_fdcan_get_instance_number() return it. The
+ * CubeMX-generated MX_FDCAN{1,2,3}_Init (main.c) + HAL_FDCAN_MspInit
+ * (stm32h7xx_hal_msp.c) bring up all three peripherals regardless, so the
+ * resolved one is always initialised and ready — this module just selects
+ * among the CubeMX hfdcanN handles. Selecting (rather than owning a private
+ * handle) keeps the module regeneration-proof.
+ *
+ * Validation mirrors bl_node_id: a malformed / out-of-range / wrong-length
+ * NVM byte silently falls back to the compile-time default rather than
+ * refusing to boot — a corrupt override must never brick a board.
  */
 
 #include "bl_fdcan.h"
 
 #include "bl_config.h"
+#include "bl_nvm.h"            /* bl_nvm_read + BL_NVM_KEY_FDCAN_INSTANCE */
 #include "bl_proto.h"          /* BL_PROTO_NODE_MASK / NODE_BROADCAST / ID_VALID_MASK */
 #include "stm32h7xx_hal.h"
 
 #include <stdint.h>
 
 /* The CubeMX-generated per-peripheral handles, defined + initialised in
- * main.c by MX_FDCAN{1,2,3}_Init. The abstraction points at the selected
- * one rather than maintaining a separate (and easily-desynced) handle. */
+ * main.c by MX_FDCAN{1,2,3}_Init. */
 extern FDCAN_HandleTypeDef hfdcan1;
 extern FDCAN_HandleTypeDef hfdcan2;
 extern FDCAN_HandleTypeDef hfdcan3;
 
+/* Resolved instance (1, 2 or 3), cached at boot by
+ * bl_fdcan_init_from_nvm(). Initialised to the compile-time default so a
+ * caller reaching bl_fdcan_get_handle() *before* init still gets a sane
+ * handle (matches pre-Phase-B behaviour). */
+static uint8_t s_fdcan_instance = BL_FDCAN_INSTANCE;
+
+void bl_fdcan_init_from_nvm(void)
+{
+    /* Reset to the compile-time default first so the call is idempotent
+     * and a previously-cached NVM value can't leak forward. */
+    s_fdcan_instance = BL_FDCAN_INSTANCE;
+
+    uint8_t value = 0U;
+    uint8_t value_len = 0U;
+    bl_nvm_status_t st = bl_nvm_read(BL_NVM_KEY_FDCAN_INSTANCE,
+                                     &value, sizeof(value), &value_len);
+    if (st != BL_NVM_OK) {
+        /* NOT_FOUND is the normal "no override stored" case; any other
+         * status is a read failure — either way the compile-time default
+         * is the right answer. */
+        return;
+    }
+
+    /* Validate the override byte; anything malformed keeps the default. */
+    if (value_len != 1U) {
+        return;
+    }
+    if ((value != 1U) && (value != 2U) && (value != 3U)) {
+        return;
+    }
+
+    s_fdcan_instance = value;
+}
+
 FDCAN_HandleTypeDef *bl_fdcan_get_handle(void)
 {
-#if BL_FDCAN_INSTANCE == 1
-    return &hfdcan1;
-#elif BL_FDCAN_INSTANCE == 2
-    return &hfdcan2;
-#else /* BL_FDCAN_INSTANCE == 3 — value validated in bl_config.h */
-    return &hfdcan3;
-#endif
+    switch (s_fdcan_instance) {
+    case 1U:  return &hfdcan1;
+    case 3U:  return &hfdcan3;
+    case 2U:
+    default:  return &hfdcan2;
+    }
 }
 
 uint8_t bl_fdcan_get_instance_number(void)
 {
-    return (uint8_t)BL_FDCAN_INSTANCE;
+    return s_fdcan_instance;
 }
 
 /* ---- bl_fdcan_configure_filters ---------------------------------- *

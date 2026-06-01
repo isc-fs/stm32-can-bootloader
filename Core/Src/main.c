@@ -484,6 +484,16 @@ static void Bootloader_Init(void) {
 	 * and is set up only once at boot. */
 	bl_node_id_init_from_nvm();
 
+	/* #120 Phase B: resolve which FDCAN instance hosts the BL bus — a
+	 * valid BL_NVM_KEY_FDCAN_INSTANCE override (1/2/3) wins over the
+	 * compile-time BL_FDCAN_INSTANCE default. Must run before the filter
+	 * config + HAL_FDCAN_Start below, which operate on the resolved
+	 * instance via bl_fdcan_get_handle(). All three peripherals are
+	 * already initialised by MX_FDCAN{1,2,3}_Init in main(); this only
+	 * picks which one the BL actually uses. */
+	bl_fdcan_init_from_nvm();
+	bl_log_info("FDCAN instance %u", (unsigned int)bl_fdcan_get_instance_number());
+
 	/* Boot-time WRP self-check. Production-provisioned units are
 	 * expected to have sector 0 (the bootloader) WRP-protected; a
 	 * missing latch is not fatal but it earns a WARN log line so the

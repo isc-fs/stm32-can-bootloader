@@ -12,10 +12,11 @@
  * handle, so main.c / bl_proto.c stay instance-agnostic — they call
  * bl_fdcan_get_handle() instead of referencing a specific hfdcanN.
  *
- * Phase B (next): NVM-backed runtime override under
- * BL_NVM_KEY_FDCAN_INSTANCE resolved at boot. bl_fdcan_get_handle() stays
- * the same; under the hood it resolves to a value cached at boot rather
- * than a link-time constant, so its callers don't have to track the change.
+ * The instance is resolved at boot by bl_fdcan_init_from_nvm(): a valid
+ * 1-byte NVM override under BL_NVM_KEY_FDCAN_INSTANCE (1, 2 or 3) wins,
+ * otherwise the compile-time BL_FDCAN_INSTANCE default. bl_fdcan_get_handle()
+ * returns a value cached at boot, so its callers stay instance-agnostic
+ * regardless of how the choice was made.
  *
  * See bl_config.h::BL_FDCAN_INSTANCE for the build flag, and the per-
  * instance GPIO/AF/NVIC setup in stm32h7xx_hal_msp.c::HAL_FDCAN_MspInit.
@@ -25,10 +26,16 @@
 
 #include <stdint.h>
 
+/* Resolve which FDCAN instance the BL uses and cache it. Prefers a valid
+ * 1-byte NVM override (BL_NVM_KEY_FDCAN_INSTANCE = 1/2/3) over the
+ * compile-time BL_FDCAN_INSTANCE default; a malformed override silently
+ * falls back. Call once at boot, after bl_nvm_init() and before
+ * bl_fdcan_configure_filters() / the first bl_fdcan_get_handle(). */
+void bl_fdcan_init_from_nvm(void);
+
 /* The handle every other TU uses for HAL_FDCAN_* calls — the CubeMX
- * hfdcanN for the selected BL_FDCAN_INSTANCE. Trivial body, so the
- * compiler inlines it at -O2 / -Os and the call overhead vs the legacy
- * direct-`&hfdcan2` shape is in the noise. */
+ * hfdcanN for the resolved instance. Trivial body, so the compiler inlines
+ * it at -O2 / -Os. */
 FDCAN_HandleTypeDef *bl_fdcan_get_handle(void);
 
 /* Configures the two FIFO0 filters (unicast to `node_id` + broadcast to
