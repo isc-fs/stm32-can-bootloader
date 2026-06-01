@@ -76,21 +76,22 @@
 
 /* Which FDCAN peripheral on the H733 hosts the bootloader bus.
  *
- * Valid values are 1 (FDCAN1) and 2 (FDCAN2). FDCAN3 support is
- * deferred pending hardware confirmation that the STM32H733ZGT6 in
- * use actually exposes a third FDCAN instance — see issue #120 Open
- * Question #1. Pin map per instance lives in `bl_fdcan.c`.
+ * Valid values are 1 (FDCAN1), 2 (FDCAN2) and 3 (FDCAN3). All three are
+ * exposed on the STM32H733ZGT6 (confirmed via the CMSIS device header
+ * and on the bench) and brought up by the CubeMX MX_FDCANx_Init. Pin
+ * map per instance (set in stm32h7xx_hal_msp.c): FDCAN1 = PD0/PD1,
+ * FDCAN2 = PB12/PB13, FDCAN3 = PG10/PG9.
  *
- * Default is 2 to preserve pre-#120 behaviour; carriers that wire
- * CAN to FDCAN1 override this at build time (`-DBL_FDCAN_INSTANCE=1`).
+ * Default is 2 to preserve pre-#120 behaviour; carriers that wire CAN
+ * to FDCAN1 or FDCAN3 override at build time (`-DBL_FDCAN_INSTANCE=N`).
  * Phase B of #120 will add an NVM-backed runtime override under
  * `BL_NVM_KEY_FDCAN_INSTANCE`, mirroring the BL_NODE_ID mechanism. */
 #ifndef BL_FDCAN_INSTANCE
 #define BL_FDCAN_INSTANCE  2
 #endif
 
-#if (BL_FDCAN_INSTANCE != 1) && (BL_FDCAN_INSTANCE != 2)
-#error "BL_FDCAN_INSTANCE must be 1 or 2 (FDCAN3 not yet validated on H733 — see issue #120 Open Question #1)"
+#if (BL_FDCAN_INSTANCE != 1) && (BL_FDCAN_INSTANCE != 2) && (BL_FDCAN_INSTANCE != 3)
+#error "BL_FDCAN_INSTANCE must be 1, 2 or 3 (the H733's three FDCAN peripherals)"
 #endif
 
 #endif /* BL_CONFIG_H */
