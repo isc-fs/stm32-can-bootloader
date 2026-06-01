@@ -84,6 +84,9 @@ void test_log_drain_clamps_when_unread_smaller_than_declared_entry(void);
 void test_log_drain_well_formed_entry_passes_through(void);
 void test_log_drain_severity_filter_below_threshold_is_skipped(void);
 void test_log_init_zeros_ring_when_magic_is_wrong(void);
+void test_tx_idle_reflects_fifo_free(void);
+void test_log_tick_skips_and_keeps_data_when_tx_busy(void);
+void test_log_emission_fits_tx_fifo_when_idle(void);
 
 /* ---- test_bl_proto_dispatch.c ---- */
 void test_dispatch_node_to_host_direction_is_silently_dropped(void);
@@ -217,6 +220,9 @@ int main(void)
     RUN_TEST(test_log_drain_well_formed_entry_passes_through);
     RUN_TEST(test_log_drain_severity_filter_below_threshold_is_skipped);
     RUN_TEST(test_log_init_zeros_ring_when_magic_is_wrong);
+    RUN_TEST(test_tx_idle_reflects_fifo_free);
+    RUN_TEST(test_log_tick_skips_and_keeps_data_when_tx_busy);
+    RUN_TEST(test_log_emission_fits_tx_fifo_when_idle);
 
     /* test_bl_proto_dispatch.c */
     RUN_TEST(test_dispatch_node_to_host_direction_is_silently_dropped);

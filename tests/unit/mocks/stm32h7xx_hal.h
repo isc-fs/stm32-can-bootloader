@@ -226,6 +226,10 @@ int  mock_fdcan_start_count(int bus);
 void mock_fdcan_set_configfilter_fail(int n);
 void mock_fdcan_set_start_fail(int n);
 
+/* #147: override the TX-FIFO free level (slots). Default 16 (idle); set 0
+ * to simulate a full queue so bl_log_tick's emission gate is exercised. */
+void mock_fdcan_set_tx_free(uint32_t free_slots);
+
 /* ---- Test-only helpers (defined alongside the stubs) ---- */
 void mock_flash_reset(void);            /* fill the 1-MB buffer with 0xFF */
 void mock_flash_set_program_fail(int n);/* next N program calls return HAL_ERROR */
