@@ -139,13 +139,13 @@ typedef struct {
 #define FDCAN_DLC_BYTES_7           (7U << 16)
 #define FDCAN_DLC_BYTES_8           (8U << 16)
 
-/* #120: the production FDCAN handles, one per peripheral (defined in
- * hal_stubs.c). On-chip these are CubeMX-generated in main.c; host-side
- * they're zero-init storage so the real bl_fdcan.c (now host-built)
- * links + its bl_fdcan_get_handle() can be checked against them. */
-extern FDCAN_HandleTypeDef hfdcan1;
-extern FDCAN_HandleTypeDef hfdcan2;
-extern FDCAN_HandleTypeDef hfdcan3;
+/* #120: the production FDCAN handles, hfdcan1/2/3, are DEFINED in
+ * hal_stubs.c (on-chip: CubeMX main.c). They're deliberately NOT
+ * extern-declared here — bl_fdcan.c carries its own extern (it must, since
+ * on-chip there's no header for them), and declaring them here too would be
+ * a redundant declaration in that TU (clang-tidy readability-redundant-
+ * declaration). test_bl_fdcan.c externs them locally to assert handle
+ * identity. */
 
 /* RX-filter surface used by bl_fdcan_configure_filters. The host stubs
  * (hal_stubs.c) just return HAL_OK — tests exercise the instance

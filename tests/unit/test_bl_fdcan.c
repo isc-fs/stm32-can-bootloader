@@ -29,6 +29,13 @@
 
 #include <stdint.h>
 
+/* hfdcanN are defined in hal_stubs.c (on-chip: CubeMX main.c). Extern them
+ * here so the override tests can assert bl_fdcan_get_handle() resolves to
+ * the right one. */
+extern FDCAN_HandleTypeDef hfdcan1;
+extern FDCAN_HandleTypeDef hfdcan2;
+extern FDCAN_HandleTypeDef hfdcan3;
+
 /* Write a single byte under the FDCAN-instance key via the real NVM API —
  * the same path CMD_NVM_WRITE takes, so coverage matches provisioning. */
 static void nvm_seed_instance(uint8_t value)
