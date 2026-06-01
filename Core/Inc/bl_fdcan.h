@@ -2,70 +2,44 @@
 #define BL_FDCAN_H
 
 /*
- * Bootloader FDCAN abstraction (issue #120 Phase A).
+ * Bootloader FDCAN abstraction (issue #120).
  *
- * The BL hosts its CAN-side protocol on exactly one FDCAN peripheral
- * at a time. Until #120 the choice was hardwired to FDCAN2 across
- * `main.c`, `stm32h7xx_hal_msp.c`, `stm32h7xx_it.c` and `bl_proto.c`.
- * This module concentrates every site that cared about "which
- * peripheral" so a per-board build flag (`-DBL_FDCAN_INSTANCE=N`)
- * picks the right instance, pin map, clock + NVIC vector — all the
- * other TUs just call `bl_fdcan_get_handle()` and stay
- * instance-agnostic.
- *
- * Phase A scope (this iteration): compile-time selection only. The
- * default (`BL_FDCAN_INSTANCE = 2`) preserves pre-#120 behaviour
- * bit-for-bit on the wire and aims for size parity with v1.3.1.
+ * The BL hosts its CAN-side protocol on exactly one FDCAN peripheral at a
+ * time. Which one is chosen by BL_FDCAN_INSTANCE (1, 2 or 3 — see
+ * bl_config.h). The CubeMX-generated MX_FDCAN{1,2,3}_Init + the
+ * HAL_FDCAN_MspInit dispatch bring up all three peripherals; this module is
+ * the thin selector that gives the rest of the BL the *selected* instance's
+ * handle, so main.c / bl_proto.c stay instance-agnostic — they call
+ * bl_fdcan_get_handle() instead of referencing a specific hfdcanN.
  *
  * Phase B (next): NVM-backed runtime override under
- * `BL_NVM_KEY_FDCAN_INSTANCE` resolved before the peripheral init.
- * `bl_fdcan_get_handle()` stays the same; under the hood it'll
- * resolve to a cached value chosen at boot rather than at link time.
+ * BL_NVM_KEY_FDCAN_INSTANCE resolved at boot. bl_fdcan_get_handle() stays
+ * the same; under the hood it resolves to a value cached at boot rather
+ * than a link-time constant, so its callers don't have to track the change.
  *
- * See `bl_config.h::BL_FDCAN_INSTANCE` for the build flag, and the
- * `pin_map_for_instance` table in `bl_fdcan.c` for per-instance GPIO
- * defaults.
+ * See bl_config.h::BL_FDCAN_INSTANCE for the build flag, and the per-
+ * instance GPIO/AF/NVIC setup in stm32h7xx_hal_msp.c::HAL_FDCAN_MspInit.
  */
 
 #include "stm32h7xx_hal.h"
 
 #include <stdint.h>
 
-/* The handle every other TU uses for HAL_FDCAN_* calls. The backing
- * storage lives in `bl_fdcan.c` and isn't exposed as an extern — all
- * accesses go through this accessor. Trivial body, so the compiler
- * inlines it at -O2 / -Os and the call overhead vs the legacy
- * direct-`&hfdcan2` shape is in the noise (4–8 bytes site-by-site,
- * far below the firmware-size-delta gate). */
+/* The handle every other TU uses for HAL_FDCAN_* calls — the CubeMX
+ * hfdcanN for the selected BL_FDCAN_INSTANCE. Trivial body, so the
+ * compiler inlines it at -O2 / -Os and the call overhead vs the legacy
+ * direct-`&hfdcan2` shape is in the noise. */
 FDCAN_HandleTypeDef *bl_fdcan_get_handle(void);
 
-/* Replaces the CubeMX-generated `MX_FDCAN2_Init` body. Loads the
- * bit-timing + FIFO sizing + filter-table sizing into
- * `bl_fdcan_handle` and calls `HAL_FDCAN_Init` against the right
- * peripheral pointer for `BL_FDCAN_INSTANCE`. Calls `Error_Handler`
- * on failure. */
-void bl_fdcan_mx_init(void);
-
-/* Replaces the body of `HAL_FDCAN_MspInit` — clock enable + GPIO
- * pin/AF config + NVIC priority for whichever instance was selected.
- * Called by HAL during `bl_fdcan_mx_init()` via the standard MSP
- * callback indirection. */
-void bl_fdcan_msp_init(FDCAN_HandleTypeDef *hfdcan);
-
-/* Replaces the body of `HAL_FDCAN_MspDeInit` — disables clock, GPIO
- * and NVIC for the selected instance. Called by HAL during
- * `HAL_FDCAN_DeInit` (which the BL→APP jump path invokes). */
-void bl_fdcan_msp_deinit(FDCAN_HandleTypeDef *hfdcan);
-
-/* Configures the two FIFO0 filters (unicast to `node_id` + broadcast
- * to `0xF`) on the resolved FDCAN instance. Replaces the body of the
- * old `main.c::Bootloader_ConfigFdcanFilters`. Returns HAL_OK on
- * success; the caller (BL init) treats anything else as fatal. */
+/* Configures the two FIFO0 filters (unicast to `node_id` + broadcast to
+ * `0xF`) on the resolved FDCAN instance, plus a reject-everything-else
+ * global filter. Replaces the old `main.c::Bootloader_ConfigFdcanFilters`.
+ * Returns HAL_OK on success; the caller (BL init) treats anything else as
+ * fatal. */
 HAL_StatusTypeDef bl_fdcan_configure_filters(uint8_t node_id);
 
 /* Returns the resolved instance number (1, 2 or 3). Useful for log
- * messages + the future health-record `fdcan_instance` field. Phase A
- * just returns `BL_FDCAN_INSTANCE` verbatim. */
+ * messages + the future health-record `fdcan_instance` field. */
 uint8_t bl_fdcan_get_instance_number(void);
 
 #endif /* BL_FDCAN_H */

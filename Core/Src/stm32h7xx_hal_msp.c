@@ -20,7 +20,9 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 /* USER CODE BEGIN Includes */
-#include "bl_fdcan.h"   /* bl_fdcan_msp_init / bl_fdcan_msp_deinit (#120 Phase A) */
+/* #120: HAL_FDCAN_MspInit below (CubeMX-generated) handles all three
+ * instances directly; bl_fdcan.c only selects the resolved handle, so this
+ * TU no longer needs bl_fdcan.h. */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
