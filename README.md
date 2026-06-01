@@ -4,7 +4,8 @@
 
 Custom bootloader for the **STM32H733** nodes of the IFS08. Lives in
 the first 128 KB of flash (sector 0) and speaks classic CAN (not
-CAN FD) over FDCAN2 to erase, program, verify and jump to an
+CAN FD) on all three FDCAN buses at once to erase, program, verify
+and jump to an
 application image at `0x08020000`. Companion to the host-side
 [`isc-fs/can-flasher`](https://github.com/isc-fs/can-flasher) CLI,
 which talks this protocol through any SLCAN / SocketCAN / PCAN
