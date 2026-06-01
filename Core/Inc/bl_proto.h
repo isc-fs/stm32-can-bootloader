@@ -256,4 +256,9 @@ uint32_t bl_proto_session_age_ms(uint32_t now_ms);
  * dashboards. */
 uint16_t bl_proto_isotp_rx_progress(void);
 
+/* #147: true when the active bus's TX FIFO is fully drained. bl_log_tick
+ * gates NOTIFY_LOG emission on this so a multi-frame log message can't
+ * overrun the depth-16 queue and drop frames mid-ISO-TP reassembly. */
+bool bl_proto_tx_idle(void);
+
 #endif /* BL_PROTO_H */

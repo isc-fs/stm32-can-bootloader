@@ -52,10 +52,10 @@
 
 /* ---- Tunables ---- */
 #define BL_LOG_RING_BYTES           1024U
-#define BL_LOG_MAX_ENTRY_TEXT       120U
+#define BL_LOG_MAX_ENTRY_TEXT       92U     /* #147: +6 B header keeps one entry <= 15 ISO-TP frames */
 #define BL_LOG_ENTRY_HEADER_SIZE    6U
 
-#define BL_LOG_DRAIN_BUDGET         256U    /* bytes per NOTIFY_LOG emission */
+#define BL_LOG_DRAIN_BUDGET         98U     /* #147: one NOTIFY_LOG <= 15 ISO-TP frames (fits the depth-16 TX FIFO) */
 #define BL_LOG_MIN_EMIT_INTERVAL_MS 50U     /* rate-limit NOTIFY_LOG traffic */
 
 /* ---- Placement in BKPSRAM ----

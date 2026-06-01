@@ -263,6 +263,11 @@ int  mock_fdcan_start_count(int bus)
 void mock_fdcan_set_configfilter_fail(int n) { g_cfgfilter_fail_remaining = n; }
 void mock_fdcan_set_start_fail(int n)        { g_start_fail_remaining = n; }
 
+/* #147: settable TX-FIFO free level (default = depth 16 = idle). Tests
+ * drive bl_proto_tx_idle() / bl_log_tick's emission gate with this. */
+static uint32_t g_tx_free_level = 16U;
+void mock_fdcan_set_tx_free(uint32_t free_slots) { g_tx_free_level = free_slots; }
+
 static mock_fdcan_frame_t g_fdcan_frames[MOCK_FDCAN_CAPTURE_DEPTH];
 static int                g_fdcan_count = 0;
 
@@ -277,6 +282,7 @@ void mock_fdcan_reset(void)
     }
     g_cfgfilter_fail_remaining = 0;
     g_start_fail_remaining     = 0;
+    g_tx_free_level            = 16U;
 }
 
 int mock_fdcan_tx_count(void) { return g_fdcan_count; }
@@ -304,10 +310,10 @@ uint32_t HAL_FDCAN_GetRxFifoFillLevel(FDCAN_HandleTypeDef *h, uint32_t fifo)
 uint32_t HAL_FDCAN_GetTxFifoFreeLevel(FDCAN_HandleTypeDef *h)
 {
     (void)h;
-    /* "Always fully drained." Matches BL_FDCAN_TX_QUEUE_DEPTH (16) in
-     * bl_proto.c — when that constant changes, this mock must agree
-     * or wait_tx_drain will spin in tests. */
-    return 16U;
+    /* Default 16 (= BL_FDCAN_TX_QUEUE_DEPTH, "fully drained") so
+     * wait_tx_drain doesn't spin; mock_fdcan_set_tx_free() overrides it so
+     * #147 tests can simulate a busy TX FIFO. */
+    return g_tx_free_level;
 }
 
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,

@@ -188,6 +188,18 @@ static void wait_tx_drain(uint32_t max_ms)
     }
 }
 
+/* #147: true when the active bus's TX FIFO is fully drained. bl_log_tick
+ * gates NOTIFY_LOG emission on this — a NOTIFY_LOG is capped to <= 15
+ * ISO-TP frames (BL_LOG_DRAIN_BUDGET), so an idle depth-16 queue always
+ * has room for a whole message, whereas blasting into a partially-full
+ * queue could overrun it and drop frames mid-reassembly. Non-blocking
+ * read: the caller skips + retries rather than waiting (the send path
+ * stays non-blocking, per the wait_tx_drain rationale above). */
+bool bl_proto_tx_idle(void)
+{
+    return HAL_FDCAN_GetTxFifoFreeLevel(bl_fdcan_get_handle()) >= BL_FDCAN_TX_QUEUE_DEPTH;
+}
+
 /* Send one raw CAN frame — always from us (the node) back to the host.
  * The ID is `BL_PROTO_DIR_NODE_TO_HOST | <id>`, where <id> is the
  * resolved node ID (NVM override or compile-time default — see
@@ -234,7 +246,15 @@ static void send_raw(const uint8_t *data, uint8_t length)
     if (HAL_FDCAN_AddMessageToTxFifoQ(bl_fdcan_get_handle(), &tx, (uint8_t *)data) != HAL_OK) {
         if (s_tx_full == 0U) {
             s_tx_full = 1U;
-            bl_log_warn("FDCAN TX FIFO full — frame dropped (FC/ACK may be lost)");
+            /* #147: stay silent while a log stream is active — this very
+             * warn would be streamed back as another NOTIFY_LOG, adding TX
+             * load to the overflow it reports (the feedback loop the bench
+             * hit). bl_log_tick's TX-idle gate prevents the overflow during
+             * streaming anyway; suppressing the line keeps the stream clean.
+             * The s_tx_full latch is still set so the state stays tracked. */
+            if (!bl_log_stream_active()) {
+                bl_log_warn("FDCAN TX FIFO full — frame dropped (FC/ACK may be lost)");
+            }
         }
     } else {
         s_tx_full = 0U;
@@ -1330,7 +1350,8 @@ void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
     /* #123 (general fix): never inject an unsolicited NOTIFY while an
      * inbound multi-frame reassembly is in flight. The heartbeat is
      * not the only emitter — NOTIFY_LIVE_DATA (multi-frame, up to
-     * 50 Hz), NOTIFY_LOG (multi-frame, up to 257 B) and NOTIFY_DTC
+     * 50 Hz), NOTIFY_LOG (multi-frame, capped to fit the TX FIFO — #147)
+     * and NOTIFY_DTC
      * all reach here, and any of them dropped onto the bus mid-
      * WRITE_CHUNK strands the host's transfer exactly as the heartbeat
      * did: with ISO-TP Flow Control BlockSize=0 the host streams a
