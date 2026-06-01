@@ -59,3 +59,4 @@ Release/
 build/
 build-tests/
 compile_commands.json
+.vscode/settings.json

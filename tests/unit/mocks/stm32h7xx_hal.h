@@ -139,7 +139,10 @@ typedef struct {
 #define FDCAN_DLC_BYTES_7           (7U << 16)
 #define FDCAN_DLC_BYTES_8           (8U << 16)
 
-extern FDCAN_HandleTypeDef hfdcan2;
+/* Renamed from hfdcan2 in #120 Phase A: production handle moved to
+ * `bl_fdcan_handle` (owned by bl_fdcan.c) so the same symbol works
+ * regardless of which FDCAN instance the build targets. */
+extern FDCAN_HandleTypeDef bl_fdcan_handle;
 
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,

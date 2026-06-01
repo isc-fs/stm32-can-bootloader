@@ -34,12 +34,11 @@
 #include "bl_node_id.h"
 #include "bl_nvm.h"
 #include "bl_obyte.h"
+#include "bl_fdcan.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 
 #include <string.h>
-
-extern FDCAN_HandleTypeDef hfdcan2;
 
 /* ---- State ---- */
 
@@ -182,7 +181,7 @@ static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
 static void wait_tx_drain(uint32_t max_ms)
 {
     uint32_t start = HAL_GetTick();
-    while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan2) < BL_FDCAN_TX_QUEUE_DEPTH) {
+    while (HAL_FDCAN_GetTxFifoFreeLevel(bl_fdcan_get_handle()) < BL_FDCAN_TX_QUEUE_DEPTH) {
         if ((HAL_GetTick() - start) >= max_ms) {
             return;  /* timeout — proceed anyway */
         }
@@ -226,9 +225,12 @@ static void send_raw(const uint8_t *data, uint8_t length)
      * (once per contiguous run of failures, re-armed on the next
      * success) so a wedge is diagnosable in the log stream without
      * spamming. A real backpressure mechanism + a drop counter/DTC is a
-     * bench-gated follow-up. */
+     * bench-gated follow-up.
+     *
+     * #120: routed through bl_fdcan_get_handle() so the selected instance
+     * (BL_FDCAN_INSTANCE) is used rather than a hardcoded hfdcan2. */
     static uint8_t s_tx_full = 0U;
-    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data) != HAL_OK) {
+    if (HAL_FDCAN_AddMessageToTxFifoQ(bl_fdcan_get_handle(), &tx, (uint8_t *)data) != HAL_OK) {
         if (s_tx_full == 0U) {
             s_tx_full = 1U;
             bl_log_warn("FDCAN TX FIFO full — frame dropped (FC/ACK may be lost)");
@@ -312,7 +314,7 @@ static void send_nack(uint8_t rejected_opcode, uint8_t code)
 static void log_isotp_error(bl_isotp_rx_status_t st)
 {
     uint32_t fifo_fill =
-        HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0);
+        HAL_FDCAN_GetRxFifoFillLevel(bl_fdcan_get_handle(), FDCAN_RX_FIFO0);
 
     /* v2 encoding: drop fifo_fill from the DTC context (already known
      * to be near-zero from the first bench-replay — see #94) and use

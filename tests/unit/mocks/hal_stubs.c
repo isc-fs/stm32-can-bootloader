@@ -178,7 +178,19 @@ RTC_TypeDef *const RTC = &g_mock_rtc;
  * Every successful HAL_FDCAN_AddMessageToTxFifoQ call records the
  * frame into a ring. Tests assert against this to verify which
  * frames the BL emits in response to a given dispatch input. */
-FDCAN_HandleTypeDef hfdcan2;   /* opaque storage matching the extern in bl_proto.c */
+/* Storage + accessor that back the production `bl_fdcan_get_handle()`
+ * in the host-test build (issue #120 Phase A). In production both
+ * live in bl_fdcan.c, but tests don't link that TU because
+ * HAL_FDCAN_Init / HAL_FDCAN_ConfigFilter / HAL_FDCAN_Start aren't
+ * stubbed in the host harness. The field contents are never read by
+ * tests — only the FDCAN TX capture mock matters — so a zero-init
+ * handle is fine. */
+FDCAN_HandleTypeDef bl_fdcan_handle;
+
+FDCAN_HandleTypeDef *bl_fdcan_get_handle(void)
+{
+    return &bl_fdcan_handle;
+}
 
 static mock_fdcan_frame_t g_fdcan_frames[MOCK_FDCAN_CAPTURE_DEPTH];
 static int                g_fdcan_count = 0;
