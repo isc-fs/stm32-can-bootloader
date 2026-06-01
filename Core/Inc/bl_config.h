@@ -74,24 +74,12 @@
 #error "BL_IWDG_RELOAD must fit the 12-bit IWDG reload register (<= 4095)."
 #endif
 
-/* Which FDCAN peripheral on the H733 hosts the bootloader bus.
- *
- * Valid values are 1 (FDCAN1), 2 (FDCAN2) and 3 (FDCAN3). All three are
- * exposed on the STM32H733ZGT6 (confirmed via the CMSIS device header
- * and on the bench) and brought up by the CubeMX MX_FDCANx_Init. Pin
- * map per instance (set in stm32h7xx_hal_msp.c): FDCAN1 = PD0/PD1,
- * FDCAN2 = PB12/PB13, FDCAN3 = PG10/PG9.
- *
- * Default is 2 to preserve pre-#120 behaviour; carriers that wire CAN
- * to FDCAN1 or FDCAN3 override at build time (`-DBL_FDCAN_INSTANCE=N`).
- * Phase B of #120 will add an NVM-backed runtime override under
- * `BL_NVM_KEY_FDCAN_INSTANCE`, mirroring the BL_NODE_ID mechanism. */
-#ifndef BL_FDCAN_INSTANCE
-#define BL_FDCAN_INSTANCE  2
-#endif
-
-#if (BL_FDCAN_INSTANCE != 1) && (BL_FDCAN_INSTANCE != 2) && (BL_FDCAN_INSTANCE != 3)
-#error "BL_FDCAN_INSTANCE must be 1, 2 or 3 (the H733's three FDCAN peripherals)"
-#endif
+/* #120: the BL serves all three FDCAN peripherals (FDCAN1/2/3) at once, so
+ * a host on whichever bus the board wires CAN to is heard — there is no
+ * instance to select or configure here. The pin map (set in
+ * stm32h7xx_hal_msp.c) is FDCAN1 = PD0/PD1, FDCAN2 = PB12/PB13,
+ * FDCAN3 = PG10/PG9; the .ioc keeps all three configured identically
+ * (notably AutoRetransmission = ENABLE, the issue #94 fix). The bus front-
+ * end lives in bl_fdcan.c. */
 
 #endif /* BL_CONFIG_H */

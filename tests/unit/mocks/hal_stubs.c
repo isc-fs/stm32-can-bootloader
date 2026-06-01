@@ -190,13 +190,39 @@ FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan2;
 FDCAN_HandleTypeDef hfdcan3;
 
-/* Filter config: the host harness doesn't model FDCAN message RAM, so
- * these just succeed — bl_fdcan_configure_filters' return-path handling is
- * what the firmware/bench exercise; here they only need to link. */
+/* #120: the BL configures + starts ALL THREE FDCAN buses. The host harness
+ * doesn't model FDCAN message RAM, so these succeed by default — but they
+ * count calls per bus so a test can assert "every bus was covered", and
+ * expose fail knobs so the configure/start error-propagation paths (BL init
+ * reboots on them) are exercised. bus index 0/1/2 = hfdcan1/2/3. */
+#define MOCK_FDCAN_BUSES 3
+
+static int g_cfgfilter_count[MOCK_FDCAN_BUSES];
+static int g_globalfilter_count[MOCK_FDCAN_BUSES];
+static int g_start_count[MOCK_FDCAN_BUSES];
+static int g_cfgfilter_fail_remaining;
+static int g_start_fail_remaining;
+
+static int fdcan_bus_index(FDCAN_HandleTypeDef *h)
+{
+    if (h == &hfdcan1) { return 0; }
+    if (h == &hfdcan2) { return 1; }
+    if (h == &hfdcan3) { return 2; }
+    return -1;
+}
+
 HAL_StatusTypeDef HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *h,
                                          FDCAN_FilterTypeDef *f)
 {
-    (void)h; (void)f;
+    (void)f;
+    if (g_cfgfilter_fail_remaining > 0) {
+        g_cfgfilter_fail_remaining--;
+        return HAL_ERROR;
+    }
+    int i = fdcan_bus_index(h);
+    if (i >= 0) {
+        g_cfgfilter_count[i]++;
+    }
     return HAL_OK;
 }
 
@@ -206,10 +232,36 @@ HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *h,
                                                uint32_t reject_remote_std,
                                                uint32_t reject_remote_ext)
 {
-    (void)h; (void)nonmatch_std; (void)nonmatch_ext;
+    (void)nonmatch_std; (void)nonmatch_ext;
     (void)reject_remote_std; (void)reject_remote_ext;
+    int i = fdcan_bus_index(h);
+    if (i >= 0) {
+        g_globalfilter_count[i]++;
+    }
     return HAL_OK;
 }
+
+HAL_StatusTypeDef HAL_FDCAN_Start(FDCAN_HandleTypeDef *h)
+{
+    if (g_start_fail_remaining > 0) {
+        g_start_fail_remaining--;
+        return HAL_ERROR;
+    }
+    int i = fdcan_bus_index(h);
+    if (i >= 0) {
+        g_start_count[i]++;
+    }
+    return HAL_OK;
+}
+
+int  mock_fdcan_cfgfilter_count(int bus)
+{ return (bus >= 0 && bus < MOCK_FDCAN_BUSES) ? g_cfgfilter_count[bus] : -1; }
+int  mock_fdcan_globalfilter_count(int bus)
+{ return (bus >= 0 && bus < MOCK_FDCAN_BUSES) ? g_globalfilter_count[bus] : -1; }
+int  mock_fdcan_start_count(int bus)
+{ return (bus >= 0 && bus < MOCK_FDCAN_BUSES) ? g_start_count[bus] : -1; }
+void mock_fdcan_set_configfilter_fail(int n) { g_cfgfilter_fail_remaining = n; }
+void mock_fdcan_set_start_fail(int n)        { g_start_fail_remaining = n; }
 
 static mock_fdcan_frame_t g_fdcan_frames[MOCK_FDCAN_CAPTURE_DEPTH];
 static int                g_fdcan_count = 0;
@@ -218,6 +270,13 @@ void mock_fdcan_reset(void)
 {
     g_fdcan_count = 0;
     memset(g_fdcan_frames, 0, sizeof(g_fdcan_frames));
+    for (int i = 0; i < MOCK_FDCAN_BUSES; i++) {
+        g_cfgfilter_count[i]    = 0;
+        g_globalfilter_count[i] = 0;
+        g_start_count[i]        = 0;
+    }
+    g_cfgfilter_fail_remaining = 0;
+    g_start_fail_remaining     = 0;
 }
 
 int mock_fdcan_tx_count(void) { return g_fdcan_count; }

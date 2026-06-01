@@ -69,48 +69,6 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  firmware-build-fdcan1:
-    # Cross-compile the BL with BL_FDCAN_INSTANCE=1 to catch any pin /
-    # NVIC / AF mismatches that the default FDCAN2 build wouldn't flag
-    # (issue #120 Phase A). Kept as a separate job so the existing
-    # `Firmware build (Debug)` / `(Release)` check names stay stable
-    # for branch-protection — those are required, this is parallel.
-    # Once we have HIL evidence the FDCAN1 path works end-to-end, this
-    # job should be promoted to required too.
-    name: Firmware build FDCAN1 (${{ matrix.preset }})
-    runs-on: ubuntu-22.04
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        preset: [Debug, Release]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install arm-none-eabi toolchain
-        uses: carlosperate/arm-none-eabi-gcc-action@v1
-        with:
-          release: '14.3.Rel1'
-
-      - name: Install Ninja
-        run: sudo apt-get update && sudo apt-get install -y ninja-build
-
-      - name: Configure
-        run: cmake --preset ${{ matrix.preset }} -DBL_FDCAN_INSTANCE=1
-
-      - name: Build
-        run: cmake --build build/${{ matrix.preset }}
-
-      - name: Report flash usage
-        run: |
-          ELF=build/${{ matrix.preset }}/CAN_BL.elf
-          arm-none-eabi-size --format=berkeley "$ELF"
-
-      # No artifact upload — the default-instance build above already
-      # publishes the canonical CAN_BL.{elf,bin,hex} for the release;
-      # the FDCAN1 variant is currently a build-only sanity check.
-
   host-tests:
     name: Host unit tests
     runs-on: ubuntu-22.04
