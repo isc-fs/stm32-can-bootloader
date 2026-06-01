@@ -129,18 +129,17 @@ void test_node_id_reinit_picks_up_nvm_changes(void);
 void test_node_id_reinit_after_tombstone_restores_default(void);
 
 /* ---- test_bl_fdcan.c ---- */
-void test_fdcan_falls_back_to_compile_time_on_empty_nvm(void);
-void test_fdcan_falls_back_on_zero(void);
-void test_fdcan_falls_back_on_four(void);
-void test_fdcan_falls_back_on_high_byte(void);
-void test_fdcan_falls_back_on_multi_byte(void);
-void test_fdcan_override_1_selects_hfdcan1(void);
-void test_fdcan_override_2_selects_hfdcan2(void);
-void test_fdcan_override_3_selects_hfdcan3(void);
-void test_fdcan_init_is_idempotent(void);
-void test_fdcan_reinit_picks_up_nvm_changes(void);
-void test_fdcan_reinit_after_tombstone_restores_default(void);
+void test_fdcan_bus_count_is_three(void);
+void test_fdcan_bus_maps_index_to_handle(void);
+void test_fdcan_bus_out_of_range_clamps_to_bus0(void);
+void test_fdcan_set_active_routes_get_handle(void);
+void test_fdcan_set_active_null_is_ignored(void);
 void test_fdcan_configure_filters_returns_ok(void);
+void test_fdcan_configure_filters_covers_all_buses(void);
+void test_fdcan_configure_filters_propagates_failure(void);
+void test_fdcan_start_all_returns_ok(void);
+void test_fdcan_start_all_starts_every_bus(void);
+void test_fdcan_start_all_propagates_failure(void);
 
 /* ---- test_bl_app_validate.c ---- */
 void test_app_stack_dtcm_base_accepted(void);
@@ -263,18 +262,17 @@ int main(void)
     RUN_TEST(test_node_id_reinit_after_tombstone_restores_default);
 
     /* test_bl_fdcan.c */
-    RUN_TEST(test_fdcan_falls_back_to_compile_time_on_empty_nvm);
-    RUN_TEST(test_fdcan_falls_back_on_zero);
-    RUN_TEST(test_fdcan_falls_back_on_four);
-    RUN_TEST(test_fdcan_falls_back_on_high_byte);
-    RUN_TEST(test_fdcan_falls_back_on_multi_byte);
-    RUN_TEST(test_fdcan_override_1_selects_hfdcan1);
-    RUN_TEST(test_fdcan_override_2_selects_hfdcan2);
-    RUN_TEST(test_fdcan_override_3_selects_hfdcan3);
-    RUN_TEST(test_fdcan_init_is_idempotent);
-    RUN_TEST(test_fdcan_reinit_picks_up_nvm_changes);
-    RUN_TEST(test_fdcan_reinit_after_tombstone_restores_default);
+    RUN_TEST(test_fdcan_bus_count_is_three);
+    RUN_TEST(test_fdcan_bus_maps_index_to_handle);
+    RUN_TEST(test_fdcan_bus_out_of_range_clamps_to_bus0);
+    RUN_TEST(test_fdcan_set_active_routes_get_handle);
+    RUN_TEST(test_fdcan_set_active_null_is_ignored);
     RUN_TEST(test_fdcan_configure_filters_returns_ok);
+    RUN_TEST(test_fdcan_configure_filters_covers_all_buses);
+    RUN_TEST(test_fdcan_configure_filters_propagates_failure);
+    RUN_TEST(test_fdcan_start_all_returns_ok);
+    RUN_TEST(test_fdcan_start_all_starts_every_bus);
+    RUN_TEST(test_fdcan_start_all_propagates_failure);
 
     /* test_bl_app_validate.c */
     RUN_TEST(test_app_stack_dtcm_base_accepted);

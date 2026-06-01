@@ -172,6 +172,9 @@ HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *h,
                                                uint32_t reject_remote_std,
                                                uint32_t reject_remote_ext);
 
+/* #120: the BL starts all three buses via bl_fdcan_start_all(). */
+HAL_StatusTypeDef HAL_FDCAN_Start(FDCAN_HandleTypeDef *h);
+
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,
                                                 uint8_t *data);
@@ -213,6 +216,15 @@ typedef struct {
 void  mock_fdcan_reset(void);
 int   mock_fdcan_tx_count(void);
 const mock_fdcan_frame_t *mock_fdcan_get(int index);  /* 0..count-1, or NULL */
+
+/* #120 per-bus call counters (bus 0/1/2 = hfdcan1/2/3) — tests assert
+ * configure_filters + start_all cover EVERY bus; the fail knobs drive the
+ * error-propagation paths. Counters reset in mock_fdcan_reset(). */
+int  mock_fdcan_cfgfilter_count(int bus);
+int  mock_fdcan_globalfilter_count(int bus);
+int  mock_fdcan_start_count(int bus);
+void mock_fdcan_set_configfilter_fail(int n);
+void mock_fdcan_set_start_fail(int n);
 
 /* ---- Test-only helpers (defined alongside the stubs) ---- */
 void mock_flash_reset(void);            /* fill the 1-MB buffer with 0xFF */

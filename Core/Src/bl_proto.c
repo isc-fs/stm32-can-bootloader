@@ -227,8 +227,9 @@ static void send_raw(const uint8_t *data, uint8_t length)
      * spamming. A real backpressure mechanism + a drop counter/DTC is a
      * bench-gated follow-up.
      *
-     * #120: routed through bl_fdcan_get_handle() so the selected instance
-     * (BL_FDCAN_INSTANCE) is used rather than a hardcoded hfdcan2. */
+     * #120: routed through bl_fdcan_get_handle(), which returns the bus the
+     * current request arrived on, so the reply goes back out that same bus
+     * (the BL serves all three FDCANs concurrently). */
     static uint8_t s_tx_full = 0U;
     if (HAL_FDCAN_AddMessageToTxFifoQ(bl_fdcan_get_handle(), &tx, (uint8_t *)data) != HAL_OK) {
         if (s_tx_full == 0U) {
