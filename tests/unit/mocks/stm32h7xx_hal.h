@@ -139,10 +139,38 @@ typedef struct {
 #define FDCAN_DLC_BYTES_7           (7U << 16)
 #define FDCAN_DLC_BYTES_8           (8U << 16)
 
-/* Renamed from hfdcan2 in #120 Phase A: production handle moved to
- * `bl_fdcan_handle` (owned by bl_fdcan.c) so the same symbol works
- * regardless of which FDCAN instance the build targets. */
-extern FDCAN_HandleTypeDef bl_fdcan_handle;
+/* #120: the production FDCAN handles, one per peripheral (defined in
+ * hal_stubs.c). On-chip these are CubeMX-generated in main.c; host-side
+ * they're zero-init storage so the real bl_fdcan.c (now host-built)
+ * links + its bl_fdcan_get_handle() can be checked against them. */
+extern FDCAN_HandleTypeDef hfdcan1;
+extern FDCAN_HandleTypeDef hfdcan2;
+extern FDCAN_HandleTypeDef hfdcan3;
+
+/* RX-filter surface used by bl_fdcan_configure_filters. The host stubs
+ * (hal_stubs.c) just return HAL_OK — tests exercise the instance
+ * resolution, not the filter geometry; this only has to compile + link. */
+typedef struct {
+    uint32_t IdType;
+    uint32_t FilterIndex;
+    uint32_t FilterType;
+    uint32_t FilterConfig;
+    uint32_t FilterID1;
+    uint32_t FilterID2;
+} FDCAN_FilterTypeDef;
+
+#define FDCAN_FILTER_MASK           0x00000001U
+#define FDCAN_FILTER_TO_RXFIFO0     0x00000001U
+#define FDCAN_REJECT                0x00000040U
+#define FDCAN_REJECT_REMOTE         0x00000002U
+
+HAL_StatusTypeDef HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *h,
+                                         FDCAN_FilterTypeDef *f);
+HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *h,
+                                               uint32_t nonmatch_std,
+                                               uint32_t nonmatch_ext,
+                                               uint32_t reject_remote_std,
+                                               uint32_t reject_remote_ext);
 
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,

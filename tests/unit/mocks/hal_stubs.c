@@ -178,18 +178,37 @@ RTC_TypeDef *const RTC = &g_mock_rtc;
  * Every successful HAL_FDCAN_AddMessageToTxFifoQ call records the
  * frame into a ring. Tests assert against this to verify which
  * frames the BL emits in response to a given dispatch input. */
-/* Storage + accessor that back the production `bl_fdcan_get_handle()`
- * in the host-test build (issue #120 Phase A). In production both
- * live in bl_fdcan.c, but tests don't link that TU because
- * HAL_FDCAN_Init / HAL_FDCAN_ConfigFilter / HAL_FDCAN_Start aren't
- * stubbed in the host harness. The field contents are never read by
- * tests — only the FDCAN TX capture mock matters — so a zero-init
- * handle is fine. */
-FDCAN_HandleTypeDef bl_fdcan_handle;
+/* #120: storage for the three production FDCAN handles. On-chip these are
+ * CubeMX-generated in main.c + initialised by MX_FDCAN{1,2,3}_Init; host-
+ * side they're zero-init structs so the real bl_fdcan.c (now linked into
+ * the test build) can return their addresses and test_bl_fdcan can check
+ * which one bl_fdcan_get_handle() resolves to. The field contents are
+ * never read — only the FDCAN TX capture mock + the handle identity
+ * matter. bl_fdcan_get_handle() itself now comes from the real bl_fdcan.c,
+ * not a stub. */
+FDCAN_HandleTypeDef hfdcan1;
+FDCAN_HandleTypeDef hfdcan2;
+FDCAN_HandleTypeDef hfdcan3;
 
-FDCAN_HandleTypeDef *bl_fdcan_get_handle(void)
+/* Filter config: the host harness doesn't model FDCAN message RAM, so
+ * these just succeed — bl_fdcan_configure_filters' return-path handling is
+ * what the firmware/bench exercise; here they only need to link. */
+HAL_StatusTypeDef HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *h,
+                                         FDCAN_FilterTypeDef *f)
 {
-    return &bl_fdcan_handle;
+    (void)h; (void)f;
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *h,
+                                               uint32_t nonmatch_std,
+                                               uint32_t nonmatch_ext,
+                                               uint32_t reject_remote_std,
+                                               uint32_t reject_remote_ext)
+{
+    (void)h; (void)nonmatch_std; (void)nonmatch_ext;
+    (void)reject_remote_std; (void)reject_remote_ext;
+    return HAL_OK;
 }
 
 static mock_fdcan_frame_t g_fdcan_frames[MOCK_FDCAN_CAPTURE_DEPTH];
