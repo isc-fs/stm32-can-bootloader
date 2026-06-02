@@ -56,6 +56,7 @@ extern uint8_t g_fake_flash[1024U * 1024U];
 
 /* ---- Boot-request handshake (irrelevant on host but kept for parity) ---- */
 #define BL_BOOT_REQ_MAGIC        0xB00710ADU
+#define BL_BOOT_APP_MAGIC        0xB0070A99U   /* #142: boot-app-via-reset */
 
 /* ---- bl_log ring placement override ----
  *
