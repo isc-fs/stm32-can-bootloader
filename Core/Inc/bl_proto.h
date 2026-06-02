@@ -42,6 +42,11 @@
 #define BL_PROTO_DIRECTION_BIT      0x10U   /* bit 4 of the 11-bit ID */
 #define BL_PROTO_NODE_MASK          0x0FU   /* low nibble */
 #define BL_PROTO_ID_VALID_MASK      0x1FU   /* bits 4:0 only; everything else must be zero */
+/* #154: the FDCAN acceptance filter must match the FULL 11-bit ID, not just
+ * the 5 valid bits — a 5-bit mask aliases any frame whose low bits collide
+ * with our node (e.g. charger 0x101 -> node-1 unicast) into RX FIFO0, which
+ * pre-fix cancelled the auto-jump. Exact-match the standard ID. */
+#define BL_PROTO_ID_FILTER_MASK     0x7FFU  /* full 11-bit standard ID — exact match */
 
 /* ---- Direction constants ---- */
 #define BL_PROTO_DIR_HOST_TO_NODE   0x00U
