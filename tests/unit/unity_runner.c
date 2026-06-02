@@ -141,6 +141,7 @@ void test_fdcan_set_active_null_is_ignored(void);
 void test_fdcan_configure_filters_returns_ok(void);
 void test_fdcan_configure_filters_covers_all_buses(void);
 void test_fdcan_configure_filters_propagates_failure(void);
+void test_fdcan_filter_is_exact_match_not_aliasing(void);
 void test_fdcan_start_all_returns_ok(void);
 void test_fdcan_start_all_starts_every_bus(void);
 void test_fdcan_start_all_propagates_failure(void);
@@ -278,6 +279,7 @@ int main(void)
     RUN_TEST(test_fdcan_configure_filters_returns_ok);
     RUN_TEST(test_fdcan_configure_filters_covers_all_buses);
     RUN_TEST(test_fdcan_configure_filters_propagates_failure);
+    RUN_TEST(test_fdcan_filter_is_exact_match_not_aliasing);
     RUN_TEST(test_fdcan_start_all_returns_ok);
     RUN_TEST(test_fdcan_start_all_starts_every_bus);
     RUN_TEST(test_fdcan_start_all_propagates_failure);
