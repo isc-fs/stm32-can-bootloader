@@ -113,6 +113,7 @@ void test_send_notify_suppressed_while_reassembly_in_flight(void);
 void test_send_notify_emitted_when_idle(void);
 void test_session_timeout_after_flash_does_not_jump(void);
 void test_session_timeout_clean_diagnostic_session_still_jumps(void);
+void test_jump_after_write_routes_through_reset_to_app(void);
 void test_ob_apply_wrp_rejects_non_bootloader_sector(void);
 void test_ob_apply_wrp_accepts_bootloader_sector(void);
 void test_ob_apply_wrp_forces_sector0_when_mask_zero(void);
@@ -249,6 +250,7 @@ int main(void)
     RUN_TEST(test_send_notify_emitted_when_idle);
     RUN_TEST(test_session_timeout_after_flash_does_not_jump);
     RUN_TEST(test_session_timeout_clean_diagnostic_session_still_jumps);
+    RUN_TEST(test_jump_after_write_routes_through_reset_to_app);
     RUN_TEST(test_ob_apply_wrp_rejects_non_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_accepts_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_forces_sector0_when_mask_zero);

@@ -97,6 +97,7 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
 static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes);
 static uint8_t  Bootloader_IsBootRequestActive(void);
+static uint8_t  Bootloader_IsBootAppRequestActive(void);   /* #142 */
 
 /* USER CODE END PFP */
 
@@ -550,20 +551,35 @@ static void Bootloader_Init(void) {
 	 * — concurrent drain of the same FIFO would have dropped frames.
 	 * Audit follow-up (#68 last bullet). */
 
-	/* Check if application explicitly requested to stay in bootloader */
-	uint8_t bootReq = Bootloader_IsBootRequestActive();
-
-	if (bootReq) {
-		/* Stay in bootloader, do not arm auto-jump */
+	/* #142: honour a one-shot "boot the app" request first. handle_jump /
+	 * handle_reset set BL_BOOT_APP_MAGIC + reset when a flash write happened
+	 * this session, so a write-then-jump reaches the app through a clean
+	 * reset (the flash is idle again, cold-equivalent) rather than a direct
+	 * warm jump that can leave the freshly-written app stuck. Jump straight
+	 * to the just-written, re-validated app. */
+	if (Bootloader_IsBootAppRequestActive()) {
+		if (Bootloader_CheckApplication() == 0x00U) {
+			Bootloader_JumpToApplication();   /* never returns on success */
+		}
+		/* App not valid (shouldn't happen right after a verified write) —
+		 * fall through to listen mode rather than brick. */
 		g_AutoJumpEnabled = 0U;
 	} else {
-		/* Normal behavior: arm auto-jump if a valid application is present */
-		uint8_t appStatus = Bootloader_CheckApplication();
-		if (appStatus == 0x00U) {
-			g_AutoJumpEnabled = 1U;
-			g_AutoJumpDeadline = HAL_GetTick() + 2000U; /* e.g. 2 seconds window */
-		} else {
+		/* Check if application explicitly requested to stay in bootloader */
+		uint8_t bootReq = Bootloader_IsBootRequestActive();
+
+		if (bootReq) {
+			/* Stay in bootloader, do not arm auto-jump */
 			g_AutoJumpEnabled = 0U;
+		} else {
+			/* Normal behavior: arm auto-jump if a valid application is present */
+			uint8_t appStatus = Bootloader_CheckApplication();
+			if (appStatus == 0x00U) {
+				g_AutoJumpEnabled = 1U;
+				g_AutoJumpDeadline = HAL_GetTick() + 2000U; /* e.g. 2 seconds window */
+			} else {
+				g_AutoJumpEnabled = 0U;
+			}
 		}
 	}
 }
@@ -951,6 +967,23 @@ static uint8_t Bootloader_IsBootRequestActive(void) {
 		return 1U;
 	}
 
+	return 0U;
+}
+
+/* #142: one-shot "boot the app via a clean reset" request. Set by
+ * handle_jump / handle_reset (bl_proto) when a flash write happened in the
+ * session; consumed here on the next boot. Reads + clears BKP0R only if it
+ * holds BL_BOOT_APP_MAGIC, so a BL_BOOT_REQ_MAGIC (stay-in-BL) request is
+ * left intact for Bootloader_IsBootRequestActive. */
+static uint8_t Bootloader_IsBootAppRequestActive(void) {
+	HAL_PWR_EnableBkUpAccess();
+	if ((RCC->BDCR & RCC_BDCR_RTCEN) == 0U) {
+		__HAL_RCC_RTC_ENABLE();
+	}
+	if (RTC->BKP0R == BL_BOOT_APP_MAGIC) {
+		RTC->BKP0R = 0U;   /* one-shot */
+		return 1U;
+	}
 	return 0U;
 }
 

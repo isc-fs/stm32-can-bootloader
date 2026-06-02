@@ -76,6 +76,14 @@ static uint32_t g_session_last_activity_ms = 0U;
  * and DISCONNECT. */
 static bool g_session_flash_dirty = false;
 
+/* #142: set on the first FLASH_ERASE/WRITE since boot, never cleared. A
+ * direct warm jump straight after a program op can leave the freshly-
+ * written app stuck (a cold boot / diff-jump are fine) — so once this is
+ * set, the JUMP / RESET-to-app paths reach the app through a clean reset
+ * instead. Boot-scoped (unlike the session-scoped g_session_flash_dirty)
+ * so a disconnect-then-jump is still covered. */
+static bool g_flash_written_this_boot = false;
+
 static void session_touch_activity(void)
 {
     g_session_last_activity_ms = HAL_GetTick();
@@ -698,6 +706,29 @@ static void handle_nvm_format(uint8_t peer, const uint8_t *args, uint16_t args_l
     send_ack(resp, (uint16_t)sizeof(resp));
 }
 
+/* #142: reach the installed app. If a flash write happened this boot, a
+ * direct warm jump can leave the freshly-written app stuck (controller
+ * transient state a cold boot clears) — so route through a clean reset: set
+ * the one-shot boot-app magic and NVIC_SystemReset; the next boot honours it
+ * (Bootloader_IsBootAppRequestActive) and jumps from a cold-equivalent
+ * state. With no write this boot, keep the instant warm jump (the common
+ * path, which already works). Mirrors the backup-domain setup that
+ * handle_reset mode 2 uses. */
+static void boot_application(void)
+{
+    if (g_flash_written_this_boot) {
+        HAL_PWR_EnableBkUpAccess();
+        if ((RCC->BDCR & RCC_BDCR_RTCEN) == 0U) {
+            __HAL_RCC_RTC_ENABLE();
+        }
+        RTC->BKP0R = BL_BOOT_APP_MAGIC;
+        NVIC_SystemReset();
+        return;   /* unreachable on HW (reset); keeps the host build from
+                   * falling through to the direct jump below */
+    }
+    Bootloader_JumpToApplication();   /* never returns on success */
+}
+
 /* CMD_RESET: [mode]. Modes:
  *   0 = hard reset via NVIC_SystemReset
  *   1 = soft reset — same as 0 on this family, no distinction in HW
@@ -758,7 +789,7 @@ static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
         }
 
         case 3U:
-            Bootloader_JumpToApplication();
+            boot_application();   /* #142: reset-to-app if a write happened */
             break;
 
         default:
@@ -802,6 +833,7 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
      * become inconsistent. Mark the session so a subsequent timeout
      * won't auto-jump into a half-flashed binary. */
     g_session_flash_dirty = true;
+    g_flash_written_this_boot = true;   /* #142: boot-scoped, never cleared */
     if (args_len < 8U) {
         send_nack(BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
         return;
@@ -849,6 +881,7 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
     /* #125 C2: mark the app image as in-flux for the rest of this
      * session (see handle_flash_erase + session_timeout). */
     g_session_flash_dirty = true;
+    g_flash_written_this_boot = true;   /* #142: boot-scoped, never cleared */
     if (args_len < 5U) {
         /* Need at least the address plus one data byte. */
         send_nack(BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
@@ -987,7 +1020,7 @@ static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
      * deinitialises FDCAN and yanks the MCU into the app's vector
      * table. Same rationale + timeout as in handle_reset above. */
     wait_tx_drain(50U);
-    Bootloader_JumpToApplication();  /* never returns on success */
+    boot_application();  /* #142: reset-to-app after a write, else warm jump */
 }
 
 /* CMD_OB_READ: no args. Returns a 16-byte bl_ob_status_t snapshot. Not
