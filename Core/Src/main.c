@@ -679,16 +679,23 @@ static void Bootloader_DrainBus(FDCAN_HandleTypeDef *h) {
 		if (rxHeader.IdType != FDCAN_STANDARD_ID) {
 			continue;
 		}
-		g_AutoJumpEnabled = 0U;
 
 		/* `bl_proto_parse_id` returns false on malformed IDs (bits 10..5
-		 * set, or reserved node→host IDs). The FDCAN filter already rejects
-		 * anything we can't decode, so this is defence-in-depth against
-		 * future filter drift or loopback-harness feeds. */
+		 * set, or reserved node→host IDs). This is the real alias guard: a
+		 * single FDCAN mask filter can't enforce "bits 10:5 == 0", so e.g.
+		 * the charger's 0x101 (0x101 & 0x1F == 0x01) reaches us looking like
+		 * a node-1 unicast — parse_id is what rejects it. */
 		bl_proto_id_t id;
 		if (!bl_proto_parse_id(rxHeader.Identifier, &id)) {
 			continue;
 		}
+
+		/* #154: cancel the auto-jump ONLY once a frame decodes as a valid BL
+		 * command for us — never on bare reception. Cancelling before
+		 * parse_id let a filter-aliased frame (charger 0x101 on FDCAN1)
+		 * permanently strand the carrier in the BL on any reset while the
+		 * charger was energised — no app, no pack supervision. */
+		g_AutoJumpEnabled = 0U;
 
 		/* `HAL_FDCAN_GetRxMessage` already extracts the DLC nibble into
 		 * bits 3:0 of rxHeader.DataLength (see `FDCAN_ELEMENT_MASK_DLC >>

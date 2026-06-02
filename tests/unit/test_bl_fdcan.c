@@ -20,6 +20,7 @@
 
 #include "bl_fdcan.h"
 #include "stm32h7xx_hal.h"   /* hfdcanN + the mock per-bus call counters */
+#include "bl_proto.h"        /* BL_PROTO_ID_FILTER_MASK (#154) */
 
 #include "unity.h"
 
@@ -100,6 +101,17 @@ void test_fdcan_configure_filters_propagates_failure(void)
      * up with a partly-deaf bus. Fail the first ConfigFilter call. */
     mock_fdcan_set_configfilter_fail(1);
     TEST_ASSERT_TRUE(bl_fdcan_configure_filters(0x05U) != HAL_OK);
+}
+
+void test_fdcan_filter_is_exact_match_not_aliasing(void)
+{
+    /* #154: the RX acceptance filter must match the FULL 11-bit ID, not a
+     * loose low-5-bit mask. A 5-bit mask aliases foreign IDs (the charger's
+     * 0x101, where 0x101 & 0x1F == 0x01) into RX FIFO0 as a node-1 unicast
+     * — which stranded the carrier in the BL. Exact-match rejects them at
+     * the controller. */
+    TEST_ASSERT_EQUAL_INT(HAL_OK, bl_fdcan_configure_filters(0x01U));
+    TEST_ASSERT_EQUAL_HEX32(BL_PROTO_ID_FILTER_MASK, mock_fdcan_last_filter_mask());
 }
 
 /* ---- start_all: every bus ---- */

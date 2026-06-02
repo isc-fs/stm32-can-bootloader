@@ -68,10 +68,12 @@ void bl_fdcan_set_active(FDCAN_HandleTypeDef *handle)
 
 /* ---- bl_fdcan_configure_filters ---------------------------------- *
  *
- * The filter geometry is identical on every bus — same 5-low-bit mask, same
- * two entries (unicast + broadcast), same reject-everything-else global
- * filter. Install it on all three so each bus only ever forwards frames
- * addressed to this node (or the broadcast id) into RX FIFO0. */
+ * The filter geometry is identical on every bus — same exact-match mask
+ * (#154: full 11-bit, so aliases like the charger's 0x101 can't slip in as
+ * a node-1 unicast), same two entries (unicast + broadcast), same
+ * reject-everything-else global filter. Install it on all three so each bus
+ * only ever forwards frames addressed to this node (or broadcast) into
+ * RX FIFO0. */
 HAL_StatusTypeDef bl_fdcan_configure_filters(uint8_t node_id)
 {
     for (uint8_t b = 0U; b < BL_FDCAN_BUS_COUNT; b++) {
@@ -81,7 +83,7 @@ HAL_StatusTypeDef bl_fdcan_configure_filters(uint8_t node_id)
         filter.IdType       = FDCAN_STANDARD_ID;
         filter.FilterType   = FDCAN_FILTER_MASK;
         filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-        filter.FilterID2    = BL_PROTO_ID_VALID_MASK;
+        filter.FilterID2    = BL_PROTO_ID_FILTER_MASK;   /* #154: exact 11-bit match, no aliases */
 
         /* Unicast: host -> this node. */
         filter.FilterIndex = 0U;

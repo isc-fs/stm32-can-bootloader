@@ -230,6 +230,9 @@ void mock_fdcan_set_start_fail(int n);
  * to simulate a full queue so bl_log_tick's emission gate is exercised. */
 void mock_fdcan_set_tx_free(uint32_t free_slots);
 
+/* #154: acceptance mask of the last ConfigFilter call (exact-match check). */
+uint32_t mock_fdcan_last_filter_mask(void);
+
 /* ---- Test-only helpers (defined alongside the stubs) ---- */
 void mock_flash_reset(void);            /* fill the 1-MB buffer with 0xFF */
 void mock_flash_set_program_fail(int n);/* next N program calls return HAL_ERROR */

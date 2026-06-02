@@ -211,14 +211,20 @@ static int fdcan_bus_index(FDCAN_HandleTypeDef *h)
     return -1;
 }
 
+/* #154: the acceptance mask of the most recent ConfigFilter — tests assert
+ * it's exact-match (full 11-bit), not a loose low-bit mask that aliases
+ * foreign IDs (e.g. charger 0x101) into RX FIFO0. */
+static uint32_t g_last_filter_mask = 0xFFFFFFFFU;
+uint32_t mock_fdcan_last_filter_mask(void) { return g_last_filter_mask; }
+
 HAL_StatusTypeDef HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *h,
                                          FDCAN_FilterTypeDef *f)
 {
-    (void)f;
     if (g_cfgfilter_fail_remaining > 0) {
         g_cfgfilter_fail_remaining--;
         return HAL_ERROR;
     }
+    g_last_filter_mask = f->FilterID2;
     int i = fdcan_bus_index(h);
     if (i >= 0) {
         g_cfgfilter_count[i]++;
@@ -283,6 +289,7 @@ void mock_fdcan_reset(void)
     g_cfgfilter_fail_remaining = 0;
     g_start_fail_remaining     = 0;
     g_tx_free_level            = 16U;
+    g_last_filter_mask         = 0xFFFFFFFFU;
 }
 
 int mock_fdcan_tx_count(void) { return g_fdcan_count; }
