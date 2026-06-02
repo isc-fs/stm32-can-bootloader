@@ -716,6 +716,10 @@ static void handle_nvm_format(uint8_t peer, const uint8_t *args, uint16_t args_l
  * handle_reset mode 2 uses. */
 static void boot_application(void)
 {
+    /* #145: an explicit boot (JUMP / RESET mode 3) releases the persistent
+     * stay-in-BL hold — the operator is deliberately booting the app. */
+    (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);
+
     if (g_flash_written_this_boot) {
         HAL_PWR_EnableBkUpAccess();
         if ((RCC->BDCR & RCC_BDCR_RTCEN) == 0U) {
@@ -784,6 +788,16 @@ static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
                 __HAL_RCC_RTC_ENABLE();
             }
             RTC->BKP0R = BL_BOOT_REQ_MAGIC;
+            /* #145: also persist the intent in NVM (sector 7) so it survives
+             * a POR — RTC->BKP0R doesn't. Cleared by FLASH_VERIFY or an
+             * explicit boot. Best-effort: if NVM is full the hold degrades to
+             * the volatile RTC magic (this reset only), so warn. */
+            {
+                uint8_t one = 1U;
+                if (bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, &one, 1U) != BL_NVM_OK) {
+                    bl_log_warn("stay-in-BL: NVM persist failed; hold won't survive a power-cycle");
+                }
+            }
             NVIC_SystemReset();
             break;
         }
@@ -986,6 +1000,10 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
     }
 
     Bootloader_InvalidateAppCheckCache();   /* #146 H2: metadata stamped — re-check next call */
+
+    /* #145: a verified new image clears any persistent stay-in-BL hold — the
+     * reason to park in the BL (a bad app) is resolved, so resume auto-boot. */
+    (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);
 
     uint8_t resp[1] = { BL_CMD_FLASH_VERIFY };
     send_ack(resp, (uint16_t)sizeof(resp));
