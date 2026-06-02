@@ -78,6 +78,13 @@ FDCAN_HandleTypeDef hfdcan3;
 static uint8_t  g_AutoJumpEnabled  = 0U;
 static uint32_t g_AutoJumpDeadline = 0U;
 
+/* #146 H2: cache the (full-image-CRC) Bootloader_CheckApplication result so
+ * the per-tick hot path (bl_health / bl_live, every main-loop iteration
+ * during a session) doesn't re-CRC the whole app each pass and stall the RX
+ * drain. Invalidated on any FLASH_* op via Bootloader_InvalidateAppCheckCache(). */
+static uint8_t  g_appcheck_result = 0xFFU;
+static uint8_t  g_appcheck_valid  = 0U;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -96,6 +103,7 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
  * with external linkage in main.h so bl_proto.c can call them for
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
 static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes);
+static uint8_t  Bootloader_CheckApplicationCompute(void);   /* #146 H2: uncached core */
 static uint8_t  Bootloader_IsBootRequestActive(void);
 static uint8_t  Bootloader_IsBootAppRequestActive(void);   /* #142 */
 
@@ -901,7 +909,7 @@ static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes) {
 	return crc;
 }
 
-uint8_t Bootloader_CheckApplication(void) {
+static uint8_t Bootloader_CheckApplicationCompute(void) {
 	/* Read metadata from flash */
 	uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 
@@ -953,6 +961,25 @@ uint8_t Bootloader_CheckApplication(void) {
 	}
 
 	return 0x00;  //OK
+}
+
+/* #146 H2: cached public entry point. The full CRC32 over the app
+ * (Bootloader_CheckApplicationCompute) is too expensive to run every
+ * main-loop tick; cache the verdict and recompute only when flash may have
+ * changed (Bootloader_InvalidateAppCheckCache, called from the FLASH_*
+ * handlers). The boot decision + jump path read the same cached value. */
+uint8_t Bootloader_CheckApplication(void) {
+	if (g_appcheck_valid == 0U) {
+		g_appcheck_result = Bootloader_CheckApplicationCompute();
+		g_appcheck_valid  = 1U;
+	}
+	return g_appcheck_result;
+}
+
+/* #146 H2: drop the cached verdict — call after any FLASH_* op so the next
+ * Bootloader_CheckApplication re-reads flash. */
+void Bootloader_InvalidateAppCheckCache(void) {
+	g_appcheck_valid = 0U;
 }
 
 static uint8_t Bootloader_IsBootRequestActive(void) {

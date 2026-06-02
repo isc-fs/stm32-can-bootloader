@@ -59,6 +59,7 @@ void Error_Handler(void);
  * region CubeMX preserves on regeneration. */
 void    Bootloader_JumpToApplication(void);
 uint8_t Bootloader_CheckApplication(void);
+void    Bootloader_InvalidateAppCheckCache(void);   /* #146 H2 */
 
 /* USER CODE END EFP */
 

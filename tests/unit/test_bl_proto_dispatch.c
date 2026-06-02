@@ -874,6 +874,29 @@ void test_jump_after_write_routes_through_reset_to_app(void)
     TEST_ASSERT_EQUAL_INT(jumps_before, mock_bootloader_jump_count()); /* did NOT warm-jump */
 }
 
+/* ---- #146 H2: flash ops invalidate the cached app-check verdict ---- */
+
+void test_flash_ops_invalidate_app_check_cache(void)
+{
+    /* The full-image CRC in CheckApplication is cached so the per-tick hot
+     * path doesn't re-run it; each flash mutation must drop that cache, or a
+     * stale verdict could auto-jump a half-written app (or refuse a good one).
+     * ERASE + WRITE each invalidate (both fire after the session gate, before
+     * the HAL op). */
+    reset_session_and_tx();
+    prime_session();
+
+    int before = mock_appcheck_invalidate_count();
+    /* Two FLASH_WRITEs (each fits a single frame); each is a flash mutation
+     * that must invalidate the cached verdict. ERASE shares the same
+     * invalidate site, but its 8-byte args don't fit one SF to send here. */
+    uint8_t wargs[5] = { 0x00, 0x00, 0x02, 0x08, 0xAAU };   /* WRITE BASE + 1 byte */
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+
+    TEST_ASSERT_TRUE(mock_appcheck_invalidate_count() >= before + 2);
+}
+
 /* ---- #125 C4: OB_APPLY_WRP sector-bitmap validation ---- */
 
 /* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + one CF and
