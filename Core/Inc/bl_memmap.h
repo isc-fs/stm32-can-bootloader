@@ -60,6 +60,13 @@
 #define BL_APP_META_MAGIC        0xB007C0DEU
 
 /* ---- Boot-request handshake (RTC->BKP0R) ---- */
-#define BL_BOOT_REQ_MAGIC        0xB00710ADU
+#define BL_BOOT_REQ_MAGIC        0xB00710ADU   /* one-shot: stay in bootloader */
+/* #142: one-shot "boot the app via a clean reset" — set by handle_jump /
+ * handle_reset when a flash write happened this session, so a write-then-
+ * jump reaches the app through a reset (cold-equivalent flash state) rather
+ * than a direct warm jump that can leave the freshly-written app stuck.
+ * Distinct value from BL_BOOT_REQ_MAGIC; shares BKP0R (mutually exclusive,
+ * both one-shot). */
+#define BL_BOOT_APP_MAGIC        0xB0070A99U
 
 #endif /* BL_MEMMAP_H */

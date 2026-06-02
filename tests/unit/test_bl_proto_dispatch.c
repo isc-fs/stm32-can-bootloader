@@ -838,6 +838,42 @@ void test_session_timeout_clean_diagnostic_session_still_jumps(void)
     TEST_ASSERT_FALSE(bl_proto_session_active());
 }
 
+/* ---- #142: JUMP after a flash write reaches the app via a reset ---- */
+
+void test_jump_after_write_routes_through_reset_to_app(void)
+{
+    /* A direct warm jump straight after a program op can leave the freshly-
+     * written app stuck (cold boot / diff-jump are fine). So once a
+     * FLASH_WRITE/ERASE has happened, the JUMP path must NOT warm-jump — it
+     * sets the one-shot BL_BOOT_APP_MAGIC in BKP0R and resets, so the next
+     * boot jumps from a cold-equivalent flash state.
+     *
+     * g_flash_written_this_boot is boot-scoped (never cleared), so the
+     * FLASH_WRITE here latches it regardless of prior tests; the host's
+     * NVIC_SystemReset is a no-op, so we assert via the magic + that no
+     * direct jump happened. The no-write path (direct warm jump) is the
+     * pre-existing behaviour, HIL-covered by the working diff-jump. */
+    reset_session_and_tx();
+    mock_set_check_application(0x00U);   /* a valid app is present */
+    RTC->BKP0R = 0U;                     /* clear any stale boot magic */
+    int jumps_before = mock_bootloader_jump_count();
+
+    prime_session();
+    uint8_t wargs[5] = { 0x00U, 0x00U, 0x02U, 0x08U, 0xAAU };  /* a FLASH_WRITE +1 byte */
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);       /* latches the write flag */
+    mock_fdcan_reset();
+
+    /* RESET mode 3 (= boot the installed app) hits the same boot_application()
+     * as JUMP but checks only CheckApplication, not the address — so it
+     * sidesteps the host mock's fake BL_APP_BASE vs the on-chip 0x08020000
+     * the JUMP opcode carries. */
+    uint8_t rargs[1] = { 3U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, rargs, 1U);
+
+    TEST_ASSERT_EQUAL_HEX32(BL_BOOT_APP_MAGIC, RTC->BKP0R);             /* reset-to-app requested */
+    TEST_ASSERT_EQUAL_INT(jumps_before, mock_bootloader_jump_count()); /* did NOT warm-jump */
+}
+
 /* ---- #125 C4: OB_APPLY_WRP sector-bitmap validation ---- */
 
 /* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + one CF and
