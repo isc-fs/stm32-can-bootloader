@@ -41,8 +41,11 @@ shared harness, regulated market — UN-R155, ISO/SAE 21434).
 ## Target hardware
 
 **MCU / flash**: STM32H733ZGT6, 1 MB flash, 8 × 128 KB sectors,
-single bank. **CAN**: FDCAN2 on PB12 (RX) / PB13 (TX), AF9 —
-classic CAN only; CAN FD is not used by the protocol at this stage.
+single bank. **CAN**: classic CAN (no FD) on all three FDCANs at once —
+FDCAN1 `PD0/PD1`, FDCAN2 `PB12/PB13`, FDCAN3 `PG10/PG9` (#120). The FDCAN
+kernel clock is the **HSE**, and the 1 Mbps bit-timing assumes a **24 MHz
+crystal** — a hard BOM requirement: a different crystal shifts the baud out
+of tolerance, so a `_Static_assert` in `main.c` fails the build (#144).
 **Status LEDs**: `OK_STATUS` on PD14, `ERR_STATUS` on PD15.
 
 ---
