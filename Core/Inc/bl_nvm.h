@@ -64,6 +64,7 @@
 /* 0x0004 retired (#120): the BL now serves all three FDCAN buses at once,
  * so there is no runtime instance override. Don't reuse 0x0004 — pre-release
  * test boards may still hold a stale byte there; nothing reads it now. */
+#define BL_NVM_KEY_STAY_IN_BL         0x0005U   /* #145: 1-byte persistent "hold in bootloader" flag — survives POR (unlike RTC->BKP0R) */
 
 /* ---- Status codes ---- */
 typedef enum {

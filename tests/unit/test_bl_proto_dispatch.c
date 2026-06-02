@@ -897,6 +897,33 @@ void test_flash_ops_invalidate_app_check_cache(void)
     TEST_ASSERT_TRUE(mock_appcheck_invalidate_count() >= before + 2);
 }
 
+/* ---- #145: persistent stay-in-BL (NVM) survives POR + clears on boot ---- */
+
+void test_stay_in_bl_persists_in_nvm_and_clears_on_boot(void)
+{
+    /* RESET mode 2 persists a stay-in-BL flag in NVM (survives POR, unlike
+     * the volatile RTC->BKP0R); an explicit boot (RESET mode 3 / JUMP) clears
+     * it. The boot decision reads this flag in main.c's
+     * Bootloader_IsBootRequestActive (not host-built) — here we pin the
+     * bl_proto set/clear half. */
+    reset_session_and_tx();
+    mock_set_check_application(0x00U);   /* valid app present, so RESET-3 boots */
+    bl_nvm_init();
+    (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);   /* clear any stale flag */
+
+    /* RESET mode 2 -> sets the persistent flag = 1. */
+    uint8_t r2[1] = { 2U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, r2, 1U);
+    uint8_t v = 0U, len = 0U;
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_read(BL_NVM_KEY_STAY_IN_BL, &v, sizeof(v), &len));
+    TEST_ASSERT_EQUAL_UINT8(1U, v);
+
+    /* RESET mode 3 (explicit boot) -> clears it (tombstone -> NOT_FOUND). */
+    uint8_t r3[1] = { 3U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, r3, 1U);
+    TEST_ASSERT_TRUE(bl_nvm_read(BL_NVM_KEY_STAY_IN_BL, &v, sizeof(v), &len) != BL_NVM_OK);
+}
+
 /* ---- #125 C4: OB_APPLY_WRP sector-bitmap validation ---- */
 
 /* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + one CF and

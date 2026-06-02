@@ -1015,6 +1015,19 @@ static uint8_t Bootloader_IsBootRequestActive(void) {
 		return 1U;
 	}
 
+	/* #145: the RTC->BKP0R magic above is volatile — POR/BOR wipes it, so a
+	 * power-cycle would otherwise auto-jump into a known-bad app the operator
+	 * had parked in the BL (recovery = SWD = open the enclosure). A persistent
+	 * NVM flag (sector 7) survives POR; honour it too. NOT one-shot — it holds
+	 * across every reset until cleared by a FLASH_VERIFY (a new good image) or
+	 * an explicit boot (JUMP / RESET mode 3); see bl_proto.c. */
+	uint8_t stay_val = 0U;
+	uint8_t stay_len = 0U;
+	if (bl_nvm_read(BL_NVM_KEY_STAY_IN_BL, &stay_val, sizeof(stay_val), &stay_len) == BL_NVM_OK
+	    && stay_len == 1U && stay_val == 1U) {
+		return 1U;
+	}
+
 	return 0U;
 }
 
