@@ -415,8 +415,15 @@ jobs:
           # Tightened from the v1.2.0 first-landing values
           # (2048 / 256 / 256) after observing several release cycles
           # of legitimate change deltas — see the header comment for
-          # the numbers. text 1024 is still ~4 % of the current image;
-          # data 64 catches any meaningful new global.
+          # the numbers. data 64 catches any meaningful new global.
+          #
+          # text raised 1024 -> 1280 for #120 multi-FDCAN: the bl_fdcan
+          # multi-bus selector + three-instance MX_FDCAN init + the v1.6.0
+          # boot-path fixes add ~1248 B text vs the single-instance
+          # baseline. The v1.6.0 release roll-up carries it all in one PR
+          # (each constituent change was under the old budget on dev). Once
+          # v1.6.0 is the main baseline this can tighten back toward 1024 —
+          # same story as the bss bump just below.
           #
           # bss raised 128 -> 512 for #120 multi-FDCAN: selecting the bus
           # instance (compile-time now, NVM-runtime in Phase B) means all
@@ -425,7 +432,7 @@ jobs:
           # 512 still catches surprise framework / RTOS / large-buffer
           # allocations; once #120 lands on main its handles are in the
           # baseline and this can tighten back toward 128.
-          TEXT_MAX_INCREASE=1024
+          TEXT_MAX_INCREASE=1280
           DATA_MAX_INCREASE=64
           BSS_MAX_INCREASE=512
 
