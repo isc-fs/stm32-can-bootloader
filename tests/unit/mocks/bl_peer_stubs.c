@@ -182,10 +182,15 @@ bl_ob_rc_t bl_obyte_read(bl_ob_status_t *out)
  * need the no-valid-app branch. */
 static int     g_jump_count   = 0;
 static uint8_t g_check_app_rv = 0U;
+static int     g_appcheck_invalidate_count = 0;   /* #146 H2 */
 
 void Bootloader_JumpToApplication(void) { g_jump_count++; }
 uint8_t Bootloader_CheckApplication(void)  { return g_check_app_rv; }
+/* #146 H2: the real one drops main.c's cached verdict; the host harness just
+ * counts the call so tests can assert the FLASH_* handlers invalidate it. */
+void Bootloader_InvalidateAppCheckCache(void) { g_appcheck_invalidate_count++; }
 
 int  mock_bootloader_jump_count(void)        { return g_jump_count; }
-void mock_bootloader_reset(void)             { g_jump_count = 0; g_check_app_rv = 0U; }
+int  mock_appcheck_invalidate_count(void)    { return g_appcheck_invalidate_count; }
+void mock_bootloader_reset(void)             { g_jump_count = 0; g_check_app_rv = 0U; g_appcheck_invalidate_count = 0; }
 void mock_set_check_application(uint8_t rv)  { g_check_app_rv = rv; }
