@@ -61,6 +61,10 @@
 #define BL_NVM_KEY_NODE_ID            0x0001U   /* 1-byte override for compile-time BL_NODE_ID */
 #define BL_NVM_KEY_CAN_BITRATE        0x0002U   /* future — CAN bitrate preference             */
 #define BL_NVM_KEY_FLASH_WRITE_COUNT  0x0003U   /* persistent counter of bl_flash_{write,erase} */
+/* 0x0004 retired (#120): the BL now serves all three FDCAN buses at once,
+ * so there is no runtime instance override. Don't reuse 0x0004 — pre-release
+ * test boards may still hold a stale byte there; nothing reads it now. */
+#define BL_NVM_KEY_STAY_IN_BL         0x0005U   /* #145: 1-byte persistent "hold in bootloader" flag — survives POR (unlike RTC->BKP0R) */
 
 /* ---- Status codes ---- */
 typedef enum {

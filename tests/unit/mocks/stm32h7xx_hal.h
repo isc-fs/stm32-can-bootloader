@@ -139,7 +139,41 @@ typedef struct {
 #define FDCAN_DLC_BYTES_7           (7U << 16)
 #define FDCAN_DLC_BYTES_8           (8U << 16)
 
-extern FDCAN_HandleTypeDef hfdcan2;
+/* #120: the production FDCAN handles, hfdcan1/2/3, are DEFINED in
+ * hal_stubs.c (on-chip: CubeMX main.c). They're deliberately NOT
+ * extern-declared here — bl_fdcan.c carries its own extern (it must, since
+ * on-chip there's no header for them), and declaring them here too would be
+ * a redundant declaration in that TU (clang-tidy readability-redundant-
+ * declaration). test_bl_fdcan.c externs them locally to assert handle
+ * identity. */
+
+/* RX-filter surface used by bl_fdcan_configure_filters. The host stubs
+ * (hal_stubs.c) just return HAL_OK — tests exercise the instance
+ * resolution, not the filter geometry; this only has to compile + link. */
+typedef struct {
+    uint32_t IdType;
+    uint32_t FilterIndex;
+    uint32_t FilterType;
+    uint32_t FilterConfig;
+    uint32_t FilterID1;
+    uint32_t FilterID2;
+} FDCAN_FilterTypeDef;
+
+#define FDCAN_FILTER_MASK           0x00000001U
+#define FDCAN_FILTER_TO_RXFIFO0     0x00000001U
+#define FDCAN_REJECT                0x00000040U
+#define FDCAN_REJECT_REMOTE         0x00000002U
+
+HAL_StatusTypeDef HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *h,
+                                         FDCAN_FilterTypeDef *f);
+HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *h,
+                                               uint32_t nonmatch_std,
+                                               uint32_t nonmatch_ext,
+                                               uint32_t reject_remote_std,
+                                               uint32_t reject_remote_ext);
+
+/* #120: the BL starts all three buses via bl_fdcan_start_all(). */
+HAL_StatusTypeDef HAL_FDCAN_Start(FDCAN_HandleTypeDef *h);
 
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,
                                                 FDCAN_TxHeaderTypeDef *hdr,
@@ -183,6 +217,22 @@ void  mock_fdcan_reset(void);
 int   mock_fdcan_tx_count(void);
 const mock_fdcan_frame_t *mock_fdcan_get(int index);  /* 0..count-1, or NULL */
 
+/* #120 per-bus call counters (bus 0/1/2 = hfdcan1/2/3) — tests assert
+ * configure_filters + start_all cover EVERY bus; the fail knobs drive the
+ * error-propagation paths. Counters reset in mock_fdcan_reset(). */
+int  mock_fdcan_cfgfilter_count(int bus);
+int  mock_fdcan_globalfilter_count(int bus);
+int  mock_fdcan_start_count(int bus);
+void mock_fdcan_set_configfilter_fail(int n);
+void mock_fdcan_set_start_fail(int n);
+
+/* #147: override the TX-FIFO free level (slots). Default 16 (idle); set 0
+ * to simulate a full queue so bl_log_tick's emission gate is exercised. */
+void mock_fdcan_set_tx_free(uint32_t free_slots);
+
+/* #154: acceptance mask of the last ConfigFilter call (exact-match check). */
+uint32_t mock_fdcan_last_filter_mask(void);
+
 /* ---- Test-only helpers (defined alongside the stubs) ---- */
 void mock_flash_reset(void);            /* fill the 1-MB buffer with 0xFF */
 void mock_flash_set_program_fail(int n);/* next N program calls return HAL_ERROR */
@@ -196,6 +246,7 @@ void mock_advance_tick(uint32_t dt);
 int  mock_bootloader_jump_count(void);
 void mock_bootloader_reset(void);
 void mock_set_check_application(uint8_t rv);
+int  mock_appcheck_invalidate_count(void);   /* #146 H2 */
 
 /* OB_APPLY_WRP observability (bl_peer_stubs.c) — for #125 C4 tests. */
 uint32_t mock_ob_apply_wrp_last_mask(void);

@@ -74,4 +74,12 @@
 #error "BL_IWDG_RELOAD must fit the 12-bit IWDG reload register (<= 4095)."
 #endif
 
+/* #120: the BL serves all three FDCAN peripherals (FDCAN1/2/3) at once, so
+ * a host on whichever bus the board wires CAN to is heard — there is no
+ * instance to select or configure here. The pin map (set in
+ * stm32h7xx_hal_msp.c) is FDCAN1 = PD0/PD1, FDCAN2 = PB12/PB13,
+ * FDCAN3 = PG10/PG9; the .ioc keeps all three configured identically
+ * (notably AutoRetransmission = ENABLE, the issue #94 fix). The bus front-
+ * end lives in bl_fdcan.c. */
+
 #endif /* BL_CONFIG_H */

@@ -84,6 +84,9 @@ void test_log_drain_clamps_when_unread_smaller_than_declared_entry(void);
 void test_log_drain_well_formed_entry_passes_through(void);
 void test_log_drain_severity_filter_below_threshold_is_skipped(void);
 void test_log_init_zeros_ring_when_magic_is_wrong(void);
+void test_tx_idle_reflects_fifo_free(void);
+void test_log_tick_skips_and_keeps_data_when_tx_busy(void);
+void test_log_emission_fits_tx_fifo_when_idle(void);
 
 /* ---- test_bl_proto_dispatch.c ---- */
 void test_dispatch_node_to_host_direction_is_silently_dropped(void);
@@ -110,6 +113,9 @@ void test_send_notify_suppressed_while_reassembly_in_flight(void);
 void test_send_notify_emitted_when_idle(void);
 void test_session_timeout_after_flash_does_not_jump(void);
 void test_session_timeout_clean_diagnostic_session_still_jumps(void);
+void test_jump_after_write_routes_through_reset_to_app(void);
+void test_flash_ops_invalidate_app_check_cache(void);
+void test_stay_in_bl_persists_in_nvm_and_clears_on_boot(void);
 void test_ob_apply_wrp_rejects_non_bootloader_sector(void);
 void test_ob_apply_wrp_accepts_bootloader_sector(void);
 void test_ob_apply_wrp_forces_sector0_when_mask_zero(void);
@@ -127,6 +133,20 @@ void test_node_id_accepts_max_unicast(void);
 void test_node_id_init_is_idempotent(void);
 void test_node_id_reinit_picks_up_nvm_changes(void);
 void test_node_id_reinit_after_tombstone_restores_default(void);
+
+/* ---- test_bl_fdcan.c ---- */
+void test_fdcan_bus_count_is_three(void);
+void test_fdcan_bus_maps_index_to_handle(void);
+void test_fdcan_bus_out_of_range_clamps_to_bus0(void);
+void test_fdcan_set_active_routes_get_handle(void);
+void test_fdcan_set_active_null_is_ignored(void);
+void test_fdcan_configure_filters_returns_ok(void);
+void test_fdcan_configure_filters_covers_all_buses(void);
+void test_fdcan_configure_filters_propagates_failure(void);
+void test_fdcan_filter_is_exact_match_not_aliasing(void);
+void test_fdcan_start_all_returns_ok(void);
+void test_fdcan_start_all_starts_every_bus(void);
+void test_fdcan_start_all_propagates_failure(void);
 
 /* ---- test_bl_app_validate.c ---- */
 void test_app_stack_dtcm_base_accepted(void);
@@ -204,6 +224,9 @@ int main(void)
     RUN_TEST(test_log_drain_well_formed_entry_passes_through);
     RUN_TEST(test_log_drain_severity_filter_below_threshold_is_skipped);
     RUN_TEST(test_log_init_zeros_ring_when_magic_is_wrong);
+    RUN_TEST(test_tx_idle_reflects_fifo_free);
+    RUN_TEST(test_log_tick_skips_and_keeps_data_when_tx_busy);
+    RUN_TEST(test_log_emission_fits_tx_fifo_when_idle);
 
     /* test_bl_proto_dispatch.c */
     RUN_TEST(test_dispatch_node_to_host_direction_is_silently_dropped);
@@ -230,6 +253,9 @@ int main(void)
     RUN_TEST(test_send_notify_emitted_when_idle);
     RUN_TEST(test_session_timeout_after_flash_does_not_jump);
     RUN_TEST(test_session_timeout_clean_diagnostic_session_still_jumps);
+    RUN_TEST(test_jump_after_write_routes_through_reset_to_app);
+    RUN_TEST(test_flash_ops_invalidate_app_check_cache);
+    RUN_TEST(test_stay_in_bl_persists_in_nvm_and_clears_on_boot);
     RUN_TEST(test_ob_apply_wrp_rejects_non_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_accepts_bootloader_sector);
     RUN_TEST(test_ob_apply_wrp_forces_sector0_when_mask_zero);
@@ -247,6 +273,20 @@ int main(void)
     RUN_TEST(test_node_id_init_is_idempotent);
     RUN_TEST(test_node_id_reinit_picks_up_nvm_changes);
     RUN_TEST(test_node_id_reinit_after_tombstone_restores_default);
+
+    /* test_bl_fdcan.c */
+    RUN_TEST(test_fdcan_bus_count_is_three);
+    RUN_TEST(test_fdcan_bus_maps_index_to_handle);
+    RUN_TEST(test_fdcan_bus_out_of_range_clamps_to_bus0);
+    RUN_TEST(test_fdcan_set_active_routes_get_handle);
+    RUN_TEST(test_fdcan_set_active_null_is_ignored);
+    RUN_TEST(test_fdcan_configure_filters_returns_ok);
+    RUN_TEST(test_fdcan_configure_filters_covers_all_buses);
+    RUN_TEST(test_fdcan_configure_filters_propagates_failure);
+    RUN_TEST(test_fdcan_filter_is_exact_match_not_aliasing);
+    RUN_TEST(test_fdcan_start_all_returns_ok);
+    RUN_TEST(test_fdcan_start_all_starts_every_bus);
+    RUN_TEST(test_fdcan_start_all_propagates_failure);
 
     /* test_bl_app_validate.c */
     RUN_TEST(test_app_stack_dtcm_base_accepted);

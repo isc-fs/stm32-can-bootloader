@@ -178,7 +178,101 @@ RTC_TypeDef *const RTC = &g_mock_rtc;
  * Every successful HAL_FDCAN_AddMessageToTxFifoQ call records the
  * frame into a ring. Tests assert against this to verify which
  * frames the BL emits in response to a given dispatch input. */
-FDCAN_HandleTypeDef hfdcan2;   /* opaque storage matching the extern in bl_proto.c */
+/* #120: storage for the three production FDCAN handles. On-chip these are
+ * CubeMX-generated in main.c + initialised by MX_FDCAN{1,2,3}_Init; host-
+ * side they're zero-init structs so the real bl_fdcan.c (now linked into
+ * the test build) can return their addresses and test_bl_fdcan can check
+ * which one bl_fdcan_get_handle() resolves to. The field contents are
+ * never read — only the FDCAN TX capture mock + the handle identity
+ * matter. bl_fdcan_get_handle() itself now comes from the real bl_fdcan.c,
+ * not a stub. */
+FDCAN_HandleTypeDef hfdcan1;
+FDCAN_HandleTypeDef hfdcan2;
+FDCAN_HandleTypeDef hfdcan3;
+
+/* #120: the BL configures + starts ALL THREE FDCAN buses. The host harness
+ * doesn't model FDCAN message RAM, so these succeed by default — but they
+ * count calls per bus so a test can assert "every bus was covered", and
+ * expose fail knobs so the configure/start error-propagation paths (BL init
+ * reboots on them) are exercised. bus index 0/1/2 = hfdcan1/2/3. */
+#define MOCK_FDCAN_BUSES 3
+
+static int g_cfgfilter_count[MOCK_FDCAN_BUSES];
+static int g_globalfilter_count[MOCK_FDCAN_BUSES];
+static int g_start_count[MOCK_FDCAN_BUSES];
+static int g_cfgfilter_fail_remaining;
+static int g_start_fail_remaining;
+
+static int fdcan_bus_index(FDCAN_HandleTypeDef *h)
+{
+    if (h == &hfdcan1) { return 0; }
+    if (h == &hfdcan2) { return 1; }
+    if (h == &hfdcan3) { return 2; }
+    return -1;
+}
+
+/* #154: the acceptance mask of the most recent ConfigFilter — tests assert
+ * it's exact-match (full 11-bit), not a loose low-bit mask that aliases
+ * foreign IDs (e.g. charger 0x101) into RX FIFO0. */
+static uint32_t g_last_filter_mask = 0xFFFFFFFFU;
+uint32_t mock_fdcan_last_filter_mask(void) { return g_last_filter_mask; }
+
+HAL_StatusTypeDef HAL_FDCAN_ConfigFilter(FDCAN_HandleTypeDef *h,
+                                         FDCAN_FilterTypeDef *f)
+{
+    if (g_cfgfilter_fail_remaining > 0) {
+        g_cfgfilter_fail_remaining--;
+        return HAL_ERROR;
+    }
+    g_last_filter_mask = f->FilterID2;
+    int i = fdcan_bus_index(h);
+    if (i >= 0) {
+        g_cfgfilter_count[i]++;
+    }
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_FDCAN_ConfigGlobalFilter(FDCAN_HandleTypeDef *h,
+                                               uint32_t nonmatch_std,
+                                               uint32_t nonmatch_ext,
+                                               uint32_t reject_remote_std,
+                                               uint32_t reject_remote_ext)
+{
+    (void)nonmatch_std; (void)nonmatch_ext;
+    (void)reject_remote_std; (void)reject_remote_ext;
+    int i = fdcan_bus_index(h);
+    if (i >= 0) {
+        g_globalfilter_count[i]++;
+    }
+    return HAL_OK;
+}
+
+HAL_StatusTypeDef HAL_FDCAN_Start(FDCAN_HandleTypeDef *h)
+{
+    if (g_start_fail_remaining > 0) {
+        g_start_fail_remaining--;
+        return HAL_ERROR;
+    }
+    int i = fdcan_bus_index(h);
+    if (i >= 0) {
+        g_start_count[i]++;
+    }
+    return HAL_OK;
+}
+
+int  mock_fdcan_cfgfilter_count(int bus)
+{ return (bus >= 0 && bus < MOCK_FDCAN_BUSES) ? g_cfgfilter_count[bus] : -1; }
+int  mock_fdcan_globalfilter_count(int bus)
+{ return (bus >= 0 && bus < MOCK_FDCAN_BUSES) ? g_globalfilter_count[bus] : -1; }
+int  mock_fdcan_start_count(int bus)
+{ return (bus >= 0 && bus < MOCK_FDCAN_BUSES) ? g_start_count[bus] : -1; }
+void mock_fdcan_set_configfilter_fail(int n) { g_cfgfilter_fail_remaining = n; }
+void mock_fdcan_set_start_fail(int n)        { g_start_fail_remaining = n; }
+
+/* #147: settable TX-FIFO free level (default = depth 16 = idle). Tests
+ * drive bl_proto_tx_idle() / bl_log_tick's emission gate with this. */
+static uint32_t g_tx_free_level = 16U;
+void mock_fdcan_set_tx_free(uint32_t free_slots) { g_tx_free_level = free_slots; }
 
 static mock_fdcan_frame_t g_fdcan_frames[MOCK_FDCAN_CAPTURE_DEPTH];
 static int                g_fdcan_count = 0;
@@ -187,6 +281,15 @@ void mock_fdcan_reset(void)
 {
     g_fdcan_count = 0;
     memset(g_fdcan_frames, 0, sizeof(g_fdcan_frames));
+    for (int i = 0; i < MOCK_FDCAN_BUSES; i++) {
+        g_cfgfilter_count[i]    = 0;
+        g_globalfilter_count[i] = 0;
+        g_start_count[i]        = 0;
+    }
+    g_cfgfilter_fail_remaining = 0;
+    g_start_fail_remaining     = 0;
+    g_tx_free_level            = 16U;
+    g_last_filter_mask         = 0xFFFFFFFFU;
 }
 
 int mock_fdcan_tx_count(void) { return g_fdcan_count; }
@@ -214,10 +317,10 @@ uint32_t HAL_FDCAN_GetRxFifoFillLevel(FDCAN_HandleTypeDef *h, uint32_t fifo)
 uint32_t HAL_FDCAN_GetTxFifoFreeLevel(FDCAN_HandleTypeDef *h)
 {
     (void)h;
-    /* "Always fully drained." Matches BL_FDCAN_TX_QUEUE_DEPTH (16) in
-     * bl_proto.c — when that constant changes, this mock must agree
-     * or wait_tx_drain will spin in tests. */
-    return 16U;
+    /* Default 16 (= BL_FDCAN_TX_QUEUE_DEPTH, "fully drained") so
+     * wait_tx_drain doesn't spin; mock_fdcan_set_tx_free() overrides it so
+     * #147 tests can simulate a busy TX FIFO. */
+    return g_tx_free_level;
 }
 
 HAL_StatusTypeDef HAL_FDCAN_AddMessageToTxFifoQ(FDCAN_HandleTypeDef *h,

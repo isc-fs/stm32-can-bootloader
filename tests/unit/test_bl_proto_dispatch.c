@@ -838,6 +838,92 @@ void test_session_timeout_clean_diagnostic_session_still_jumps(void)
     TEST_ASSERT_FALSE(bl_proto_session_active());
 }
 
+/* ---- #142: JUMP after a flash write reaches the app via a reset ---- */
+
+void test_jump_after_write_routes_through_reset_to_app(void)
+{
+    /* A direct warm jump straight after a program op can leave the freshly-
+     * written app stuck (cold boot / diff-jump are fine). So once a
+     * FLASH_WRITE/ERASE has happened, the JUMP path must NOT warm-jump — it
+     * sets the one-shot BL_BOOT_APP_MAGIC in BKP0R and resets, so the next
+     * boot jumps from a cold-equivalent flash state.
+     *
+     * g_flash_written_this_boot is boot-scoped (never cleared), so the
+     * FLASH_WRITE here latches it regardless of prior tests; the host's
+     * NVIC_SystemReset is a no-op, so we assert via the magic + that no
+     * direct jump happened. The no-write path (direct warm jump) is the
+     * pre-existing behaviour, HIL-covered by the working diff-jump. */
+    reset_session_and_tx();
+    mock_set_check_application(0x00U);   /* a valid app is present */
+    RTC->BKP0R = 0U;                     /* clear any stale boot magic */
+    int jumps_before = mock_bootloader_jump_count();
+
+    prime_session();
+    uint8_t wargs[5] = { 0x00U, 0x00U, 0x02U, 0x08U, 0xAAU };  /* a FLASH_WRITE +1 byte */
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);       /* latches the write flag */
+    mock_fdcan_reset();
+
+    /* RESET mode 3 (= boot the installed app) hits the same boot_application()
+     * as JUMP but checks only CheckApplication, not the address — so it
+     * sidesteps the host mock's fake BL_APP_BASE vs the on-chip 0x08020000
+     * the JUMP opcode carries. */
+    uint8_t rargs[1] = { 3U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, rargs, 1U);
+
+    TEST_ASSERT_EQUAL_HEX32(BL_BOOT_APP_MAGIC, RTC->BKP0R);             /* reset-to-app requested */
+    TEST_ASSERT_EQUAL_INT(jumps_before, mock_bootloader_jump_count()); /* did NOT warm-jump */
+}
+
+/* ---- #146 H2: flash ops invalidate the cached app-check verdict ---- */
+
+void test_flash_ops_invalidate_app_check_cache(void)
+{
+    /* The full-image CRC in CheckApplication is cached so the per-tick hot
+     * path doesn't re-run it; each flash mutation must drop that cache, or a
+     * stale verdict could auto-jump a half-written app (or refuse a good one).
+     * ERASE + WRITE each invalidate (both fire after the session gate, before
+     * the HAL op). */
+    reset_session_and_tx();
+    prime_session();
+
+    int before = mock_appcheck_invalidate_count();
+    /* Two FLASH_WRITEs (each fits a single frame); each is a flash mutation
+     * that must invalidate the cached verdict. ERASE shares the same
+     * invalidate site, but its 8-byte args don't fit one SF to send here. */
+    uint8_t wargs[5] = { 0x00, 0x00, 0x02, 0x08, 0xAAU };   /* WRITE BASE + 1 byte */
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+    send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+
+    TEST_ASSERT_TRUE(mock_appcheck_invalidate_count() >= before + 2);
+}
+
+/* ---- #145: persistent stay-in-BL (NVM) survives POR + clears on boot ---- */
+
+void test_stay_in_bl_persists_in_nvm_and_clears_on_boot(void)
+{
+    /* RESET mode 2 persists a stay-in-BL flag in NVM (survives POR, unlike
+     * the volatile RTC->BKP0R); an explicit boot (RESET mode 3 / JUMP) clears
+     * it. The boot decision reads this flag in main.c's
+     * Bootloader_IsBootRequestActive (not host-built) — here we pin the
+     * bl_proto set/clear half. */
+    reset_session_and_tx();
+    mock_set_check_application(0x00U);   /* valid app present, so RESET-3 boots */
+    bl_nvm_init();
+    (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);   /* clear any stale flag */
+
+    /* RESET mode 2 -> sets the persistent flag = 1. */
+    uint8_t r2[1] = { 2U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, r2, 1U);
+    uint8_t v = 0U, len = 0U;
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_read(BL_NVM_KEY_STAY_IN_BL, &v, sizeof(v), &len));
+    TEST_ASSERT_EQUAL_UINT8(1U, v);
+
+    /* RESET mode 3 (explicit boot) -> clears it (tombstone -> NOT_FOUND). */
+    uint8_t r3[1] = { 3U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, r3, 1U);
+    TEST_ASSERT_TRUE(bl_nvm_read(BL_NVM_KEY_STAY_IN_BL, &v, sizeof(v), &len) != BL_NVM_OK);
+}
+
 /* ---- #125 C4: OB_APPLY_WRP sector-bitmap validation ---- */
 
 /* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + one CF and

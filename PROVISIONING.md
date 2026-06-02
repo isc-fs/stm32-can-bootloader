@@ -212,6 +212,18 @@ CAN. No per-board build, no per-board reflash. The mechanism is
 documented in detail in
 [`ARCHITECTURE.md § Node ID provisioning and FDCAN filtering`](ARCHITECTURE.md#node-id-provisioning-and-fdcan-filtering).
 
+> **Fleet on one shared bus.** Several ECUs can share a single CAN bus
+> even if each board taps it from a *different* FDCAN peripheral — the
+> BL listens on FDCAN1/2/3 simultaneously, so one identical image
+> reaches every board regardless of which one it uses
+> ([rationale](ARCHITECTURE.md#multi-bus-fdcan--the-bl-serves-all-three-at-once)).
+> Give each ECU a **distinct** node ID so the host can address them
+> individually. On a shared bus, assign those IDs **at burn time**
+> (compile-time `-DBL_NODE_ID`, or an SWD-side NVM write) — or provision
+> over CAN **one ECU at a time, before they share the bus**: blank /
+> identically-defaulted boards all answer to the same ID and would
+> collide.
+
 > ⚠️ Pre-v1.3.0 bootloaders defined the same key but **never read it
 > back at boot**. Writing key `0x0001` on a v1.2.0 or older board has
 > no observable effect; the board keeps answering at its compile-time

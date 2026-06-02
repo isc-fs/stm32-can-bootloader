@@ -34,12 +34,11 @@
 #include "bl_node_id.h"
 #include "bl_nvm.h"
 #include "bl_obyte.h"
+#include "bl_fdcan.h"
 #include "main.h"
 #include "stm32h7xx_hal.h"
 
 #include <string.h>
-
-extern FDCAN_HandleTypeDef hfdcan2;
 
 /* ---- State ---- */
 
@@ -76,6 +75,14 @@ static uint32_t g_session_last_activity_ms = 0U;
  * SWD (open the sealed enclosure). Cleared on CONNECT (fresh session)
  * and DISCONNECT. */
 static bool g_session_flash_dirty = false;
+
+/* #142: set on the first FLASH_ERASE/WRITE since boot, never cleared. A
+ * direct warm jump straight after a program op can leave the freshly-
+ * written app stuck (a cold boot / diff-jump are fine) — so once this is
+ * set, the JUMP / RESET-to-app paths reach the app through a clean reset
+ * instead. Boot-scoped (unlike the session-scoped g_session_flash_dirty)
+ * so a disconnect-then-jump is still covered. */
+static bool g_flash_written_this_boot = false;
 
 static void session_touch_activity(void)
 {
@@ -182,11 +189,23 @@ static uint32_t dlc_bytes_to_fdcan(uint8_t bytes)
 static void wait_tx_drain(uint32_t max_ms)
 {
     uint32_t start = HAL_GetTick();
-    while (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan2) < BL_FDCAN_TX_QUEUE_DEPTH) {
+    while (HAL_FDCAN_GetTxFifoFreeLevel(bl_fdcan_get_handle()) < BL_FDCAN_TX_QUEUE_DEPTH) {
         if ((HAL_GetTick() - start) >= max_ms) {
             return;  /* timeout — proceed anyway */
         }
     }
+}
+
+/* #147: true when the active bus's TX FIFO is fully drained. bl_log_tick
+ * gates NOTIFY_LOG emission on this — a NOTIFY_LOG is capped to <= 15
+ * ISO-TP frames (BL_LOG_DRAIN_BUDGET), so an idle depth-16 queue always
+ * has room for a whole message, whereas blasting into a partially-full
+ * queue could overrun it and drop frames mid-reassembly. Non-blocking
+ * read: the caller skips + retries rather than waiting (the send path
+ * stays non-blocking, per the wait_tx_drain rationale above). */
+bool bl_proto_tx_idle(void)
+{
+    return HAL_FDCAN_GetTxFifoFreeLevel(bl_fdcan_get_handle()) >= BL_FDCAN_TX_QUEUE_DEPTH;
 }
 
 /* Send one raw CAN frame — always from us (the node) back to the host.
@@ -226,12 +245,24 @@ static void send_raw(const uint8_t *data, uint8_t length)
      * (once per contiguous run of failures, re-armed on the next
      * success) so a wedge is diagnosable in the log stream without
      * spamming. A real backpressure mechanism + a drop counter/DTC is a
-     * bench-gated follow-up. */
+     * bench-gated follow-up.
+     *
+     * #120: routed through bl_fdcan_get_handle(), which returns the bus the
+     * current request arrived on, so the reply goes back out that same bus
+     * (the BL serves all three FDCANs concurrently). */
     static uint8_t s_tx_full = 0U;
-    if (HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan2, &tx, (uint8_t *)data) != HAL_OK) {
+    if (HAL_FDCAN_AddMessageToTxFifoQ(bl_fdcan_get_handle(), &tx, (uint8_t *)data) != HAL_OK) {
         if (s_tx_full == 0U) {
             s_tx_full = 1U;
-            bl_log_warn("FDCAN TX FIFO full — frame dropped (FC/ACK may be lost)");
+            /* #147: stay silent while a log stream is active — this very
+             * warn would be streamed back as another NOTIFY_LOG, adding TX
+             * load to the overflow it reports (the feedback loop the bench
+             * hit). bl_log_tick's TX-idle gate prevents the overflow during
+             * streaming anyway; suppressing the line keeps the stream clean.
+             * The s_tx_full latch is still set so the state stays tracked. */
+            if (!bl_log_stream_active()) {
+                bl_log_warn("FDCAN TX FIFO full — frame dropped (FC/ACK may be lost)");
+            }
         }
     } else {
         s_tx_full = 0U;
@@ -312,7 +343,7 @@ static void send_nack(uint8_t rejected_opcode, uint8_t code)
 static void log_isotp_error(bl_isotp_rx_status_t st)
 {
     uint32_t fifo_fill =
-        HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0);
+        HAL_FDCAN_GetRxFifoFillLevel(bl_fdcan_get_handle(), FDCAN_RX_FIFO0);
 
     /* v2 encoding: drop fifo_fill from the DTC context (already known
      * to be near-zero from the first bench-replay — see #94) and use
@@ -675,6 +706,33 @@ static void handle_nvm_format(uint8_t peer, const uint8_t *args, uint16_t args_l
     send_ack(resp, (uint16_t)sizeof(resp));
 }
 
+/* #142: reach the installed app. If a flash write happened this boot, a
+ * direct warm jump can leave the freshly-written app stuck (controller
+ * transient state a cold boot clears) — so route through a clean reset: set
+ * the one-shot boot-app magic and NVIC_SystemReset; the next boot honours it
+ * (Bootloader_IsBootAppRequestActive) and jumps from a cold-equivalent
+ * state. With no write this boot, keep the instant warm jump (the common
+ * path, which already works). Mirrors the backup-domain setup that
+ * handle_reset mode 2 uses. */
+static void boot_application(void)
+{
+    /* #145: an explicit boot (JUMP / RESET mode 3) releases the persistent
+     * stay-in-BL hold — the operator is deliberately booting the app. */
+    (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);
+
+    if (g_flash_written_this_boot) {
+        HAL_PWR_EnableBkUpAccess();
+        if ((RCC->BDCR & RCC_BDCR_RTCEN) == 0U) {
+            __HAL_RCC_RTC_ENABLE();
+        }
+        RTC->BKP0R = BL_BOOT_APP_MAGIC;
+        NVIC_SystemReset();
+        return;   /* unreachable on HW (reset); keeps the host build from
+                   * falling through to the direct jump below */
+    }
+    Bootloader_JumpToApplication();   /* never returns on success */
+}
+
 /* CMD_RESET: [mode]. Modes:
  *   0 = hard reset via NVIC_SystemReset
  *   1 = soft reset — same as 0 on this family, no distinction in HW
@@ -730,12 +788,22 @@ static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
                 __HAL_RCC_RTC_ENABLE();
             }
             RTC->BKP0R = BL_BOOT_REQ_MAGIC;
+            /* #145: also persist the intent in NVM (sector 7) so it survives
+             * a POR — RTC->BKP0R doesn't. Cleared by FLASH_VERIFY or an
+             * explicit boot. Best-effort: if NVM is full the hold degrades to
+             * the volatile RTC magic (this reset only), so warn. */
+            {
+                uint8_t one = 1U;
+                if (bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, &one, 1U) != BL_NVM_OK) {
+                    bl_log_warn("stay-in-BL: NVM persist failed; hold won't survive a power-cycle");
+                }
+            }
             NVIC_SystemReset();
             break;
         }
 
         case 3U:
-            Bootloader_JumpToApplication();
+            boot_application();   /* #142: reset-to-app if a write happened */
             break;
 
         default:
@@ -779,6 +847,8 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
      * become inconsistent. Mark the session so a subsequent timeout
      * won't auto-jump into a half-flashed binary. */
     g_session_flash_dirty = true;
+    g_flash_written_this_boot = true;   /* #142: boot-scoped, never cleared */
+    Bootloader_InvalidateAppCheckCache();   /* #146 H2: flash changing — drop the cached verdict */
     if (args_len < 8U) {
         send_nack(BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
         return;
@@ -826,6 +896,8 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
     /* #125 C2: mark the app image as in-flux for the rest of this
      * session (see handle_flash_erase + session_timeout). */
     g_session_flash_dirty = true;
+    g_flash_written_this_boot = true;   /* #142: boot-scoped, never cleared */
+    Bootloader_InvalidateAppCheckCache();   /* #146 H2: flash changing — drop the cached verdict */
     if (args_len < 5U) {
         /* Need at least the address plus one data byte. */
         send_nack(BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
@@ -927,6 +999,12 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
         return;
     }
 
+    Bootloader_InvalidateAppCheckCache();   /* #146 H2: metadata stamped — re-check next call */
+
+    /* #145: a verified new image clears any persistent stay-in-BL hold — the
+     * reason to park in the BL (a bad app) is resolved, so resume auto-boot. */
+    (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);
+
     uint8_t resp[1] = { BL_CMD_FLASH_VERIFY };
     send_ack(resp, (uint16_t)sizeof(resp));
 }
@@ -964,7 +1042,7 @@ static void handle_jump(uint8_t peer, const uint8_t *args, uint16_t args_len)
      * deinitialises FDCAN and yanks the MCU into the app's vector
      * table. Same rationale + timeout as in handle_reset above. */
     wait_tx_drain(50U);
-    Bootloader_JumpToApplication();  /* never returns on success */
+    boot_application();  /* #142: reset-to-app after a write, else warm jump */
 }
 
 /* CMD_OB_READ: no args. Returns a 16-byte bl_ob_status_t snapshot. Not
@@ -1327,7 +1405,8 @@ void bl_proto_send_notify(const uint8_t *payload, uint16_t length)
     /* #123 (general fix): never inject an unsolicited NOTIFY while an
      * inbound multi-frame reassembly is in flight. The heartbeat is
      * not the only emitter — NOTIFY_LIVE_DATA (multi-frame, up to
-     * 50 Hz), NOTIFY_LOG (multi-frame, up to 257 B) and NOTIFY_DTC
+     * 50 Hz), NOTIFY_LOG (multi-frame, capped to fit the TX FIFO — #147)
+     * and NOTIFY_DTC
      * all reach here, and any of them dropped onto the bus mid-
      * WRITE_CHUNK strands the host's transfer exactly as the heartbeat
      * did: with ISO-TP Flow Control BlockSize=0 the host streams a

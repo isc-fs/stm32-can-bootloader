@@ -31,6 +31,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_fault.h"
+#include "bl_fdcan.h"
 #include "bl_health.h"
 #include "bl_iwdg.h"
 #include "bl_live.h"
@@ -69,28 +70,42 @@ typedef void (*pFunction)(void);
 
 /* Private variables ---------------------------------------------------------*/
 
+FDCAN_HandleTypeDef hfdcan1;
 FDCAN_HandleTypeDef hfdcan2;
+FDCAN_HandleTypeDef hfdcan3;
 
 /* USER CODE BEGIN PV */
 static uint8_t  g_AutoJumpEnabled  = 0U;
 static uint32_t g_AutoJumpDeadline = 0U;
+
+/* #146 H2: cache the (full-image-CRC) Bootloader_CheckApplication result so
+ * the per-tick hot path (bl_health / bl_live, every main-loop iteration
+ * during a session) doesn't re-CRC the whole app each pass and stall the RX
+ * drain. Invalidated on any FLASH_* op via Bootloader_InvalidateAppCheckCache(). */
+static uint8_t  g_appcheck_result = 0xFFU;
+static uint8_t  g_appcheck_valid  = 0U;
 
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_FDCAN1_Init(void);
 static void MX_FDCAN2_Init(void);
+static void MX_FDCAN3_Init(void);
 /* USER CODE BEGIN PFP */
 static void Bootloader_Init(void);
 static void Bootloader_MainLoop(void);
-static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void);
 static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
+/* Bootloader_ConfigFdcanFilters moved to bl_fdcan_configure_filters in
+ * bl_fdcan.c (#120 Phase A) — see bl_fdcan.h. */
 /* Bootloader_JumpToApplication / Bootloader_CheckApplication are declared
  * with external linkage in main.h so bl_proto.c can call them for
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
 static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes);
+static uint8_t  Bootloader_CheckApplicationCompute(void);   /* #146 H2: uncached core */
 static uint8_t  Bootloader_IsBootRequestActive(void);
+static uint8_t  Bootloader_IsBootAppRequestActive(void);   /* #142 */
 
 /* USER CODE END PFP */
 
@@ -128,7 +143,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_FDCAN1_Init();
   MX_FDCAN2_Init();
+  MX_FDCAN3_Init();
   /* USER CODE BEGIN 2 */
 
 	Bootloader_Init();
@@ -207,6 +224,73 @@ void SystemClock_Config(void)
   }
 }
 
+/* #144 (C6): the FDCAN nominal bit-timing in MX_FDCAN{1,2,3}_Init below
+ * (NominalPrescaler=6, Seg1=1, Seg2=2 -> 4 Tq) yields exactly 1 Mbps ONLY
+ * with a 24 MHz FDCAN kernel clock — which is the HSE crystal
+ * (RCC_FDCANCLKSOURCE_HSE, see stm32h7xx_hal_msp.c). A mis-stuffed crystal
+ * silently shifts the baud out of CAN tolerance: the BL comes up "alive" but
+ * unreachable on the bus — the worst failure for a flash tool. So 24 MHz is a
+ * hard BOM requirement; fail the BUILD rather than ship a brick. If the
+ * crystal ever changes, re-derive the three MX_FDCAN*_Init timings + this
+ * assert. */
+_Static_assert(HSE_VALUE == 24000000UL,
+               "FDCAN bit-timing assumes a 24 MHz HSE (RCC_FDCANCLKSOURCE_HSE); "
+               "a different crystal shifts the CAN baud out of tolerance — "
+               "re-derive MX_FDCAN*_Init Prescaler/Seg1/Seg2 or fix the BOM (#144)");
+
+/**
+  * @brief FDCAN1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN1_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN1_Init 0 */
+
+  /* USER CODE END FDCAN1_Init 0 */
+
+  /* USER CODE BEGIN FDCAN1_Init 1 */
+
+  /* USER CODE END FDCAN1_Init 1 */
+  hfdcan1.Instance = FDCAN1;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan1.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
+  hfdcan1.Init.TransmitPause = DISABLE;
+  hfdcan1.Init.ProtocolException = DISABLE;
+  hfdcan1.Init.NominalPrescaler = 6;
+  hfdcan1.Init.NominalSyncJumpWidth = 1;
+  hfdcan1.Init.NominalTimeSeg1 = 1;
+  hfdcan1.Init.NominalTimeSeg2 = 2;
+  hfdcan1.Init.DataPrescaler = 1;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 1;
+  hfdcan1.Init.DataTimeSeg2 = 1;
+  hfdcan1.Init.MessageRAMOffset = 0;
+  hfdcan1.Init.StdFiltersNbr = 2;
+  hfdcan1.Init.ExtFiltersNbr = 1;
+  hfdcan1.Init.RxFifo0ElmtsNbr = 16;
+  hfdcan1.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.RxFifo1ElmtsNbr = 16;
+  hfdcan1.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.RxBuffersNbr = 0;
+  hfdcan1.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hfdcan1.Init.TxEventsNbr = 0;
+  hfdcan1.Init.TxBuffersNbr = 0;
+  hfdcan1.Init.TxFifoQueueElmtsNbr = 16;
+  hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan1.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN1_Init 2 */
+
+  /* USER CODE END FDCAN1_Init 2 */
+
+}
+
 /**
   * @brief FDCAN2 Initialization Function
   * @param None
@@ -225,37 +309,13 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Instance = FDCAN2;
   hfdcan2.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
   hfdcan2.Init.Mode = FDCAN_MODE_NORMAL;
-  /* AutoRetransmission MUST be ENABLE for this bootloader. With it
-   * DISABLE, FDCAN drops any frame that loses arbitration to a
-   * higher-priority ID (the host sits on 0x001, the BL on 0x011 —
-   * BL frames lose every arbitration during a host burst). Crucially
-   * the FDCAN drop is *silent*: HAL_FDCAN_AddMessageToTxFifoQ already
-   * returned HAL_OK (the frame entered the queue cleanly), so
-   * send_raw has no signal that the on-wire transmission failed —
-   * meanwhile bl_isotp_tx_next has already advanced tx->seq for the
-   * lost frame. The visible symptom on the wire is CF emissions with
-   * a 1 → 3 → 5 → 7 sequence (issue #94 Bug B).
-   *
-   * Worse, repeated TX failures eventually push the FDCAN node into
-   * error-passive / bus-off — at which point the BL stops ACKing
-   * incoming host frames, and the host's MAC retransmits its CFs
-   * until it gives up. That's Bug A in the same issue: "BL silently
-   * dropped a CF the host sent three times".
-   *
-   * Both bugs go away with AutoRetransmission ENABLE: FDCAN retries
-   * a lost-arbitration frame until it wins the bus or hits a real
-   * protocol error. Pre-cubeMX default left this DISABLE; the
-   * bootloader's deployment context (multi-node CAN bus with always-
-   * active peers) makes ENABLE the right setting. Audit pass:
-   * confirmed no place in the project depends on "no retry"
-   * behaviour. */
-  hfdcan2.Init.AutoRetransmission = ENABLE;
+  hfdcan2.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
   hfdcan2.Init.NominalPrescaler = 6;
   hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 2;
-  hfdcan2.Init.NominalTimeSeg2 = 5;
+  hfdcan2.Init.NominalTimeSeg1 = 1;
+  hfdcan2.Init.NominalTimeSeg2 = 2;
   hfdcan2.Init.DataPrescaler = 1;
   hfdcan2.Init.DataSyncJumpWidth = 1;
   hfdcan2.Init.DataTimeSeg1 = 1;
@@ -285,6 +345,59 @@ static void MX_FDCAN2_Init(void)
 }
 
 /**
+  * @brief FDCAN3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_FDCAN3_Init(void)
+{
+
+  /* USER CODE BEGIN FDCAN3_Init 0 */
+
+  /* USER CODE END FDCAN3_Init 0 */
+
+  /* USER CODE BEGIN FDCAN3_Init 1 */
+
+  /* USER CODE END FDCAN3_Init 1 */
+  hfdcan3.Instance = FDCAN3;
+  hfdcan3.Init.FrameFormat = FDCAN_FRAME_CLASSIC;
+  hfdcan3.Init.Mode = FDCAN_MODE_NORMAL;
+  hfdcan3.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
+  hfdcan3.Init.TransmitPause = DISABLE;
+  hfdcan3.Init.ProtocolException = DISABLE;
+  hfdcan3.Init.NominalPrescaler = 6;
+  hfdcan3.Init.NominalSyncJumpWidth = 1;
+  hfdcan3.Init.NominalTimeSeg1 = 1;
+  hfdcan3.Init.NominalTimeSeg2 = 2;
+  hfdcan3.Init.DataPrescaler = 1;
+  hfdcan3.Init.DataSyncJumpWidth = 1;
+  hfdcan3.Init.DataTimeSeg1 = 1;
+  hfdcan3.Init.DataTimeSeg2 = 1;
+  hfdcan3.Init.MessageRAMOffset = 0;
+  hfdcan3.Init.StdFiltersNbr = 2;
+  hfdcan3.Init.ExtFiltersNbr = 1;
+  hfdcan3.Init.RxFifo0ElmtsNbr = 16;
+  hfdcan3.Init.RxFifo0ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.RxFifo1ElmtsNbr = 16;
+  hfdcan3.Init.RxFifo1ElmtSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.RxBuffersNbr = 0;
+  hfdcan3.Init.RxBufferSize = FDCAN_DATA_BYTES_8;
+  hfdcan3.Init.TxEventsNbr = 0;
+  hfdcan3.Init.TxBuffersNbr = 0;
+  hfdcan3.Init.TxFifoQueueElmtsNbr = 16;
+  hfdcan3.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
+  hfdcan3.Init.TxElmtSize = FDCAN_DATA_BYTES_8;
+  if (HAL_FDCAN_Init(&hfdcan3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN FDCAN3_Init 2 */
+
+  /* USER CODE END FDCAN3_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -301,6 +414,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOD, OK_STATUS_Pin|ERR_STATUS_Pin, GPIO_PIN_RESET);
@@ -393,6 +507,11 @@ static void Bootloader_Init(void) {
 	 * and is set up only once at boot. */
 	bl_node_id_init_from_nvm();
 
+	/* #120: the BL serves all three FDCAN peripherals at once (see
+	 * bl_fdcan.c). MX_FDCAN{1,2,3}_Init in main() has already initialised
+	 * the handles; the filter config + start_all below bring up every bus,
+	 * so a host on whichever bus the board wires CAN to is heard. */
+
 	/* Boot-time WRP self-check. Production-provisioned units are
 	 * expected to have sector 0 (the bootloader) WRP-protected; a
 	 * missing latch is not fatal but it earns a WARN log line so the
@@ -404,8 +523,11 @@ static void Bootloader_Init(void) {
 	}
 
 	/* Filters must be configured while the FDCAN is still in Init mode —
-	 * i.e. before HAL_FDCAN_Start. */
-	if (Bootloader_ConfigFdcanFilters() != HAL_OK) {
+	 * i.e. before HAL_FDCAN_Start. Filter shape is instance-agnostic;
+	 * `bl_fdcan_configure_filters` lives in bl_fdcan.c (#120 Phase A)
+	 * and accepts the resolved node-id directly so it doesn't have to
+	 * include bl_node_id.h itself. */
+	if (bl_fdcan_configure_filters(bl_node_id_get()) != HAL_OK) {
 		/* #125 H6: a failed FDCAN bring-up used to spin here forever —
 		 * the board went dead with no CAN, unflashable. Reboot instead;
 		 * a transient init failure self-recovers, and the breadcrumb
@@ -414,7 +536,7 @@ static void Bootloader_Init(void) {
 		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
 
-	if (HAL_FDCAN_Start(&hfdcan2) != HAL_OK) {
+	if (bl_fdcan_start_all() != HAL_OK) {
 		LED_ERR_ON();
 		bl_fault_reboot(BL_FAULT_FDCAN_INIT);
 	}
@@ -430,9 +552,12 @@ static void Bootloader_Init(void) {
 	 * set ⇒ retransmission disabled ⇒ regression. Log loudly; the BL
 	 * still runs (degraded) so the bus stays reachable to reflash a
 	 * corrected build. */
-	if ((hfdcan2.Instance->CCCR & FDCAN_CCCR_DAR) != 0U) {
-		bl_log_error("FDCAN AutoRetransmission DISABLED (CCCR.DAR set) — "
-		             "issue #94 regression; multi-frame TX will desync");
+	for (uint8_t b = 0U; b < BL_FDCAN_BUS_COUNT; b++) {
+		if ((bl_fdcan_bus(b)->Instance->CCCR & FDCAN_CCCR_DAR) != 0U) {
+			bl_log_error("FDCAN%u AutoRetransmission DISABLED (CCCR.DAR set) — "
+			             "issue #94 regression; multi-frame TX will desync",
+			             (unsigned int)(b + 1U));
+		}
 	}
 
 	/* NOTE on FDCAN interrupts: the main loop drains RX_FIFO0 by
@@ -448,20 +573,35 @@ static void Bootloader_Init(void) {
 	 * — concurrent drain of the same FIFO would have dropped frames.
 	 * Audit follow-up (#68 last bullet). */
 
-	/* Check if application explicitly requested to stay in bootloader */
-	uint8_t bootReq = Bootloader_IsBootRequestActive();
-
-	if (bootReq) {
-		/* Stay in bootloader, do not arm auto-jump */
+	/* #142: honour a one-shot "boot the app" request first. handle_jump /
+	 * handle_reset set BL_BOOT_APP_MAGIC + reset when a flash write happened
+	 * this session, so a write-then-jump reaches the app through a clean
+	 * reset (the flash is idle again, cold-equivalent) rather than a direct
+	 * warm jump that can leave the freshly-written app stuck. Jump straight
+	 * to the just-written, re-validated app. */
+	if (Bootloader_IsBootAppRequestActive()) {
+		if (Bootloader_CheckApplication() == 0x00U) {
+			Bootloader_JumpToApplication();   /* never returns on success */
+		}
+		/* App not valid (shouldn't happen right after a verified write) —
+		 * fall through to listen mode rather than brick. */
 		g_AutoJumpEnabled = 0U;
 	} else {
-		/* Normal behavior: arm auto-jump if a valid application is present */
-		uint8_t appStatus = Bootloader_CheckApplication();
-		if (appStatus == 0x00U) {
-			g_AutoJumpEnabled = 1U;
-			g_AutoJumpDeadline = HAL_GetTick() + 2000U; /* e.g. 2 seconds window */
-		} else {
+		/* Check if application explicitly requested to stay in bootloader */
+		uint8_t bootReq = Bootloader_IsBootRequestActive();
+
+		if (bootReq) {
+			/* Stay in bootloader, do not arm auto-jump */
 			g_AutoJumpEnabled = 0U;
+		} else {
+			/* Normal behavior: arm auto-jump if a valid application is present */
+			uint8_t appStatus = Bootloader_CheckApplication();
+			if (appStatus == 0x00U) {
+				g_AutoJumpEnabled = 1U;
+				g_AutoJumpDeadline = HAL_GetTick() + 2000U; /* e.g. 2 seconds window */
+			} else {
+				g_AutoJumpEnabled = 0U;
+			}
 		}
 	}
 }
@@ -493,37 +633,44 @@ static void Bootloader_Init(void) {
 #define BL_FDCAN_BUSOFF_RETRY_MS   100U
 
 static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
-	static uint8_t  s_was_busoff      = 0U;
-	static uint32_t s_last_attempt_ms = 0U;
+	static uint8_t  s_was_busoff[BL_FDCAN_BUS_COUNT]      = { 0U };
+	static uint32_t s_last_attempt_ms[BL_FDCAN_BUS_COUNT] = { 0U };
 
-	FDCAN_ProtocolStatusTypeDef ps = { 0 };
-	if (HAL_FDCAN_GetProtocolStatus(&hfdcan2, &ps) != HAL_OK) {
-		return;
+	/* Each bus recovers independently — one bus going Bus_Off (a shorted
+	 * transceiver, a disconnected stub) must not disturb the others. */
+	for (uint8_t b = 0U; b < BL_FDCAN_BUS_COUNT; b++) {
+		FDCAN_HandleTypeDef *h = bl_fdcan_bus(b);
+
+		FDCAN_ProtocolStatusTypeDef ps = { 0 };
+		if (HAL_FDCAN_GetProtocolStatus(h, &ps) != HAL_OK) {
+			continue;
+		}
+
+		if (ps.BusOff == 0U) {
+			s_was_busoff[b] = 0U;
+			continue;
+		}
+
+		/* Bus_Off is set. Act on the first detection, then rate-limited. */
+		if (s_was_busoff[b] != 0U &&
+		    (now_ms - s_last_attempt_ms[b]) < BL_FDCAN_BUSOFF_RETRY_MS) {
+			continue;
+		}
+		s_was_busoff[b]      = 1U;
+		s_last_attempt_ms[b] = now_ms;
+
+		/* Stop/Start to clear INIT and rejoin. Errors are non-fatal — we
+		 * retry on the next poll; nothing else we can do but keep trying. */
+		(void)HAL_FDCAN_Stop(h);
+		(void)HAL_FDCAN_Start(h);
+
+		bl_health_record_fdcan_recovery();
+		bl_dtc_log(BL_DTC_FDCAN_BUSOFF, BL_DTC_SEV_WARN,
+		           bl_health_fdcan_recovery_count());
+		bl_log_warn("FDCAN%u bus-off — Stop/Start recovery #%u",
+		            (unsigned int)(b + 1U),
+		            (unsigned int)bl_health_fdcan_recovery_count());
 	}
-
-	if (ps.BusOff == 0U) {
-		s_was_busoff = 0U;
-		return;
-	}
-
-	/* Bus_Off is set. Act on the first detection, then rate-limited. */
-	if (s_was_busoff != 0U &&
-	    (now_ms - s_last_attempt_ms) < BL_FDCAN_BUSOFF_RETRY_MS) {
-		return;
-	}
-	s_was_busoff      = 1U;
-	s_last_attempt_ms = now_ms;
-
-	/* Stop/Start to clear INIT and rejoin. Errors are non-fatal — we
-	 * retry on the next poll; nothing else we can do but keep trying. */
-	(void)HAL_FDCAN_Stop(&hfdcan2);
-	(void)HAL_FDCAN_Start(&hfdcan2);
-
-	bl_health_record_fdcan_recovery();
-	bl_dtc_log(BL_DTC_FDCAN_BUSOFF, BL_DTC_SEV_WARN,
-	           bl_health_fdcan_recovery_count());
-	bl_log_warn("FDCAN bus-off — Stop/Start recovery #%u",
-	            (unsigned int)bl_health_fdcan_recovery_count());
 }
 
 /* #125 H3: max RX frames drained per main-loop pass. Sized to the
@@ -532,10 +679,66 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
  * per-pass ticks (session watchdog, bus-off recovery) always run. */
 #define BL_FDCAN_RX_DRAIN_BUDGET   16U
 
-static void Bootloader_MainLoop(void) {
+/* Drain up to BL_FDCAN_RX_DRAIN_BUDGET frames from one bus's RX FIFO0 and
+ * dispatch each to the protocol layer (#120: the BL serves all three FDCAN
+ * buses concurrently). Bounding the per-bus batch keeps a continuous flood
+ * on one bus from starving the others — or the per-pass ticks. Each reply
+ * is routed back to this bus via bl_fdcan_set_active(). */
+static void Bootloader_DrainBus(FDCAN_HandleTypeDef *h) {
 	FDCAN_RxHeaderTypeDef rxHeader;
 	uint8_t rxData[8];
 
+	uint8_t rx_budget = BL_FDCAN_RX_DRAIN_BUDGET;
+	while (rx_budget > 0U &&
+	       HAL_FDCAN_GetRxFifoFillLevel(h, FDCAN_RX_FIFO0) > 0U) {
+		rx_budget--;
+		if (HAL_FDCAN_GetRxMessage(h, FDCAN_RX_FIFO0, &rxHeader, rxData) != HAL_OK) {
+			continue;
+		}
+
+		/* The bootloader only speaks classic 11-bit IDs; any extended-ID
+		 * frame is ignored entirely. */
+		if (rxHeader.IdType != FDCAN_STANDARD_ID) {
+			continue;
+		}
+
+		/* `bl_proto_parse_id` returns false on malformed IDs (bits 10..5
+		 * set, or reserved node→host IDs). This is the real alias guard: a
+		 * single FDCAN mask filter can't enforce "bits 10:5 == 0", so e.g.
+		 * the charger's 0x101 (0x101 & 0x1F == 0x01) reaches us looking like
+		 * a node-1 unicast — parse_id is what rejects it. */
+		bl_proto_id_t id;
+		if (!bl_proto_parse_id(rxHeader.Identifier, &id)) {
+			continue;
+		}
+
+		/* #154: cancel the auto-jump ONLY once a frame decodes as a valid BL
+		 * command for us — never on bare reception. Cancelling before
+		 * parse_id let a filter-aliased frame (charger 0x101 on FDCAN1)
+		 * permanently strand the carrier in the BL on any reset while the
+		 * charger was energised — no app, no pack supervision. */
+		g_AutoJumpEnabled = 0U;
+
+		/* `HAL_FDCAN_GetRxMessage` already extracts the DLC nibble into
+		 * bits 3:0 of rxHeader.DataLength (see `FDCAN_ELEMENT_MASK_DLC >>
+		 * 16U` in the STM32H7 HAL). For classic CAN the DLC value equals
+		 * the byte count, so mask to the low nibble — NO extra shift.
+		 * Earlier versions shifted >>16 again, zeroing every length and
+		 * silently dropping every frame at bl_proto_dispatch's
+		 * `length == 0U` gate. */
+		uint8_t length = (uint8_t)(rxHeader.DataLength & 0x0FU);
+		if (length > 8U) {
+			length = 8U;
+		}
+
+		/* Reply on the bus this frame arrived on: bl_proto's TX path sends
+		 * via bl_fdcan_get_handle(), which returns the active bus. */
+		bl_fdcan_set_active(h);
+		bl_proto_dispatch(&id, rxData, length);
+	}
+}
+
+static void Bootloader_MainLoop(void) {
 	while (1) {
 		/* #125 H6: kick the hardware watchdog every iteration. The loop
 		 * body is sub-millisecond except when a dispatch triggers a flash
@@ -544,58 +747,13 @@ static void Bootloader_MainLoop(void) {
 		 * sector erase, well inside the ~8 s IWDG period. */
 		bl_iwdg_refresh();
 
-		/* Drain pending RX frames — each cancels the auto-jump and is
-		 * handed to the protocol dispatcher.
-		 *
-		 * #125 H3: drain up to a bounded BATCH per loop pass (the FIFO
-		 * is only 16 deep). The old one-frame-per-pass let RX_FIFO0
-		 * overflow after any stall — a blocking flash op, or the
-		 * per-tick work below — because the host streams CFs at ~3 kHz
-		 * during a multi-frame transfer. Draining a batch clears a
-		 * post-stall backlog in a single pass; the budget cap means a
-		 * continuous host flood still can't starve the ticks (session
-		 * watchdog, bus-off recovery) at the bottom of the loop. */
-		uint8_t rx_budget = BL_FDCAN_RX_DRAIN_BUDGET;
-		while (rx_budget > 0U &&
-		       HAL_FDCAN_GetRxFifoFillLevel(&hfdcan2, FDCAN_RX_FIFO0) > 0U) {
-			rx_budget--;
-			if (HAL_FDCAN_GetRxMessage(&hfdcan2,
-			FDCAN_RX_FIFO0, &rxHeader, rxData) == HAL_OK) {
-
-				/* The bootloader only speaks classic 11-bit IDs; any
-				 * extended-ID frame is ignored entirely. */
-				if (rxHeader.IdType == FDCAN_STANDARD_ID) {
-					g_AutoJumpEnabled = 0U;
-
-					bl_proto_id_t id;
-					/* `bl_proto_parse_id` returns false on malformed
-					 * IDs (bits 10..5 set, or reserved node→host node
-					 * IDs). The FDCAN filter already rejects anything
-					 * we can't decode, so in practice this guard is
-					 * defence-in-depth against future filter drift
-					 * or loopback-harness feeds. On false we skip the
-					 * dispatch but still fall through to the tick
-					 * block below, so session watchdogs keep running. */
-					if (bl_proto_parse_id(rxHeader.Identifier, &id)) {
-						/* `HAL_FDCAN_GetRxMessage` already extracts the DLC
-						 * nibble into bits 3:0 of rxHeader.DataLength
-						 * (see `FDCAN_ELEMENT_MASK_DLC >> 16U` in the
-						 * STM32H7 HAL). For classic CAN the DLC value
-						 * equals the byte count, so we just mask to the
-						 * low nibble — NO extra shift. Earlier versions
-						 * shifted >>16 again, which zeroed out every
-						 * length and silently dropped every incoming
-						 * frame at bl_proto_dispatch's `length == 0U`
-						 * gate. */
-						uint8_t length = (uint8_t)(rxHeader.DataLength & 0x0FU);
-						if (length > 8U) {
-							length = 8U;
-						}
-
-						bl_proto_dispatch(&id, rxData, length);
-					}
-				}
-			}
+		/* #120: a host may be on any of the three buses — poll every one.
+		 * Each bus drains into the shared protocol dispatcher; replies
+		 * route back to the originating bus (bl_fdcan_set_active in the
+		 * helper). The per-bus budget bounds a flood on any one bus so the
+		 * per-pass ticks below always run. */
+		for (uint8_t b = 0U; b < BL_FDCAN_BUS_COUNT; b++) {
+			Bootloader_DrainBus(bl_fdcan_bus(b));
 		}
 
 		/* Protocol tick — drives ISO-TP reassembly timeout. NACKs any
@@ -648,61 +806,10 @@ static void Bootloader_MainLoop(void) {
 	}
 }
 
-/* Configure FDCAN2 filters so FIFO0 only receives host→node frames
- * addressed to this board's resolved node ID (`bl_node_id_get()` —
- * NVM override if present, compile-time `BL_NODE_ID` otherwise) or
- * the broadcast address 0xF. Under the fix/12 wire format the 11-bit
- * ID layout is
- *
- *   bits 10..5 = 0   (reserved)
- *   bit  4     = 0   (host→node; node→host is 1 and must be rejected)
- *   bits 3..0  = destination node
- *
- * We use a mask filter that matches exactly five low bits
- * (`BL_PROTO_ID_VALID_MASK = 0x01F`), which pins bit 4 to 0 and the
- * low nibble to our node (or 0xF for broadcast). That rejects:
- *   - every node→host frame (bit 4 set)
- *   - frames addressed to a different node (low nibble mismatch)
- *   - malformed IDs with bits 5..10 set (unknown future extensions)
- *
- * Our own TX never loops back through this filter because it sits at
- * a different ID (direction bit 4 set), so the BL can't accidentally
- * receive its own replies. */
-static HAL_StatusTypeDef Bootloader_ConfigFdcanFilters(void) {
-	FDCAN_FilterTypeDef filter = { 0 };
-	HAL_StatusTypeDef st;
-
-	filter.IdType       = FDCAN_STANDARD_ID;
-	filter.FilterType   = FDCAN_FILTER_MASK;
-	filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-	filter.FilterID2    = BL_PROTO_ID_VALID_MASK;
-
-	/* Unicast: host → this node. ID = BL_PROTO_DIR_HOST_TO_NODE | <id>
-	 * where <id> is the resolved node ID (NVM override or compile-time
-	 * default). Direction bit is 0; just the low nibble. */
-	filter.FilterIndex = 0U;
-	filter.FilterID1   = bl_node_id_get() & BL_PROTO_NODE_MASK;
-	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
-	if (st != HAL_OK) {
-		return st;
-	}
-
-	/* Broadcast: host → 0xF. */
-	filter.FilterIndex = 1U;
-	filter.FilterID1   = BL_PROTO_NODE_BROADCAST;
-	st = HAL_FDCAN_ConfigFilter(&hfdcan2, &filter);
-	if (st != HAL_OK) {
-		return st;
-	}
-
-	/* Reject everything that doesn't match one of the two filters, and
-	 * reject remote frames outright — the protocol has no use for them. */
-	return HAL_FDCAN_ConfigGlobalFilter(&hfdcan2,
-	                                    FDCAN_REJECT,
-	                                    FDCAN_REJECT,
-	                                    FDCAN_REJECT_REMOTE,
-	                                    FDCAN_REJECT_REMOTE);
-}
+/* Bootloader_ConfigFdcanFilters body has moved to
+ * `bl_fdcan_configure_filters` in bl_fdcan.c (#120 Phase A). The
+ * filter geometry is instance-agnostic; the only thing that changed
+ * is the handle it operates on, which is what justified the move. */
 
 /* ===================== JUMP TO APPLICATION ====================== */
 
@@ -736,7 +843,9 @@ void Bootloader_JumpToApplication(void) {
 	 * app's stack we can no longer make ordinary function calls. */
 	bl_iwdg_refresh();
 
-	HAL_FDCAN_DeInit(&hfdcan2);
+	for (uint8_t b = 0U; b < BL_FDCAN_BUS_COUNT; b++) {
+		HAL_FDCAN_DeInit(bl_fdcan_bus(b));
+	}
 	HAL_DeInit();
 
 	/* Stop SysTick */
@@ -814,7 +923,7 @@ static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes) {
 	return crc;
 }
 
-uint8_t Bootloader_CheckApplication(void) {
+static uint8_t Bootloader_CheckApplicationCompute(void) {
 	/* Read metadata from flash */
 	uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 
@@ -868,6 +977,25 @@ uint8_t Bootloader_CheckApplication(void) {
 	return 0x00;  //OK
 }
 
+/* #146 H2: cached public entry point. The full CRC32 over the app
+ * (Bootloader_CheckApplicationCompute) is too expensive to run every
+ * main-loop tick; cache the verdict and recompute only when flash may have
+ * changed (Bootloader_InvalidateAppCheckCache, called from the FLASH_*
+ * handlers). The boot decision + jump path read the same cached value. */
+uint8_t Bootloader_CheckApplication(void) {
+	if (g_appcheck_valid == 0U) {
+		g_appcheck_result = Bootloader_CheckApplicationCompute();
+		g_appcheck_valid  = 1U;
+	}
+	return g_appcheck_result;
+}
+
+/* #146 H2: drop the cached verdict — call after any FLASH_* op so the next
+ * Bootloader_CheckApplication re-reads flash. */
+void Bootloader_InvalidateAppCheckCache(void) {
+	g_appcheck_valid = 0U;
+}
+
 static uint8_t Bootloader_IsBootRequestActive(void) {
 	/* Enable backup domain access.
 	 PWR clock is already enabled by SystemClock_Config(), so we do not call
@@ -887,6 +1015,36 @@ static uint8_t Bootloader_IsBootRequestActive(void) {
 		return 1U;
 	}
 
+	/* #145: the RTC->BKP0R magic above is volatile — POR/BOR wipes it, so a
+	 * power-cycle would otherwise auto-jump into a known-bad app the operator
+	 * had parked in the BL (recovery = SWD = open the enclosure). A persistent
+	 * NVM flag (sector 7) survives POR; honour it too. NOT one-shot — it holds
+	 * across every reset until cleared by a FLASH_VERIFY (a new good image) or
+	 * an explicit boot (JUMP / RESET mode 3); see bl_proto.c. */
+	uint8_t stay_val = 0U;
+	uint8_t stay_len = 0U;
+	if (bl_nvm_read(BL_NVM_KEY_STAY_IN_BL, &stay_val, sizeof(stay_val), &stay_len) == BL_NVM_OK
+	    && stay_len == 1U && stay_val == 1U) {
+		return 1U;
+	}
+
+	return 0U;
+}
+
+/* #142: one-shot "boot the app via a clean reset" request. Set by
+ * handle_jump / handle_reset (bl_proto) when a flash write happened in the
+ * session; consumed here on the next boot. Reads + clears BKP0R only if it
+ * holds BL_BOOT_APP_MAGIC, so a BL_BOOT_REQ_MAGIC (stay-in-BL) request is
+ * left intact for Bootloader_IsBootRequestActive. */
+static uint8_t Bootloader_IsBootAppRequestActive(void) {
+	HAL_PWR_EnableBkUpAccess();
+	if ((RCC->BDCR & RCC_BDCR_RTCEN) == 0U) {
+		__HAL_RCC_RTC_ENABLE();
+	}
+	if (RTC->BKP0R == BL_BOOT_APP_MAGIC) {
+		RTC->BKP0R = 0U;   /* one-shot */
+		return 1U;
+	}
 	return 0U;
 }
 
