@@ -216,6 +216,20 @@ void SystemClock_Config(void)
   }
 }
 
+/* #144 (C6): the FDCAN nominal bit-timing in MX_FDCAN{1,2,3}_Init below
+ * (NominalPrescaler=6, Seg1=1, Seg2=2 -> 4 Tq) yields exactly 1 Mbps ONLY
+ * with a 24 MHz FDCAN kernel clock — which is the HSE crystal
+ * (RCC_FDCANCLKSOURCE_HSE, see stm32h7xx_hal_msp.c). A mis-stuffed crystal
+ * silently shifts the baud out of CAN tolerance: the BL comes up "alive" but
+ * unreachable on the bus — the worst failure for a flash tool. So 24 MHz is a
+ * hard BOM requirement; fail the BUILD rather than ship a brick. If the
+ * crystal ever changes, re-derive the three MX_FDCAN*_Init timings + this
+ * assert. */
+_Static_assert(HSE_VALUE == 24000000UL,
+               "FDCAN bit-timing assumes a 24 MHz HSE (RCC_FDCANCLKSOURCE_HSE); "
+               "a different crystal shifts the CAN baud out of tolerance — "
+               "re-derive MX_FDCAN*_Init Prescaler/Seg1/Seg2 or fix the BOM (#144)");
+
 /**
   * @brief FDCAN1 Initialization Function
   * @param None
