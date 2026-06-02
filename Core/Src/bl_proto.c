@@ -834,6 +834,7 @@ static void handle_flash_erase(uint8_t peer, const uint8_t *args, uint16_t args_
      * won't auto-jump into a half-flashed binary. */
     g_session_flash_dirty = true;
     g_flash_written_this_boot = true;   /* #142: boot-scoped, never cleared */
+    Bootloader_InvalidateAppCheckCache();   /* #146 H2: flash changing — drop the cached verdict */
     if (args_len < 8U) {
         send_nack(BL_CMD_FLASH_ERASE, BL_NACK_UNSUPPORTED);
         return;
@@ -882,6 +883,7 @@ static void handle_flash_write(uint8_t peer, const uint8_t *args, uint16_t args_
      * session (see handle_flash_erase + session_timeout). */
     g_session_flash_dirty = true;
     g_flash_written_this_boot = true;   /* #142: boot-scoped, never cleared */
+    Bootloader_InvalidateAppCheckCache();   /* #146 H2: flash changing — drop the cached verdict */
     if (args_len < 5U) {
         /* Need at least the address plus one data byte. */
         send_nack(BL_CMD_FLASH_WRITE, BL_NACK_UNSUPPORTED);
@@ -982,6 +984,8 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
         send_nack(BL_CMD_FLASH_VERIFY, flash_status_to_nack(st));
         return;
     }
+
+    Bootloader_InvalidateAppCheckCache();   /* #146 H2: metadata stamped — re-check next call */
 
     uint8_t resp[1] = { BL_CMD_FLASH_VERIFY };
     send_ack(resp, (uint16_t)sizeof(resp));

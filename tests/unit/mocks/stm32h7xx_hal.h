@@ -246,6 +246,7 @@ void mock_advance_tick(uint32_t dt);
 int  mock_bootloader_jump_count(void);
 void mock_bootloader_reset(void);
 void mock_set_check_application(uint8_t rv);
+int  mock_appcheck_invalidate_count(void);   /* #146 H2 */
 
 /* OB_APPLY_WRP observability (bl_peer_stubs.c) — for #125 C4 tests. */
 uint32_t mock_ob_apply_wrp_last_mask(void);
