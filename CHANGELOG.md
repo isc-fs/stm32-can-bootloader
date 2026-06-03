@@ -12,6 +12,100 @@ the PR titles between consecutive tags.
 
 ---
 
+## v1.6.0 — Multi-bus FDCAN, 1 Mbps fleet cutover
+
+**Wire protocol**: message format unchanged at `0.2`. **CAN bitrate moves
+500 kbps → 1 Mbps.** This is a *coordinated fleet cutover*, not a drop-in
+upgrade: a 1 Mbps bootloader is physically deaf to a 500 kbps host or peer.
+Flash this BL, the AMS application (IFS08-CE-AMS#337), and the host/flasher
+tools to 1 Mbps **together, per car**. Do **not** flash this BL onto a
+vehicle still running a 500 kbps fleet — the ECU goes unreachable over CAN
+until every node on its bus matches, which is exactly the
+open-the-enclosure failure this project exists to avoid.
+
+The bootloader is the one component whose failure means opening a sealed
+ECU enclosure in the car. This release makes one BL image serve an entire
+shared bus and folds in every HIL-found boot-path defect, validated
+end-to-end on the AMS bench.
+
+### Highlights
+
+- **One bootloader image on all three FDCAN buses** (#120). The three ECUs
+  share a single CAN bus but each taps it through a *different* FDCAN
+  peripheral (FDCAN1/2/3) — a board-level wiring mismatch we can't reflow.
+  Rather than maintain three per-peripheral builds, the BL now listens on
+  **all three FDCAN instances at once** and replies on whichever bus a
+  request arrived on, so one identical binary reaches every ECU. Each unit
+  gets its distinct identity from the **node-id burned at flash time** (NVM
+  key `0x0001`); leave it unset and the compile-time default applies. All
+  three run at **1 Mbps**. Rationale captured in `ARCHITECTURE.md`.
+
+- **NOTIFY_LOG can't overflow the TX path** (PR #147). Log emission is
+  capped to the TX-FIFO depth and gated when the FIFO is busy, so a burst
+  of log traffic can't stall or desync the ISO-TP path mid-flash.
+  (HIL-found.)
+
+- **Reset-to-app after a write, so a warm jump can't strand the app**
+  (PR #142). Once a flash write has happened this boot, a JUMP / RESET-to-app
+  routes through a full reset (via a boot-request magic) instead of a warm
+  branch — a warm jump after writing could leave the app running on stale
+  bootloader state. (HIL-found.)
+
+- **Filter-aliased frames can't cancel the auto-jump** (PR #154). The 5-bit
+  acceptance filter aliased the charger's `0x101` onto the node-1 unicast
+  id, and any received frame used to cancel the boot-timer auto-jump
+  *before* the parser rejected it — so a BL would park in listen mode
+  forever whenever the charger was energised. Auto-jump is now cancelled
+  only after a frame parses as genuinely addressed to us, and the hardware
+  filter does an exact match. (HIL-found — blocked this tag.)
+
+- **Crystal BOM guard** (PR #144). A compile-time
+  `_Static_assert(HSE_VALUE == 24 MHz)` — the FDCAN bit-timing is derived
+  from the 24 MHz crystal, so a mis-stuffed board fails the build instead of
+  coming up silently unreachable at the wrong baud.
+
+- **CheckApplication off the hot path** (PR #146). The full-image CRC is
+  cached and invalidated on every flash mutation, so the per-tick boot
+  decision no longer re-CRCs the whole application — removing an RX-stall
+  risk on large images.
+
+- **Stay-in-bootloader survives a power cycle** (PR #145). An operator
+  "hold in the BL" request is now persisted in NVM; it used to live only in
+  an RTC backup register, which a power-off wipes. The hold is cleared on an
+  explicit boot or a successful image verify. A held unit stays held across
+  a true power cycle instead of silently auto-jumping a possibly-bad app on
+  the next power-up.
+
+### Bench validation
+
+HIL-validated on the AMS bench @ 1 Mbps across the development cycle:
+reachability + reply-on-origin on **all three FDCAN buses** under concurrent
+traffic (#143); the #147 / #142 / #154 fixes each reproduced-then-confirmed
+on silicon; and the #145 power-cycle gate — `RESET` mode 2 held the BL
+across **3 / 3 power cycles** (the NVM flag survives a POR), a baseline
+cold boot still auto-jumps a valid app (no fleet power-up regression), and
+both clear paths (explicit boot *and* `FLASH_VERIFY`) survive a subsequent
+power cycle.
+
+### Cutover checklist (per car)
+
+1. Stage the 1 Mbps host / flasher tools.
+2. Flash this BL to every ECU (`0x08000000`, STM32CubeProgrammer over SWD —
+   **not** MingoCAN, which corrupts the bootloader), burning a distinct
+   node-id per unit.
+3. Flash the matching 1 Mbps AMS application (IFS08-CE-AMS#337).
+4. Confirm every node on the bus is at 1 Mbps before closing up — a mixed
+   500 k / 1 M bus is non-functional.
+
+### Known follow-ups (not blocking)
+
+- FDCAN clock-tree hardening: crystal-independent PLL source, HSE-fail
+  fallback, and a 75 % sample point (currently ~50 %) — #163.
+- `FLASH_VERIFY` length cross-check (H7) — needs an app-side `fwinfo`
+  length field — #146.
+
+---
+
 ## v1.5.0 — Fault-operational hardening
 
 **Wire protocol**: unchanged at `0.2`. No host upgrade required.
