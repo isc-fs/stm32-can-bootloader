@@ -12,6 +12,34 @@ the PR titles between consecutive tags.
 
 ---
 
+## v1.6.1 — ECC-brick recovery (power-cut mid-write)
+
+**Wire protocol**: unchanged at `0.2`. **Drop-in over v1.6.0** — same 1 Mbps
+multi-bus image, flashed the same way, no host change. If you have not yet
+deployed v1.6.0, use this instead; the 1 Mbps fleet cutover (IFS08-CE-AMS#341)
+should target v1.6.1.
+
+A single hardening fix for a brick mode the HIL bench (F-077) found in v1.6.0,
+restoring the #125 invariant that the bootloader can never become unflashable
+over CAN.
+
+### Fixed
+
+- **Power-cut mid-flash-write no longer bricks the unit past CAN recovery**
+  (#166). A power loss landing mid-write leaves a partially-programmed flash
+  word whose double-bit ECC raises a bus fault the instant it is read. The
+  app-validation CRC read hit that word on **every boot, before CAN came up**,
+  looping the bootloader unreachable — recoverable only by an SWD chip-erase.
+  The validation read is now guarded: a fault while validating leaves a
+  reset-surviving breadcrumb, and the next boot **skips the corrupt read** and
+  comes up reachable + reflashable (one brief fault+reboot per cold boot of a
+  corrupt unit, then steady). Latched flash ECC/error state is also cleared at
+  boot so the recovery reflash can't be rejected by a stale lock. The recovery
+  lives in `bl_fault_reboot` — no CubeMX fault handler is touched. Validated on
+  the bench by an F-077 re-run.
+
+---
+
 ## v1.6.0 — Multi-bus FDCAN, 1 Mbps fleet cutover
 
 **Wire protocol**: message format unchanged at `0.2`. **CAN bitrate moves
