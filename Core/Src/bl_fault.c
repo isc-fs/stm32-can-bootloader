@@ -25,8 +25,29 @@
 static volatile uint32_t g_fault_magic  __attribute__((section(".noinit")));
 static volatile uint32_t g_fault_reason __attribute__((section(".noinit")));
 
+/* #166 — app-validation ECC-brick recovery. See bl_fault.h.
+ *
+ * `g_appcheck_armed` is plain .bss (zeroed at startup, valid only within the
+ * current boot): the validation code sets it just before the flash reads and
+ * clears it after. `g_appcheck_brick` is the reset-surviving breadcrumb,
+ * stamped by bl_fault_reboot if a fault fires while armed. Its own magic is
+ * distinct from BL_FAULT_MAGIC so cold-power-up garbage doesn't masquerade as
+ * a real breadcrumb. */
+#define BL_APPCHECK_BRICK_MAGIC  0xA99CEC00U
+
+static volatile uint8_t  g_appcheck_armed;
+static volatile uint32_t g_appcheck_brick __attribute__((section(".noinit")));
+
 void bl_fault_reboot(uint8_t reason)
 {
+    /* #166: a fault while the app-validation read is armed is the
+     * double-bit-ECC-on-partial-write trap. Leave a breadcrumb so the next
+     * boot skips the corrupt read and comes up reachable + reflashable.
+     * Plain .noinit RAM — safe to write from inside the fault handler. */
+    if (g_appcheck_armed != 0U) {
+        g_appcheck_brick = BL_APPCHECK_BRICK_MAGIC;
+    }
+
     g_fault_reason = (uint32_t)reason;
     g_fault_magic  = BL_FAULT_MAGIC;
 
@@ -61,5 +82,19 @@ bool bl_fault_take_pending(uint8_t *out_reason)
         *out_reason = (uint8_t)g_fault_reason;
     }
     g_fault_magic = 0U;   /* one-shot: clear so a later normal boot reads clean */
+    return true;
+}
+
+void bl_appcheck_arm(bool on)
+{
+    g_appcheck_armed = on ? 1U : 0U;
+}
+
+bool bl_appcheck_take_pending(void)
+{
+    if (g_appcheck_brick != BL_APPCHECK_BRICK_MAGIC) {
+        return false;
+    }
+    g_appcheck_brick = 0U;   /* one-shot: consume so a later clean boot validates normally */
     return true;
 }

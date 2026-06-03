@@ -104,6 +104,7 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
 static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes);
 static uint8_t  Bootloader_CheckApplicationCompute(void);   /* #146 H2: uncached core */
+static uint8_t  Bootloader_CheckApplicationInner(void);     /* #166: raw read, ECC-unsafe */
 static uint8_t  Bootloader_IsBootRequestActive(void);
 static uint8_t  Bootloader_IsBootAppRequestActive(void);   /* #142 */
 
@@ -493,6 +494,15 @@ static void Bootloader_Init(void) {
 	 * demand in bl_live_tick, so no persistent state needs initialising
 	 * beyond this. */
 	bl_live_init();
+
+	/* #166: clear any flash error/ECC state latched by a prior interrupted
+	 * write, before the first flash read (bl_nvm_init below) or any program.
+	 * A power-cut mid-write can leave the controller with a stale error or
+	 * lock latch that would otherwise reject the recovery reflash. (The
+	 * corrupt *word* itself still double-bit-ECC-faults when read — that is
+	 * handled by the bl_appcheck guard around app validation; this just keeps
+	 * the flash controller's own status clean.) */
+	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_ALL_ERRORS_BANK1);
 
 	/* Scan the NVM sector to find the append point and the current
 	 * highest seq. Safe to call even when sector 7 is fully erased —
@@ -923,7 +933,7 @@ static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes) {
 	return crc;
 }
 
-static uint8_t Bootloader_CheckApplicationCompute(void) {
+static uint8_t Bootloader_CheckApplicationInner(void) {
 	/* Read metadata from flash */
 	uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 
@@ -975,6 +985,28 @@ static uint8_t Bootloader_CheckApplicationCompute(void) {
 	}
 
 	return 0x00;  //OK
+}
+
+/* #166: ECC-brick-safe wrapper around the validation read.
+ *
+ * A power-cut mid-flash-write leaves a partially-programmed word whose
+ * double-bit ECC raises a bus fault the instant it is read — and the reads in
+ * Bootloader_CheckApplicationInner (CRC over the app image, metadata, vector
+ * table) hit it on every boot, faulting before the BL ever services CAN.
+ *
+ * If last boot faulted while validating, the breadcrumb is pending: report the
+ * app invalid (0x17) WITHOUT touching the corrupt flash, so the BL falls
+ * through to its listen loop and stays reachable + reflashable. Otherwise arm
+ * the guard around the reads — a fault inside Inner records the breadcrumb and
+ * reboots, and the next boot lands in the branch above. */
+static uint8_t Bootloader_CheckApplicationCompute(void) {
+	if (bl_appcheck_take_pending()) {
+		return 0x17;  /* app read faulted last boot -> invalid, stay in BL */
+	}
+	bl_appcheck_arm(true);
+	uint8_t result = Bootloader_CheckApplicationInner();
+	bl_appcheck_arm(false);
+	return result;
 }
 
 /* #146 H2: cached public entry point. The full CRC32 over the app
