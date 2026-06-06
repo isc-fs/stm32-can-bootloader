@@ -226,14 +226,22 @@ void SystemClock_Config(void)
 }
 
 /* #144 (C6): the FDCAN nominal bit-timing in MX_FDCAN{1,2,3}_Init below
- * (NominalPrescaler=6, Seg1=1, Seg2=2 -> 4 Tq) yields exactly 1 Mbps ONLY
- * with a 24 MHz FDCAN kernel clock — which is the HSE crystal
- * (RCC_FDCANCLKSOURCE_HSE, see stm32h7xx_hal_msp.c). A mis-stuffed crystal
- * silently shifts the baud out of CAN tolerance: the BL comes up "alive" but
- * unreachable on the bus — the worst failure for a flash tool. So 24 MHz is a
- * hard BOM requirement; fail the BUILD rather than ship a brick. If the
- * crystal ever changes, re-derive the three MX_FDCAN*_Init timings + this
- * assert. */
+ * (NominalPrescaler=3, Seg1=10, Seg2=5 -> 16 Tq) yields exactly 500 kbps at a
+ * 68.75% sample point ONLY with a 24 MHz FDCAN kernel clock — which is the HSE
+ * crystal (RCC_FDCANCLKSOURCE_HSE, see stm32h7xx_hal_msp.c). A mis-stuffed
+ * crystal silently shifts the baud out of CAN tolerance: the BL comes up
+ * "alive" but unreachable on the bus — the worst failure for a flash tool. So
+ * 24 MHz is a hard BOM requirement; fail the BUILD rather than ship a brick.
+ * If the crystal ever changes, re-derive the three MX_FDCAN*_Init timings +
+ * this assert.
+ *
+ * #171: reverted 1 Mbps -> 500 kbps. 1 Mbps ran too close to the bus's
+ * signal-integrity margin — mid-write bit errors turned routine reflashes into
+ * #166 bricks. 500 kbps (doubled bit time) at a 68.75% sample point restores
+ * the margin; the multi-bus design (#120) is unchanged, only the rate. The
+ * timing (Prescaler 3, Seg1 10, Seg2 5, 16 Tq) is matched bit-for-bit to the
+ * AMS app's revert (IFS08-CE-AMS#351) so every node on the bus samples at the
+ * same point. */
 _Static_assert(HSE_VALUE == 24000000UL,
                "FDCAN bit-timing assumes a 24 MHz HSE (RCC_FDCANCLKSOURCE_HSE); "
                "a different crystal shifts the CAN baud out of tolerance — "
@@ -260,10 +268,10 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 6;
+  hfdcan1.Init.NominalPrescaler = 3;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 2;
+  hfdcan1.Init.NominalTimeSeg1 = 10;
+  hfdcan1.Init.NominalTimeSeg2 = 5;
   hfdcan1.Init.DataPrescaler = 1;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
@@ -313,10 +321,10 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
-  hfdcan2.Init.NominalPrescaler = 6;
+  hfdcan2.Init.NominalPrescaler = 3;
   hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 1;
-  hfdcan2.Init.NominalTimeSeg2 = 2;
+  hfdcan2.Init.NominalTimeSeg1 = 10;
+  hfdcan2.Init.NominalTimeSeg2 = 5;
   hfdcan2.Init.DataPrescaler = 1;
   hfdcan2.Init.DataSyncJumpWidth = 1;
   hfdcan2.Init.DataTimeSeg1 = 1;
@@ -366,10 +374,10 @@ static void MX_FDCAN3_Init(void)
   hfdcan3.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan3.Init.TransmitPause = DISABLE;
   hfdcan3.Init.ProtocolException = DISABLE;
-  hfdcan3.Init.NominalPrescaler = 6;
+  hfdcan3.Init.NominalPrescaler = 3;
   hfdcan3.Init.NominalSyncJumpWidth = 1;
-  hfdcan3.Init.NominalTimeSeg1 = 1;
-  hfdcan3.Init.NominalTimeSeg2 = 2;
+  hfdcan3.Init.NominalTimeSeg1 = 10;
+  hfdcan3.Init.NominalTimeSeg2 = 5;
   hfdcan3.Init.DataPrescaler = 1;
   hfdcan3.Init.DataSyncJumpWidth = 1;
   hfdcan3.Init.DataTimeSeg1 = 1;

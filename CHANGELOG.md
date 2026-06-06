@@ -12,31 +12,48 @@ the PR titles between consecutive tags.
 
 ---
 
-## v1.6.1 — ECC-brick recovery (power-cut mid-write)
+## v1.6.1 — 500 kbps revert + ECC-brick recovery
 
-**Wire protocol**: unchanged at `0.2`. **Drop-in over v1.6.0** — same 1 Mbps
-multi-bus image, flashed the same way, no host change. If you have not yet
-deployed v1.6.0, use this instead; the 1 Mbps fleet cutover (IFS08-CE-AMS#341)
-should target v1.6.1.
+**Wire protocol**: unchanged at `0.2`. **CAN bitrate reverts 1 Mbps → 500 kbps
+on all FDCAN buses**, coordinated with the app revert (IFS08-CE-AMS#351) — BL
+and app share the bus and must match. This **withdraws the v1.6.0 1 Mbps
+cutover** (IFS08-CE-AMS#341). If you deployed v1.6.0, move to v1.6.1; do not run
+1 Mbps.
 
-A single hardening fix for a brick mode the HIL bench (F-077) found in v1.6.0,
-restoring the #125 invariant that the bootloader can never become unflashable
-over CAN.
+Two fixes for the brick crisis the HIL bench found in v1.6.0 — one removes the
+trigger, one survives it — restoring the #125 invariant that the bootloader can
+never become unflashable over CAN.
+
+### Changed
+
+- **Reverted all FDCAN buses to 500 kbps** (#171), at a **68.75% sample point**
+  (`NominalPrescaler 3, Seg1 10, Seg2 5` → 16 Tq) — matched bit-for-bit to the
+  AMS app's revert (IFS08-CE-AMS#351) so every node on the bus samples at the
+  same point — up from the previous ~50%.
+  1 Mbps ran too close to the bus's signal-integrity margin: a flash is
+  thousands of frames, and a bit error landing mid-write (~60% of a sector on
+  one bench reflash, a `TRANSPORT_ERROR`) left a half-written app that then
+  tripped #166 → a permanent brick (two STM32H733 lost this way). The doubled
+  bit time + proper sample point restore the margin, and the mid-write failures
+  disappear. The multi-bus design (#120) is unchanged — only the rate. (Also
+  resolves the sample-point concern from #163; its PLL-source / HSE-fallback
+  items remain open.)
 
 ### Fixed
 
-- **Power-cut mid-flash-write no longer bricks the unit past CAN recovery**
-  (#166). A power loss landing mid-write leaves a partially-programmed flash
-  word whose double-bit ECC raises a bus fault the instant it is read. The
-  app-validation CRC read hit that word on **every boot, before CAN came up**,
-  looping the bootloader unreachable — recoverable only by an SWD chip-erase.
-  The validation read is now guarded: a fault while validating leaves a
-  reset-surviving breadcrumb, and the next boot **skips the corrupt read** and
-  comes up reachable + reflashable (one brief fault+reboot per cold boot of a
-  corrupt unit, then steady). Latched flash ECC/error state is also cleared at
-  boot so the recovery reflash can't be rejected by a stale lock. The recovery
-  lives in `bl_fault_reboot` — no CubeMX fault handler is touched. Validated on
-  the bench by an F-077 re-run.
+- **An interrupted flash write no longer bricks the unit past CAN recovery**
+  (#166). A write cut short — by power loss **or** a CAN-transport failure —
+  leaves a partially-programmed flash word whose double-bit ECC raises a bus
+  fault the instant it is read. The app-validation CRC read hit that word on
+  **every boot, before CAN came up**, looping the bootloader unreachable —
+  recoverable only by an SWD chip-erase. The validation read is now guarded: a
+  fault while validating leaves a reset-surviving breadcrumb, and the next boot
+  **skips the corrupt read** and comes up reachable + reflashable (one brief
+  fault+reboot per cold boot of a corrupt unit, then steady). Latched flash
+  ECC/error state is also cleared at boot so the recovery reflash can't be
+  rejected by a stale lock. The recovery lives in `bl_fault_reboot` — no CubeMX
+  fault handler is touched. Validated on the bench by an F-077 re-run at
+  500 kbps.
 
 ---
 
