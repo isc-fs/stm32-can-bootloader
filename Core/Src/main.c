@@ -85,6 +85,13 @@ static uint32_t g_AutoJumpDeadline = 0U;
 static uint8_t  g_appcheck_result = 0xFFU;
 static uint8_t  g_appcheck_valid  = 0U;
 
+/* #166/G-A2/NG-1: set once at boot from the bl_appcheck breadcrumb — true when
+ * a PRIOR boot faulted while reading flash (the double-bit-ECC-on-partial-write
+ * trap). On a recovery boot the BL skips every sector-7 + app read (which would
+ * re-fault) and comes up minimal + reachable: NVM degraded, node-id at the
+ * compile-time default, app reported invalid. */
+static uint8_t  g_ecc_recovery = 0U;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -512,18 +519,48 @@ static void Bootloader_Init(void) {
 	 * the flash controller's own status clean.) */
 	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_ALL_ERRORS_BANK1);
 
-	/* Scan the NVM sector to find the append point and the current
-	 * highest seq. Safe to call even when sector 7 is fully erased —
-	 * in that case g_write_pos lands at 0 and future writes grow the
-	 * log from scratch. */
-	bl_nvm_init();
+	/* #166/G-A2/NG-1: did a prior boot fault while reading flash? bl_appcheck
+	 * stamps a reset-surviving breadcrumb on any fault taken while the guard is
+	 * armed; consume it once here. The two sector-7 reads below (bl_nvm_init's
+	 * scan + the node-id read) run BEFORE CAN is up — an ECC fault in either
+	 * would otherwise reboot-loop the chip unreachable, exactly #166 in a read
+	 * its app-only guard never covered. */
+	g_ecc_recovery = bl_appcheck_take_pending();
 
-	/* Resolve the effective node ID now that NVM is queryable. Reads
-	 * BL_NVM_KEY_NODE_ID if present, validates it, and caches the
-	 * result for `bl_node_id_get()`. Must happen BEFORE the FDCAN
-	 * filter config below — the filter is built from the resolved ID
-	 * and is set up only once at boot. */
-	bl_node_id_init_from_nvm();
+	if (g_ecc_recovery) {
+		/* Recovery boot: do NOT touch sector 7 (it may re-fault). Come up
+		 * minimal + reachable — NVM degraded (no scan; writes rejected until
+		 * NVM_FORMAT) and the node-id left at its compile-time default; the app
+		 * check is skipped too (Bootloader_CheckApplicationCompute). Recover by
+		 * issuing NVM_FORMAT then reflashing; discover the unit at the DEFAULT
+		 * node-id meanwhile. */
+		bl_log_warn("flash-read ECC fault last boot — NVM+app untrusted; NVM_FORMAT + reflash to recover (default node-id)");
+		bl_nvm_init_degraded();
+		/* Still resolve the node-id so the RX filter is built — in degraded
+		 * mode the NVM read returns NOT_FOUND without scanning sector 7, so
+		 * this falls back to the compile-time default id (no fault). */
+		bl_node_id_init_from_nvm();
+	} else {
+		/* Normal boot. Arm the breadcrumb guard around the sector-7 reads so an
+		 * ECC fault here recovers (next boot lands in the branch above) instead
+		 * of reboot-looping. The __DSB/__ISB before disarm forces any IMPRECISE
+		 * bus fault from the reads to retire INSIDE the armed window — on
+		 * Cortex-M7 a flash double-bit-ECC fault can be imprecise, and BusFault
+		 * is not enabled, so it escalates to HardFault asynchronously (NG-1). */
+		bl_appcheck_arm(true);
+
+		/* Scan the NVM sector for the append point + highest seq. Safe even on
+		 * a fully-erased sector (g_write_pos lands at 0). */
+		bl_nvm_init();
+
+		/* Resolve the effective node ID now that NVM is queryable; must run
+		 * BEFORE the FDCAN filter config (the filter is built from the ID). */
+		bl_node_id_init_from_nvm();
+
+		__DSB();
+		__ISB();
+		bl_appcheck_arm(false);
+	}
 
 	/* #120: the BL serves all three FDCAN peripherals at once (see
 	 * bl_fdcan.c). MX_FDCAN{1,2,3}_Init in main() has already initialised
@@ -1008,11 +1045,17 @@ static uint8_t Bootloader_CheckApplicationInner(void) {
  * the guard around the reads — a fault inside Inner records the breadcrumb and
  * reboots, and the next boot lands in the branch above. */
 static uint8_t Bootloader_CheckApplicationCompute(void) {
-	if (bl_appcheck_take_pending()) {
-		return 0x17;  /* app read faulted last boot -> invalid, stay in BL */
+	if (g_ecc_recovery) {
+		return 0x17;  /* recovery boot (G-A2): don't read app flash, stay in BL.
+		               * The breadcrumb was already consumed in Bootloader_Init. */
 	}
 	bl_appcheck_arm(true);
 	uint8_t result = Bootloader_CheckApplicationInner();
+	/* NG-1: force any IMPRECISE ECC bus fault from the CRC read to retire here,
+	 * while still armed, so bl_fault_reboot stamps the breadcrumb — otherwise a
+	 * late fault after the disarm below would be lost and reboot-loop the BL. */
+	__DSB();
+	__ISB();
 	bl_appcheck_arm(false);
 	return result;
 }
