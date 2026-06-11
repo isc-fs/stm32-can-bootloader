@@ -85,6 +85,13 @@ static uint32_t g_AutoJumpDeadline = 0U;
 static uint8_t  g_appcheck_result = 0xFFU;
 static uint8_t  g_appcheck_valid  = 0U;
 
+/* #166/G-A2/NG-1: set once at boot from the bl_appcheck breadcrumb — true when
+ * a PRIOR boot faulted while reading flash (the double-bit-ECC-on-partial-write
+ * trap). On a recovery boot the BL skips every sector-7 + app read (which would
+ * re-fault) and comes up minimal + reachable: NVM degraded, node-id at the
+ * compile-time default, app reported invalid. */
+static uint8_t  g_ecc_recovery = 0U;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -104,6 +111,7 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms);
  * CMD_RESET (mode=to-app) and CMD_JUMP. */
 static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes);
 static uint8_t  Bootloader_CheckApplicationCompute(void);   /* #146 H2: uncached core */
+static uint8_t  Bootloader_CheckApplicationInner(void);     /* #166: raw read, ECC-unsafe */
 static uint8_t  Bootloader_IsBootRequestActive(void);
 static uint8_t  Bootloader_IsBootAppRequestActive(void);   /* #142 */
 
@@ -122,7 +130,17 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+	/* #174 (NG-2 / NG-11): arm the IWDG as the very FIRST thing the BL does —
+	 * before HAL_Init and SystemClock_Config. bl_iwdg_start is pure IWDG1
+	 * register writes off the LSI, with no HAL or main-clock dependency, so it
+	 * is safe here. This backstops every cold-boot hang that runs before the
+	 * watchdog used to be armed in Bootloader_Init — most importantly the
+	 * unbounded VOSRDY wait in SystemClock_Config (a regulator that never
+	 * reports ready would otherwise hang forever with no recovery) — and
+	 * re-periods the inherited ~100 ms app IWDG (the 0x002 app->BL reset path)
+	 * to the BL's ~8 s at the earliest possible instant. Bootloader_Init
+	 * re-arms it once the clocks are up. */
+	bl_iwdg_start();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -138,7 +156,14 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+	/* #174 (NG-4): enable the HSE Clock Security System now the PLL is locked.
+	 * If the HSE dies at runtime (cracked crystal, vibration, solder fatigue)
+	 * the CSS raises an NMI -> NMI_Handler -> bl_fault_reboot, turning a silent
+	 * hung-clock state into a deterministic reboot. NOTE: the FDCAN kernel clock
+	 * is wired to the HSE, so CAN is still dead after such a reboot — crystal-
+	 * independent CAN (FDCAN off a PLL/HSI source) is the larger fix tracked in
+	 * #163; CSS here is the cheap deterministic-failure half. */
+	HAL_RCC_EnableCSS();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -225,14 +250,22 @@ void SystemClock_Config(void)
 }
 
 /* #144 (C6): the FDCAN nominal bit-timing in MX_FDCAN{1,2,3}_Init below
- * (NominalPrescaler=6, Seg1=1, Seg2=2 -> 4 Tq) yields exactly 1 Mbps ONLY
- * with a 24 MHz FDCAN kernel clock — which is the HSE crystal
- * (RCC_FDCANCLKSOURCE_HSE, see stm32h7xx_hal_msp.c). A mis-stuffed crystal
- * silently shifts the baud out of CAN tolerance: the BL comes up "alive" but
- * unreachable on the bus — the worst failure for a flash tool. So 24 MHz is a
- * hard BOM requirement; fail the BUILD rather than ship a brick. If the
- * crystal ever changes, re-derive the three MX_FDCAN*_Init timings + this
- * assert. */
+ * (NominalPrescaler=3, Seg1=10, Seg2=5 -> 16 Tq) yields exactly 500 kbps at a
+ * 68.75% sample point ONLY with a 24 MHz FDCAN kernel clock — which is the HSE
+ * crystal (RCC_FDCANCLKSOURCE_HSE, see stm32h7xx_hal_msp.c). A mis-stuffed
+ * crystal silently shifts the baud out of CAN tolerance: the BL comes up
+ * "alive" but unreachable on the bus — the worst failure for a flash tool. So
+ * 24 MHz is a hard BOM requirement; fail the BUILD rather than ship a brick.
+ * If the crystal ever changes, re-derive the three MX_FDCAN*_Init timings +
+ * this assert.
+ *
+ * #171: reverted 1 Mbps -> 500 kbps. 1 Mbps ran too close to the bus's
+ * signal-integrity margin — mid-write bit errors turned routine reflashes into
+ * #166 bricks. 500 kbps (doubled bit time) at a 68.75% sample point restores
+ * the margin; the multi-bus design (#120) is unchanged, only the rate. The
+ * timing (Prescaler 3, Seg1 10, Seg2 5, 16 Tq) is matched bit-for-bit to the
+ * AMS app's revert (IFS08-CE-AMS#351) so every node on the bus samples at the
+ * same point. */
 _Static_assert(HSE_VALUE == 24000000UL,
                "FDCAN bit-timing assumes a 24 MHz HSE (RCC_FDCANCLKSOURCE_HSE); "
                "a different crystal shifts the CAN baud out of tolerance — "
@@ -259,10 +292,10 @@ static void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 6;
+  hfdcan1.Init.NominalPrescaler = 3;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 1;
-  hfdcan1.Init.NominalTimeSeg2 = 2;
+  hfdcan1.Init.NominalTimeSeg1 = 10;
+  hfdcan1.Init.NominalTimeSeg2 = 5;
   hfdcan1.Init.DataPrescaler = 1;
   hfdcan1.Init.DataSyncJumpWidth = 1;
   hfdcan1.Init.DataTimeSeg1 = 1;
@@ -312,10 +345,10 @@ static void MX_FDCAN2_Init(void)
   hfdcan2.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan2.Init.TransmitPause = DISABLE;
   hfdcan2.Init.ProtocolException = DISABLE;
-  hfdcan2.Init.NominalPrescaler = 6;
+  hfdcan2.Init.NominalPrescaler = 3;
   hfdcan2.Init.NominalSyncJumpWidth = 1;
-  hfdcan2.Init.NominalTimeSeg1 = 1;
-  hfdcan2.Init.NominalTimeSeg2 = 2;
+  hfdcan2.Init.NominalTimeSeg1 = 10;
+  hfdcan2.Init.NominalTimeSeg2 = 5;
   hfdcan2.Init.DataPrescaler = 1;
   hfdcan2.Init.DataSyncJumpWidth = 1;
   hfdcan2.Init.DataTimeSeg1 = 1;
@@ -365,10 +398,10 @@ static void MX_FDCAN3_Init(void)
   hfdcan3.Init.AutoRetransmission = ENABLE;   /* #94: MUST be ENABLE — lost-arbitration frames retried, not silently dropped */
   hfdcan3.Init.TransmitPause = DISABLE;
   hfdcan3.Init.ProtocolException = DISABLE;
-  hfdcan3.Init.NominalPrescaler = 6;
+  hfdcan3.Init.NominalPrescaler = 3;
   hfdcan3.Init.NominalSyncJumpWidth = 1;
-  hfdcan3.Init.NominalTimeSeg1 = 1;
-  hfdcan3.Init.NominalTimeSeg2 = 2;
+  hfdcan3.Init.NominalTimeSeg1 = 10;
+  hfdcan3.Init.NominalTimeSeg2 = 5;
   hfdcan3.Init.DataPrescaler = 1;
   hfdcan3.Init.DataSyncJumpWidth = 1;
   hfdcan3.Init.DataTimeSeg1 = 1;
@@ -436,13 +469,11 @@ static void MX_GPIO_Init(void)
 /* ===================== BOOTLOADER CORE ========================= */
 
 static void Bootloader_Init(void) {
-	/* #125 H6: start (or re-period) the IWDG as the very FIRST thing we
-	 * do — see bl_iwdg.h. On an app->BL reset (the `002` re-enter-BL
-	 * trick) we inherit the app's tight ~100 ms watchdog, still running;
-	 * this re-periods it to the BL's ~8 s and reloads the counter within a
-	 * few ms of reset, well before the inherited period could fire. On a
-	 * cold boot it simply arms the watchdog. Everything below (NVM scan,
-	 * filter config) then runs under the BL's own generous period. */
+	/* #125 H6 / #174: re-arm + reload the IWDG. The PRIMARY arm now happens
+	 * as the first statement of main() (NG-2/NG-11) so the watchdog covers
+	 * clock bring-up too; this call re-confirms the BL's ~8 s period and
+	 * gives a fresh reload now that the (potentially slow) clock + FDCAN
+	 * init is done, before the NVM scan / filter config below. Idempotent. */
 	bl_iwdg_start();
 
 	LED_OK_ON();
@@ -494,18 +525,57 @@ static void Bootloader_Init(void) {
 	 * beyond this. */
 	bl_live_init();
 
-	/* Scan the NVM sector to find the append point and the current
-	 * highest seq. Safe to call even when sector 7 is fully erased —
-	 * in that case g_write_pos lands at 0 and future writes grow the
-	 * log from scratch. */
-	bl_nvm_init();
+	/* #166: clear any flash error/ECC state latched by a prior interrupted
+	 * write, before the first flash read (bl_nvm_init below) or any program.
+	 * A power-cut mid-write can leave the controller with a stale error or
+	 * lock latch that would otherwise reject the recovery reflash. (The
+	 * corrupt *word* itself still double-bit-ECC-faults when read — that is
+	 * handled by the bl_appcheck guard around app validation; this just keeps
+	 * the flash controller's own status clean.) */
+	__HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_ALL_ERRORS_BANK1);
 
-	/* Resolve the effective node ID now that NVM is queryable. Reads
-	 * BL_NVM_KEY_NODE_ID if present, validates it, and caches the
-	 * result for `bl_node_id_get()`. Must happen BEFORE the FDCAN
-	 * filter config below — the filter is built from the resolved ID
-	 * and is set up only once at boot. */
-	bl_node_id_init_from_nvm();
+	/* #166/G-A2/NG-1: did a prior boot fault while reading flash? bl_appcheck
+	 * stamps a reset-surviving breadcrumb on any fault taken while the guard is
+	 * armed; consume it once here. The two sector-7 reads below (bl_nvm_init's
+	 * scan + the node-id read) run BEFORE CAN is up — an ECC fault in either
+	 * would otherwise reboot-loop the chip unreachable, exactly #166 in a read
+	 * its app-only guard never covered. */
+	g_ecc_recovery = bl_appcheck_take_pending();
+
+	if (g_ecc_recovery) {
+		/* Recovery boot: do NOT touch sector 7 (it may re-fault). Come up
+		 * minimal + reachable — NVM degraded (no scan; writes rejected until
+		 * NVM_FORMAT) and the node-id left at its compile-time default; the app
+		 * check is skipped too (Bootloader_CheckApplicationCompute). Recover by
+		 * issuing NVM_FORMAT then reflashing; discover the unit at the DEFAULT
+		 * node-id meanwhile. */
+		bl_log_warn("flash-read ECC fault last boot — NVM+app untrusted; NVM_FORMAT + reflash to recover (default node-id)");
+		bl_nvm_init_degraded();
+		/* Still resolve the node-id so the RX filter is built — in degraded
+		 * mode the NVM read returns NOT_FOUND without scanning sector 7, so
+		 * this falls back to the compile-time default id (no fault). */
+		bl_node_id_init_from_nvm();
+	} else {
+		/* Normal boot. Arm the breadcrumb guard around the sector-7 reads so an
+		 * ECC fault here recovers (next boot lands in the branch above) instead
+		 * of reboot-looping. The __DSB/__ISB before disarm forces any IMPRECISE
+		 * bus fault from the reads to retire INSIDE the armed window — on
+		 * Cortex-M7 a flash double-bit-ECC fault can be imprecise, and BusFault
+		 * is not enabled, so it escalates to HardFault asynchronously (NG-1). */
+		bl_appcheck_arm(true);
+
+		/* Scan the NVM sector for the append point + highest seq. Safe even on
+		 * a fully-erased sector (g_write_pos lands at 0). */
+		bl_nvm_init();
+
+		/* Resolve the effective node ID now that NVM is queryable; must run
+		 * BEFORE the FDCAN filter config (the filter is built from the ID). */
+		bl_node_id_init_from_nvm();
+
+		__DSB();
+		__ISB();
+		bl_appcheck_arm(false);
+	}
 
 	/* #120: the BL serves all three FDCAN peripherals at once (see
 	 * bl_fdcan.c). MX_FDCAN{1,2,3}_Init in main() has already initialised
@@ -659,10 +729,20 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
 		s_was_busoff[b]      = 1U;
 		s_last_attempt_ms[b] = now_ms;
 
-		/* Stop/Start to clear INIT and rejoin. Errors are non-fatal — we
-		 * retry on the next poll; nothing else we can do but keep trying. */
+		/* Stop/Start to clear INIT and rejoin. */
 		(void)HAL_FDCAN_Stop(h);
-		(void)HAL_FDCAN_Start(h);
+		HAL_StatusTypeDef start_rc = HAL_FDCAN_Start(h);
+
+		/* #174 (NG-9): a Stop/Start timeout latches h->State = ERROR, after
+		 * which EVERY later HAL_FDCAN_Stop/Start is a no-op — the retry below
+		 * would spin forever and the bus would wedge permanently deaf. If the
+		 * Start didn't take, force the HAL back to READY (clearing any latched
+		 * error) so the next poll genuinely re-attempts the rejoin instead of
+		 * silently no-opping. */
+		if (start_rc != HAL_OK) {
+			h->State     = HAL_FDCAN_STATE_READY;
+			h->ErrorCode = HAL_FDCAN_ERROR_NONE;
+		}
 
 		bl_health_record_fdcan_recovery();
 		bl_dtc_log(BL_DTC_FDCAN_BUSOFF, BL_DTC_SEV_WARN,
@@ -923,7 +1003,7 @@ static uint32_t Bootloader_CalcCrc32(uint32_t address, uint32_t lengthBytes) {
 	return crc;
 }
 
-static uint8_t Bootloader_CheckApplicationCompute(void) {
+static uint8_t Bootloader_CheckApplicationInner(void) {
 	/* Read metadata from flash */
 	uint32_t const *meta = (uint32_t const*) BL_APP_METADATA_ADDR;
 
@@ -975,6 +1055,34 @@ static uint8_t Bootloader_CheckApplicationCompute(void) {
 	}
 
 	return 0x00;  //OK
+}
+
+/* #166: ECC-brick-safe wrapper around the validation read.
+ *
+ * A power-cut mid-flash-write leaves a partially-programmed word whose
+ * double-bit ECC raises a bus fault the instant it is read — and the reads in
+ * Bootloader_CheckApplicationInner (CRC over the app image, metadata, vector
+ * table) hit it on every boot, faulting before the BL ever services CAN.
+ *
+ * If last boot faulted while validating, the breadcrumb is pending: report the
+ * app invalid (0x17) WITHOUT touching the corrupt flash, so the BL falls
+ * through to its listen loop and stays reachable + reflashable. Otherwise arm
+ * the guard around the reads — a fault inside Inner records the breadcrumb and
+ * reboots, and the next boot lands in the branch above. */
+static uint8_t Bootloader_CheckApplicationCompute(void) {
+	if (g_ecc_recovery) {
+		return 0x17;  /* recovery boot (G-A2): don't read app flash, stay in BL.
+		               * The breadcrumb was already consumed in Bootloader_Init. */
+	}
+	bl_appcheck_arm(true);
+	uint8_t result = Bootloader_CheckApplicationInner();
+	/* NG-1: force any IMPRECISE ECC bus fault from the CRC read to retire here,
+	 * while still armed, so bl_fault_reboot stamps the breadcrumb — otherwise a
+	 * late fault after the disarm below would be lost and reboot-loop the BL. */
+	__DSB();
+	__ISB();
+	bl_appcheck_arm(false);
+	return result;
 }
 
 /* #146 H2: cached public entry point. The full CRC32 over the app

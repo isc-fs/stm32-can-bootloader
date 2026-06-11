@@ -53,6 +53,19 @@ bool bl_obyte_is_sector_wrp_protected(uint8_t sector)
 
 bl_ob_rc_t bl_obyte_apply_wrp(uint32_t sector_bitmap)
 {
+    /* G-B5: guard the IRREVERSIBLE option-byte write at its own layer (the
+     * bl_proto caller already forces a sector-0 mask, but WRP is the one op
+     * that can permanently un-flash a sector, so don't trust a single guard).
+     * Only sector 0 — the bootloader — may be write-protected; protecting any
+     * app or NVM sector (1..7) would make it impossible to erase/reflash, i.e.
+     * a self-inflicted brick. Refuse such a bitmap rather than commit + reset
+     * on it. (This path sets OPTIONBYTE_WRP only, so RDP / BOR / BOOT_ADD are
+     * structurally never touched — the catastrophic OB fields are out of reach
+     * here; the remaining risk is exactly this over-protection direction.) */
+    if ((sector_bitmap & ~0x01U) != 0U) {
+        return BL_OB_ERR_HARDWARE;   /* would WRP-protect a non-bootloader sector */
+    }
+
     FLASH_OBProgramInitTypeDef ob = { 0 };
     ob.OptionType = OPTIONBYTE_WRP;
     ob.WRPState   = OB_WRPSTATE_ENABLE;

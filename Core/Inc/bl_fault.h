@@ -58,4 +58,29 @@ void bl_fault_reboot(uint8_t reason) __attribute__((noreturn));
  * Bootloader_Init, after bl_dtc_init so the DTC can be logged. */
 bool bl_fault_take_pending(uint8_t *out_reason);
 
+/* #166 — app-validation ECC-brick recovery.
+ *
+ * A power-cut landing mid-flash-write leaves a partially-programmed word
+ * whose double-bit ECC raises a bus fault the instant it is read. The
+ * app-validation read (CRC over the app image) hits it on every boot →
+ * fault → bl_fault_reboot → re-validate → fault → the BL never reaches a
+ * CAN-reachable state. That violates the #125 "never unflashable over CAN"
+ * invariant.
+ *
+ * Recovery without any in-handler stack surgery: arm a guard around the
+ * validation read; if a fault fires while armed, bl_fault_reboot leaves a
+ * reset-surviving breadcrumb. The next boot consumes the breadcrumb and
+ * skips the corrupt read (reports the app invalid), so the BL comes up
+ * reachable + reflashable. One fault+reboot per cold boot of a corrupt
+ * unit, then steady.
+ */
+
+/* Arm (true) / disarm (false) the app-validation read guard. While armed,
+ * a fault routed through bl_fault_reboot sets the recovery breadcrumb. */
+void bl_appcheck_arm(bool on);
+
+/* True iff the previous boot faulted while the validation read was armed
+ * (i.e. the ECC-brick trap). Clears the breadcrumb (one-shot). */
+bool bl_appcheck_take_pending(void);
+
 #endif /* BL_FAULT_H */
