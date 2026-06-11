@@ -122,7 +122,17 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+	/* #174 (NG-2 / NG-11): arm the IWDG as the very FIRST thing the BL does —
+	 * before HAL_Init and SystemClock_Config. bl_iwdg_start is pure IWDG1
+	 * register writes off the LSI, with no HAL or main-clock dependency, so it
+	 * is safe here. This backstops every cold-boot hang that runs before the
+	 * watchdog used to be armed in Bootloader_Init — most importantly the
+	 * unbounded VOSRDY wait in SystemClock_Config (a regulator that never
+	 * reports ready would otherwise hang forever with no recovery) — and
+	 * re-periods the inherited ~100 ms app IWDG (the 0x002 app->BL reset path)
+	 * to the BL's ~8 s at the earliest possible instant. Bootloader_Init
+	 * re-arms it once the clocks are up. */
+	bl_iwdg_start();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -138,7 +148,14 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+	/* #174 (NG-4): enable the HSE Clock Security System now the PLL is locked.
+	 * If the HSE dies at runtime (cracked crystal, vibration, solder fatigue)
+	 * the CSS raises an NMI -> NMI_Handler -> bl_fault_reboot, turning a silent
+	 * hung-clock state into a deterministic reboot. NOTE: the FDCAN kernel clock
+	 * is wired to the HSE, so CAN is still dead after such a reboot — crystal-
+	 * independent CAN (FDCAN off a PLL/HSI source) is the larger fix tracked in
+	 * #163; CSS here is the cheap deterministic-failure half. */
+	HAL_RCC_EnableCSS();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -436,13 +453,11 @@ static void MX_GPIO_Init(void)
 /* ===================== BOOTLOADER CORE ========================= */
 
 static void Bootloader_Init(void) {
-	/* #125 H6: start (or re-period) the IWDG as the very FIRST thing we
-	 * do — see bl_iwdg.h. On an app->BL reset (the `002` re-enter-BL
-	 * trick) we inherit the app's tight ~100 ms watchdog, still running;
-	 * this re-periods it to the BL's ~8 s and reloads the counter within a
-	 * few ms of reset, well before the inherited period could fire. On a
-	 * cold boot it simply arms the watchdog. Everything below (NVM scan,
-	 * filter config) then runs under the BL's own generous period. */
+	/* #125 H6 / #174: re-arm + reload the IWDG. The PRIMARY arm now happens
+	 * as the first statement of main() (NG-2/NG-11) so the watchdog covers
+	 * clock bring-up too; this call re-confirms the BL's ~8 s period and
+	 * gives a fresh reload now that the (potentially slow) clock + FDCAN
+	 * init is done, before the NVM scan / filter config below. Idempotent. */
 	bl_iwdg_start();
 
 	LED_OK_ON();
