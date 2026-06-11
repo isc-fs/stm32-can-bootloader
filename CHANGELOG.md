@@ -12,6 +12,87 @@ the PR titles between consecutive tags.
 
 ---
 
+## v1.6.2 — 500 kbps + ECC-brick recovery + reliability hardening
+
+**Wire protocol**: unchanged at `0.2`. **CAN bitrate is 500 kbps on all FDCAN
+buses** (reverted from the v1.6.0 1 Mbps cutover, IFS08-CE-AMS#341), coordinated
+with the app at 500 kbps (IFS08-CE-AMS#351) — BL and app share the bus and must
+match. If you deployed v1.6.0, move to v1.6.2; do not run 1 Mbps.
+
+The output of resolving the v1.6.0 brick crisis end-to-end: the HIL bench found a
+power-cut-mid-write brick, the 1 Mbps bus that amplified it, and — via an
+exhaustive code-verified FMEA (#173) — a cluster of latent paths to an
+unflashable BL. This release removes the trigger, survives it, and closes the
+brick-severity gaps the audit surfaced. The #125 invariant holds: the bootloader
+can never become unreachable or unflashable over CAN. **Validated zero-bricks on
+the AMS HIL bench (#178).**
+
+### Changed
+
+- **Reverted all FDCAN buses to 500 kbps** (#171), at a **68.75% sample point**
+  (`NominalPrescaler 3, Seg1 10, Seg2 5` → 16 Tq) — matched bit-for-bit to the
+  AMS app (IFS08-CE-AMS#351) so every node samples at the same point, up from
+  ~50%. 1 Mbps ran too close to the bus's signal-integrity margin: a mid-write
+  bit error left a half-written app that tripped #166 → a permanent brick (two
+  STM32H733 lost). The doubled bit time + proper sample point restore the margin
+  and the mid-write failures disappear. Multi-bus (#120) is unchanged — only the
+  rate. (Also resolves the sample-point concern from #163; its PLL-source /
+  HSE-fallback items remain open in #174.)
+
+### Fixed — the ECC-brick family
+
+- **An interrupted flash write no longer bricks the unit past CAN recovery**
+  (#166). A write cut short — power loss **or** a CAN-transport failure — leaves
+  a partially-programmed word whose double-bit ECC bus-faults the instant it is
+  read; the app-validation CRC read hit it **every boot before CAN came up**,
+  looping the BL unreachable (SWD-only). The validation read is now guarded: a
+  fault leaves a reset-surviving breadcrumb and the next boot skips the corrupt
+  read and comes up reachable + reflashable. Bench: **10/10 power-cuts
+  recovered, first-try, zero bricks** (#178).
+  - **NG-1** — a `__DSB`/`__ISB` barrier before the guard disarms, so an
+    imprecise ECC bus fault can't retire *after* disarm and miss the breadcrumb
+    (which would re-open the loop). Confirmed first-try recovery on the bench.
+  - **G-A2** — the pre-CAN NVM scan + node-id read are guarded too; a corrupt
+    sector-7 word brings the BL up in a degraded-NVM recovery (reachable at the
+    default node-id) instead of reboot-looping, until an `NVM_FORMAT`.
+  - **NG-5** — the in-session `FLASH_VERIFY` metadata read is guarded.
+- Latched flash ECC/error state is cleared at boot so the recovery reflash can't
+  be rejected by a stale lock. The recovery lives in `bl_fault_reboot` — no
+  CubeMX fault handler is touched.
+
+### Hardened — FMEA #173 brick-mode audit (#174)
+
+A 19-agent code-verified failure-mode audit enumerated every remaining path to an
+unflashable BL; the brick-severity + build + robustness fixes ship here:
+
+- **Clock / watchdog** — the IWDG is armed as the first statement of `main()`,
+  before `SystemClock_Config`, so a hang in clock bring-up (e.g. the unbounded
+  `VOSRDY` wait) self-recovers and the inherited app IWDG is re-periodised at the
+  earliest instant (NG-2 / NG-11); the HSE **CSS** is enabled so a runtime
+  crystal failure raises an NMI → deterministic reboot, not a silent hang (NG-4);
+  the misleading "CAN listen window" fault comment is corrected (NG-3).
+- **Build** — the clang toolchain is confined to the sector-0 linker script (was
+  the stock whole-flash script, which would let a clang-built BL spill out of
+  WRP-protected sector 0 and orphan the reset breadcrumbs) (NG-10).
+- **Robustness** — `OB_APPLY_WRP` refuses any mask that would write-protect a
+  non-bootloader sector, defense-in-depth at the irreversible-op layer (G-B5);
+  bus-off recovery un-wedges the HAL on a Stop/Start timeout so a bus can't go
+  permanently deaf (NG-9).
+
+Deferred to a later validated pass (#174): NG-6 (reset-cause auto-jump backoff),
+NG-7 (breadcrumb power domain), NG-8 (FDCAN message-RAM partition), NG-12 (NVM
+per-entry CRC), #163 (crystal-independent CAN clock).
+
+### Bench validation (#178)
+
+HIL-accepted on the AMS bench, MLC2 @ 500 kbps, **zero firmware defects**: F-077
+power-cut-mid-write **10/10 reachable + reflashable, zero bricks**; NG-1
+first-try recovery 10/10; G-A2 survived all NVM-write power-cuts; G-B5 rejects
+app/NVM-sector WRP masks; #145 (3/3 across POR), #154, #142 regressions green;
+50/50 power-cycles auto-jump; 30-min mixed-traffic soak + NVM endurance clean.
+
+---
+
 ## v1.6.0 — Multi-bus FDCAN, 1 Mbps fleet cutover
 
 **Wire protocol**: message format unchanged at `0.2`. **CAN bitrate moves

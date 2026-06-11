@@ -59,7 +59,14 @@ elseif(STARM_TOOLCHAIN_CONFIG STREQUAL "STARM_PICOLIBC")
 
 endif()
 
-set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T \"${CMAKE_SOURCE_DIR}/STM32H733XG_FLASH.ld\"")
+# #174 (NG-10): link against the SAME sector-0-confined script as the gcc
+# toolchain (cmake/gcc-arm-none-eabi.cmake), NOT the stock CubeMX whole-flash
+# STM32H733XG_FLASH.ld (1024K). The whole-flash script lets the BL spill out of
+# WRP-protected sector 0 into the app/NVM sectors and has no .noinit section, so
+# the #166/#135 reset-survival breadcrumbs get orphaned/zeroed — a self-brick
+# landmine for any clang-built release. (Note: CI builds with gcc only, so the
+# clang path is not CI-exercised — verify the clang link if you ship from it.)
+set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -T \"${CMAKE_SOURCE_DIR}/STM32H733_boot.ld\"")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,-Map=${CMAKE_PROJECT_NAME}.map -Wl,--gc-sections")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -z noexecstack")
 set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--print-memory-usage ")

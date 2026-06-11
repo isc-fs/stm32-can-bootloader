@@ -29,6 +29,13 @@ static uint32_t g_write_pos = 0U;
  * ++g_max_seq. Compaction resets this to the new live-count. */
 static uint32_t g_max_seq = 0U;
 
+/* G-A2: degraded mode. Set when bl_nvm_init_degraded() is used instead of the
+ * normal init — i.e. a prior boot faulted reading sector 7 (double-bit ECC on a
+ * power-cut-corrupt word), so we must NOT read the sector again. While degraded,
+ * reads return NOT_FOUND (no slot scan -> no re-fault) and writes are rejected;
+ * bl_nvm_format() clears it (a clean erase makes the sector trustworthy again). */
+static uint8_t g_nvm_degraded = 0U;
+
 
 /* ---- Helpers ---- */
 
@@ -99,6 +106,20 @@ void bl_nvm_init(void)
                       ? 0U
                       : (last_live_slot + 1U) * BL_NVM_ENTRY_SIZE;
     g_max_seq = max_seq;
+    g_nvm_degraded = 0U;   /* G-A2: a successful scan means the sector is trusted */
+}
+
+void bl_nvm_init_degraded(void)
+{
+    /* G-A2: bring the store up WITHOUT scanning sector 7 — a prior boot
+     * double-bit-ECC-faulted reading it, so any read here would re-fault and
+     * reboot-loop the BL before CAN is up. Reads will return NOT_FOUND and
+     * writes are rejected until an explicit NVM_FORMAT erases + re-trusts the
+     * sector. The BL still comes up reachable (node-id falls back to the
+     * compile-time default). */
+    g_write_pos    = 0U;
+    g_max_seq      = 0U;
+    g_nvm_degraded = 1U;
 }
 
 
@@ -132,6 +153,9 @@ bl_nvm_status_t bl_nvm_read(uint16_t key,
                             uint8_t max_len,
                             uint8_t *actual_len)
 {
+    if (g_nvm_degraded) {
+        return BL_NVM_NOT_FOUND;   /* G-A2: sector untrusted — skip the slot scan */
+    }
     uint32_t end_slot = g_write_pos / BL_NVM_ENTRY_SIZE;
     const bl_nvm_entry_t *best = find_latest(key, end_slot);
 
@@ -457,8 +481,9 @@ bl_nvm_status_t bl_nvm_format(void)
     if (st != HAL_OK) {
         return BL_NVM_HARDWARE;
     }
-    g_write_pos = 0U;
-    g_max_seq   = 0U;
+    g_write_pos    = 0U;
+    g_max_seq      = 0U;
+    g_nvm_degraded = 0U;   /* G-A2: sector freshly erased -> trustworthy again */
     return BL_NVM_OK;
 }
 
@@ -467,6 +492,9 @@ bl_nvm_status_t bl_nvm_format(void)
 
 bl_nvm_status_t bl_nvm_write(uint16_t key, const void *value, uint8_t len)
 {
+    if (g_nvm_degraded) {
+        return BL_NVM_HARDWARE;   /* G-A2: sector untrusted — NVM_FORMAT to recover first */
+    }
     if (len > BL_NVM_MAX_VALUE_LEN) {
         return BL_NVM_BAD_ARG;
     }

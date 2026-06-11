@@ -292,3 +292,28 @@ void test_nvm_write_recovers_via_compaction_on_first_program_fail(void)
     TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_read(0x81U, &out, 1, &len));
     TEST_ASSERT_EQUAL_UINT8(0xBBU, out);
 }
+
+/* ---- G-A2: degraded mode (post-ECC-fault recovery init) ---- */
+
+void test_nvm_degraded_mode_hides_reads_rejects_writes_until_format(void)
+{
+    /* After a prior boot double-bit-ECC-faulted reading sector 7, Bootloader_Init
+     * brings the store up via bl_nvm_init_degraded() instead of scanning. Reads
+     * must then return NOT_FOUND (no slot scan -> no re-fault) and writes must be
+     * rejected, until an explicit bl_nvm_format() erases + re-trusts the sector. */
+    seed_and_init();
+
+    uint8_t v = 0x42U;
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_write(0x1234U, &v, 1U));
+
+    bl_nvm_init_degraded();
+    uint8_t out = 0U, len = 0U;
+    TEST_ASSERT_EQUAL_INT(BL_NVM_NOT_FOUND, bl_nvm_read(0x1234U, &out, 1U, &len));
+    TEST_ASSERT_EQUAL_INT(BL_NVM_HARDWARE,  bl_nvm_write(0x1234U, &v, 1U));
+
+    /* A clean format re-trusts the sector — reads + writes work again. */
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_format());
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_write(0x1234U, &v, 1U));
+    TEST_ASSERT_EQUAL_INT(BL_NVM_OK, bl_nvm_read(0x1234U, &out, 1U, &len));
+    TEST_ASSERT_EQUAL_UINT8(0x42U, out);
+}

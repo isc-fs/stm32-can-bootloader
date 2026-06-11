@@ -9,6 +9,7 @@
 
 #include "bl_flash.h"
 
+#include "bl_fault.h"   /* NG-5: bl_appcheck guard around the in-session metadata read */
 #include "bl_health.h"
 #include "bl_iwdg.h"
 #include "bl_memmap.h"
@@ -257,6 +258,12 @@ bl_flash_status_t bl_flash_write_metadata(uint32_t size,
      * is in erased state (all 0xFF); if not, hand off to
      * bl_nvm_compact_replace_meta() which erases sector 7 (preserving
      * live NVM entries) and writes the new metadata in one pass. */
+    /* NG-5: arm the appcheck breadcrumb around this in-session read of the
+     * metadata FLASHWORD. If a prior interrupted write left it double-bit-ECC
+     * corrupt, the read bus-faults — arming makes the BL recover on the next
+     * boot (skip the read, come up reachable) instead of rebooting mid-session
+     * with no breadcrumb. The __DSB/__ISB flush any imprecise fault in-window. */
+    bl_appcheck_arm(true);
     const uint32_t *cur = (const uint32_t *)BL_APP_METADATA_ADDR;
     bool erased = true;
     for (uint32_t i = 0U; i < (BL_APP_METADATA_SIZE / 4U); i++) {
@@ -265,6 +272,9 @@ bl_flash_status_t bl_flash_write_metadata(uint32_t size,
             break;
         }
     }
+    __DSB();
+    __ISB();
+    bl_appcheck_arm(false);
 
     if (!erased) {
         bl_nvm_status_t ns = bl_nvm_compact_replace_meta(meta);

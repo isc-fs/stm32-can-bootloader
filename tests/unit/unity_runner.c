@@ -77,6 +77,7 @@ void test_nvm_compact_replace_meta_preserves_live_entries(void);
 void test_nvm_compact_replace_meta_writes_caller_metadata(void);
 void test_nvm_compact_replace_meta_erases_old_metadata(void);
 void test_nvm_write_recovers_via_compaction_on_first_program_fail(void);
+void test_nvm_degraded_mode_hides_reads_rejects_writes_until_format(void);
 
 /* ---- test_bl_log.c ---- */
 void test_log_drain_clamps_oversized_ent_len(void);
@@ -217,6 +218,7 @@ int main(void)
     RUN_TEST(test_nvm_compact_replace_meta_writes_caller_metadata);
     RUN_TEST(test_nvm_compact_replace_meta_erases_old_metadata);
     RUN_TEST(test_nvm_write_recovers_via_compaction_on_first_program_fail);
+    RUN_TEST(test_nvm_degraded_mode_hides_reads_rejects_writes_until_format);
 
     /* test_bl_log.c */
     RUN_TEST(test_log_drain_clamps_oversized_ent_len);
