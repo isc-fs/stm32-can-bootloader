@@ -97,6 +97,13 @@ _Static_assert(sizeof(bl_nvm_entry_t) == BL_NVM_ENTRY_SIZE,
  * Runs after bl_dtc_init / bl_log_init in Bootloader_Init. */
 void bl_nvm_init(void);
 
+/* G-A2: bring the store up WITHOUT scanning sector 7 — the recovery path used
+ * when a prior boot double-bit-ECC-faulted reading the sector (a power-cut left
+ * a corrupt word). Reads then return NOT_FOUND and writes are rejected until an
+ * explicit bl_nvm_format() erases + re-trusts the sector. Keeps the BL reachable
+ * (node-id falls back to its compile-time default) instead of reboot-looping. */
+void bl_nvm_init_degraded(void);
+
 /* Read the current value for `key` into `out`. On success `*actual_len`
  * receives the value length. BL_NVM_NOT_FOUND is returned when the key
  * has no live entry (never written, all writes tombstoned, or the
