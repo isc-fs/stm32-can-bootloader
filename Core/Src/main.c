@@ -729,10 +729,20 @@ static void Bootloader_FdcanBusOffRecover(uint32_t now_ms) {
 		s_was_busoff[b]      = 1U;
 		s_last_attempt_ms[b] = now_ms;
 
-		/* Stop/Start to clear INIT and rejoin. Errors are non-fatal — we
-		 * retry on the next poll; nothing else we can do but keep trying. */
+		/* Stop/Start to clear INIT and rejoin. */
 		(void)HAL_FDCAN_Stop(h);
-		(void)HAL_FDCAN_Start(h);
+		HAL_StatusTypeDef start_rc = HAL_FDCAN_Start(h);
+
+		/* #174 (NG-9): a Stop/Start timeout latches h->State = ERROR, after
+		 * which EVERY later HAL_FDCAN_Stop/Start is a no-op — the retry below
+		 * would spin forever and the bus would wedge permanently deaf. If the
+		 * Start didn't take, force the HAL back to READY (clearing any latched
+		 * error) so the next poll genuinely re-attempts the rejoin instead of
+		 * silently no-opping. */
+		if (start_rc != HAL_OK) {
+			h->State     = HAL_FDCAN_STATE_READY;
+			h->ErrorCode = HAL_FDCAN_ERROR_NONE;
+		}
 
 		bl_health_record_fdcan_recovery();
 		bl_dtc_log(BL_DTC_FDCAN_BUSOFF, BL_DTC_SEV_WARN,
