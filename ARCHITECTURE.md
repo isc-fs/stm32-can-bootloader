@@ -170,60 +170,84 @@ version, and the bootloader stamps the record.
 
 ```mermaid
 flowchart TD
-    reset((Reset)) --> init["Peripheral init<br/>clocks · GPIO · FDCAN1/2/3 · LEDs"]
-    init --> bootreq{"RTC->BKP0R<br/>== BL_BOOT_REQ_MAGIC?"}
-    bootreq -- yes --> clearmagic["Clear BKP0R<br/>(one-shot)"] --> listen["CAN-listen mode<br/>no auto-jump armed"]
-    bootreq -- no --> checkapp{"Bootloader_CheckApplication()<br/>(magic + CRC32 + SP + entry)"}
-    checkapp -- valid --> armjump["Arm auto-jump<br/>(2 s window)"]
-    checkapp -- invalid --> listen
-    armjump --> mainloop["Main loop<br/>poll FDCAN RX FIFO0<br/>+ dispatch frames"]
+    reset((Reset)) --> iwdg["Arm IWDG1 watchdog<br/>(first line of main, pre-clock)"]
+    iwdg --> clocks["SystemClock_Config<br/>+ enable HSE CSS"]
+    clocks --> init["Peripheral init + Bootloader_Init<br/>GPIO · FDCAN1/2/3 · LEDs · latch reset cause"]
+    init --> crumb{"ECC-recovery<br/>breadcrumb pending?"}
+    crumb -- "yes" --> degraded["Degraded recovery boot<br/>skip app-CRC read · NVM degraded<br/>· default node-id · stay reachable"]
+    crumb -- "no" --> bootreq{"RTC->BKP0R /<br/>NVM stay-in-BL flag?"}
+    bootreq -- "BL_BOOT_APP_MAGIC<br/>(warm boot after a write, #142)" --> jump["Jump to app"]
+    bootreq -- "BL_BOOT_REQ_MAGIC or<br/>NVM stay-in-BL (#145)" --> listen["CAN-listen mode<br/>no auto-jump armed"]
+    bootreq -- "neither" --> checkapp{"Bootloader_CheckApplication()<br/>guarded CRC read · magic · SP · entry"}
+    checkapp -- "valid" --> armjump["Arm auto-jump<br/>(2 s window)"]
+    checkapp -- "invalid" --> listen
+    armjump --> mainloop["Main loop<br/>poll all 3 FDCAN RX FIFOs · dispatch · kick IWDG"]
     listen --> mainloop
-    mainloop -- "frame in window" --> mainloop_cancel["Cancel auto-jump"] --> mainloop
-    mainloop -- "deadline elapsed,<br/>no traffic, app valid" --> jump["Jump to app<br/>(see below)"]
+    degraded --> mainloop
+    mainloop -- "addressed frame in window" --> cancel["Cancel auto-jump"] --> mainloop
+    mainloop -- "deadline elapsed, no traffic, app valid" --> jump
     mainloop -- "any other state" --> mainloop
 
     subgraph jumpdetail [Jump to application]
       direction TB
-      j1["HAL_FDCAN_DeInit + HAL_DeInit"] --> j2["Stop SysTick"]
+      j0["Kick IWDG once more"] --> j1["HAL_FDCAN_DeInit + HAL_DeInit"]
+      j1 --> j2["Stop SysTick"]
       j2 --> j3["__disable_irq()"]
       j3 --> j4["SCB->VTOR = BL_APP_BASE<br/>__DSB()"]
       j4 --> j5["__set_MSP(appStack)<br/>__ISB()"]
       j5 --> j6["bx app->Reset_Handler<br/>(IRQs stay masked;<br/>app's HAL_Init enables them)"]
     end
 
-    jump --> j1
+    jump --> j0
 ```
 
 Prose walk-through:
 
-1. **Reset** — MCU starts the bootloader (vector table at
-   `0x08000000`).
-2. **Peripheral init** — clocks, GPIO, FDCAN1/2/3, status LEDs.
-3. **Boot-request check** — read `RTC->BKP0R`. If it equals
-   `BL_BOOT_REQ_MAGIC = 0xB00710AD`, clear it and stay in CAN-
-   listen mode (the handshake an app uses to drop back in without
-   JTAG). Otherwise call `Bootloader_CheckApplication()`, which
-   validates every field of the metadata record (magic, size
-   bounds, CRC recomputed over flash, app base) and the app's
-   vector table (SP pointing to a valid RAM region, entry inside
-   the app region). On success a 2-second auto-jump window is
-   armed; any CAN frame received in that window cancels the jump.
-4. **Main loop** — polls all three FDCAN RX FIFO0s and dispatches frames;
-   the auto-jump fires when its deadline elapses with no inbound
-   traffic.
-5. **Jump to application** — deinit FDCAN and HAL, stop SysTick,
-   disable IRQs, relocate `SCB->VTOR` to `BL_APP_BASE` (followed
-   by `__DSB()` so the write is visible before any instruction
-   fetch reads from the new vector table), restore MSP from the
-   app's stack word (followed by `__ISB()` so the pipeline sees
-   the new SP before the branch), and finally `bx` to the app's
-   reset vector. **IRQs stay masked across the handoff** — the
-   app's `Reset_Handler` / `HAL_Init()` is what re-enables them
-   once it owns the CPU state. Re-enabling on the BL side risked
-   a pending IRQ dispatching through the new VTOR before the
-   app's reset handler had run; the barriers + masked-IRQs pattern
-   are documented in ARM AN-298 and the AM32-bootloader reference
-   implementation.
+0. **Arm the watchdog first.** The very first statement of `main()` —
+   before clocks, before any peripheral — starts the independent hardware
+   watchdog (`bl_iwdg_start()`), so a hang anywhere in bring-up (even the
+   unbounded `VOSRDY` wait inside clock config) self-recovers by reset
+   instead of wedging the board. See *Reliability & brick-safety*.
+1. **Clocks + clock security.** `SystemClock_Config` brings up the 24 MHz
+   HSE / PLL; the HSE **CSS** is then enabled, so a runtime crystal failure
+   raises an NMI → deterministic reboot rather than a silently dead bus.
+2. **Peripheral init + `Bootloader_Init`** — GPIO, FDCAN1/2/3, status LEDs;
+   the reset cause is latched and the ECC-recovery breadcrumb is consumed.
+3. **ECC-recovery branch.** If the previous boot left a breadcrumb (a flash
+   read bus-faulted while validating the app — see *Reliability &
+   brick-safety*), this boot **skips the app-CRC read**, brings the NVM up in
+   degraded mode, resolves the node ID to the compile-time default, and stays
+   in listen mode — reachable and reflashable instead of reboot-looping.
+4. **Boot-request check** — read `RTC->BKP0R` and the persisted NVM
+   stay-in-BL flag. Three outcomes:
+   - `BL_BOOT_APP_MAGIC` — an app-jump requested through a clean reset after a
+     flash write this boot (#142, so a warm jump can't run the app on stale BL
+     state) → jump straight to the app.
+   - `BL_BOOT_REQ_MAGIC = 0xB00710AD` **or** the NVM stay-in-BL flag (#145) →
+     stay in CAN-listen mode, no auto-jump. `BKP0R` is the volatile handshake an
+     app uses to drop back in without JTAG; the NVM flag is the same intent made
+     to survive a power cycle (the RTC register doesn't).
+   - neither → call `Bootloader_CheckApplication()`, which validates every field
+     of the metadata record (magic, size bounds, CRC recomputed over flash, app
+     base) and the app's vector table (SP in a valid RAM region, entry inside the
+     app region). **The CRC read is ECC-guarded.** On success a 2-second
+     auto-jump window is armed; any frame genuinely **addressed to the BL** in
+     that window cancels the jump (#154 — aliased or foreign frames no longer
+     cancel it).
+5. **Main loop** — polls all three FDCAN RX FIFO0s, dispatches frames, and
+   **kicks the watchdog**; the auto-jump fires when its deadline elapses with no
+   inbound traffic.
+6. **Jump to application** — kick the watchdog once more (the app re-periodises
+   it on its own clock), deinit FDCAN and HAL, stop SysTick, disable IRQs,
+   relocate `SCB->VTOR` to `BL_APP_BASE` (followed by `__DSB()` so the write is
+   visible before any instruction fetch reads from the new vector table),
+   restore MSP from the app's stack word (followed by `__ISB()` so the pipeline
+   sees the new SP before the branch), and finally `bx` to the app's reset
+   vector. **IRQs stay masked across the handoff** — the app's `Reset_Handler` /
+   `HAL_Init()` is what re-enables them once it owns the CPU state. Re-enabling on
+   the BL side risked a pending IRQ dispatching through the new VTOR before the
+   app's reset handler had run; the barriers + masked-IRQs pattern are documented
+   in ARM AN-298 and the AM32-bootloader reference implementation.
 
 A corrupt or missing application never causes a blind jump — the
 bootloader lights the error LED and stays in CAN-listen mode.
@@ -233,6 +257,106 @@ bootloader cleanly by writing `0xB00710AD` to `RTC->BKP0R` (backup
 domain access must be enabled) and triggering a system reset. The
 bootloader detects the magic, clears `RTC->BKP0R` so the request
 is one-shot, and disables the auto-jump for that session.
+
+---
+
+## Reliability & brick-safety
+
+The bootloader is the one component whose failure means opening a sealed ECU
+enclosure in the car, so every mechanism in this section serves a single
+invariant (#125, HIL-validated in #178):
+
+> **The bootloader can never become unreachable or unflashable over CAN.**
+
+The threats are a hang it can't catch, a clock that dies under it, a bus that
+goes deaf, and — the sharpest one — a flash word left half-written by an
+interrupted programming cycle. Each has a backstop.
+
+### Hardware watchdog (IWDG1)
+
+The independent watchdog is armed by the **first statement of `main()`**, before
+`SystemClock_Config` and any peripheral (`bl_iwdg_start()`), so nothing in
+bring-up can hang the board without a reset catching it — including the unbounded
+`VOSRDY` / PLL-lock waits in clock config. Period ≈ **8 s** (`/256` prescaler ×
+`BL_IWDG_RELOAD = 1000` against the ~32 kHz LSI), sized to clear the worst
+uninterruptible CPU stall: a single 128 KB sector erase (~1.8 s — the CPU stalls
+fetching from the erasing bank). `bl_flash_erase` erases **one sector per HAL call
+and kicks the watchdog between sectors**, so a full multi-sector app erase (~10 s)
+can't trip the period mid-erase. The IWDG is kicked every main-loop pass and once
+more immediately before the app jump.
+
+**One-way ownership.** The IWDG can't be turned off once started — only
+re-periodised. The BL owns it until the jump; the AMS application then re-inits it
+to its own ~100 ms period and owns it thereafter (IFS08-CE-AMS#280). After an IWDG
+or CPU-fault reset the BL deliberately **stays in listen mode** rather than
+auto-jumping a possibly-faulty app. Build knob `BL_IWDG_ENABLE` (default on) gates
+it for a debugger session; production keeps it on.
+
+### ECC-brick recovery (interrupted flash write)
+
+The H7's flash is ECC-protected. An interrupted programming cycle — power loss
+**or** a CAN-transport failure that aborts a `WRITE_CHUNK` mid-word — leaves a
+**partially-programmed FLASHWORD whose double-bit ECC bus-faults the instant it is
+read**. The app-validation CRC reads the whole image every boot, so without a
+guard it would hit that word *before CAN came up*, hardfault → reboot-loop →
+unreachable over CAN (SWD-only). This is the #166 brick; the brief 1 Mbps cutover
+that amplified it (more frames per flash → more chances for a mid-write bit error)
+is reverted to 500 kbps in v1.6.2.
+
+The recovery lives in `bl_fault_reboot` / `Bootloader_CheckApplication` — no CubeMX
+fault handler is touched:
+
+1. **Guard the read.** Before the validation read, arm a flag
+   (`bl_appcheck_arm(true)`); after it, a `__DSB()` / `__ISB()` barrier, then
+   disarm. If the read bus-faults, the fault handler sees the armed flag, drops a
+   **reset-surviving `.noinit` breadcrumb**, and reboots.
+2. **Recover on the next boot.** `Bootloader_Init` consumes the breadcrumb
+   (`bl_appcheck_take_pending` → `g_ecc_recovery`) and **skips the corrupt read**,
+   coming up reachable + reflashable — re-running `cf flash` repairs the image, no
+   SWD trip.
+3. **NG-1 — the barrier is load-bearing.** An *imprecise* ECC bus fault can
+   retire a few cycles late; the `__DSB` / `__ISB` before disarm forces it to land
+   while the guard is still armed, so it can't slip through after disarm and miss
+   the breadcrumb (which would re-open the loop). Bench: 10/10 power-cuts recovered
+   first-try (#178).
+4. **G-A2 — the pre-CAN reads are guarded too.** The NVM scan and node-id read
+   that run before CAN is up sit on the same guard: a corrupt sector-7 word brings
+   the BL up in **degraded-NVM recovery** (`bl_nvm_init_degraded` — reads return
+   `NOT_FOUND`, writes are refused) with the node ID fallen back to the
+   compile-time default, so the unit is **discoverable at the default node-id**
+   until an `NVM_FORMAT` instead of reboot-looping. **NG-5** extends the same guard
+   to the in-session `FLASH_VERIFY` metadata read.
+
+Latched flash ECC/error state is cleared at boot so the recovery reflash can't be
+rejected by a stale lock.
+
+### Clock security (CSS)
+
+The FDCAN bit-timing is derived from the 24 MHz HSE crystal. A compile-time
+`_Static_assert(HSE_VALUE == 24 MHz)` (#144) catches a mis-stuffed BOM at build
+time; the HSE **clock-security system** catches a crystal that *dies at runtime* —
+CSS raises an NMI that resets the part deterministically instead of leaving it
+running on a drifting or stopped clock, silently deaf on the bus.
+
+### Bus-off un-wedge
+
+On a CAN bus-off the BL runs a Stop/Start recovery (DTC `0x0040`, per-boot
+counter) rather than going permanently deaf. **NG-9** hardens that path: if
+`HAL_FDCAN_Start` fails on the restart (the HAL left in a transient state), the
+recovery forces the handle back to `READY` / no-error and retries, so a transient
+HAL state can't leave one bus wedged off.
+
+### Where it came from
+
+v1.5.0 (#125) established the invariant — IWDG, fault-reboot, bus-off recovery.
+v1.6.2 closed the brick crisis the HIL bench found: #166 (ECC recovery) + #171
+(the 1 Mbps → 500 kbps revert) + the #174 hardening pass distilled from a
+code-verified FMEA (#173), which also added the WRP-mask guard (G-B5, see *Option
+bytes* below) and confined the clang linker to sector 0 (so a clang build can't
+spill the BL out of WRP-protected sector 0 and orphan the breadcrumbs). The
+deferred items (NG-6/7/8/12, #163) are listed in the v1.6.2
+[CHANGELOG](CHANGELOG.md). All of the above is HIL-validated **zero-bricks** in
+#178.
 
 ---
 
@@ -324,6 +448,11 @@ make a board unrecoverable. Rejection cases:
   it would race every reply on the bus)
 - byte ∈ `0x10..0xFF` (out of the 4-bit destination field; the
   FDCAN mask would silently truncate to an unrelated low nibble)
+
+Beyond a bad *value*, a *corrupt* sector-7 word — one that ECC-faults the
+pre-CAN NVM scan — brings the BL up in degraded-NVM recovery at the
+**default node-id** rather than reboot-looping; see *Reliability &
+brick-safety* (G-A2).
 
 Two classic-mask FDCAN filters are then installed on FIFO0 of **every
 bus** (see *Multi-bus FDCAN* above): `dst == bl_node_id_get()`
@@ -429,6 +558,10 @@ condition scenarios still surface the more actionable code.
 | `0x06` | `BL_RESET_LOW_POWER` | `LPWRRSTF`                               |
 | `0x07` | `BL_RESET_BROWNOUT`  | `BORRSTF`                                |
 
+After an `IWDG` (`0x04`) or `CPU_FAULT` reset the bootloader deliberately
+stays in listen mode rather than auto-jumping a possibly-faulty app — see
+*Reliability & brick-safety*.
+
 The `BL_HEALTH_FLAG_*` bitmask specified in REQUIREMENTS currently
 has bits 0 (session active), 1 (valid app present) and 4 (WRP
 protected) live; other bits are reserved for later phases.
@@ -454,9 +587,12 @@ bus. **Eviction**: when a 33rd distinct code arrives the oldest
 entry (slot 0) is evicted and the rest shift down.
 
 **BL-emitted well-known codes:** `0x0010` `BL_DTC_FLASH_HW` (error;
-context = failing flash address), `0x0020`
-`BL_DTC_SESSION_TIMEOUT` (warn; context = 0). Apps and future
-phases allocate their own codes above `0x0100`.
+context = failing flash address), `0x0020` `BL_DTC_SESSION_TIMEOUT`
+(warn), `0x0030` `BL_DTC_ISOTP_ERROR` (warn; a `bl_isotp_rx_feed`
+error), `0x0040` `BL_DTC_FDCAN_BUSOFF` (warn; context = the per-boot
+bus-off recovery count), and `0x0050` `BL_DTC_CPU_FAULT` (the previous
+boot ended in a CPU fault — context = the `bl_fault` reboot reason).
+Apps and future phases allocate their own codes above `0x0100`.
 
 **Persistence across the BL → app jump.** BKPSRAM is not cleared
 at jump time and the app doesn't touch the DTC region today, so on
@@ -644,7 +780,12 @@ recent H7 silicon WRP can only be cleared via a full chip erase
 through an external debugger, so an accidental apply during
 development would brick the part until it can be put on a
 programmer. Optional bytes 4..7 carry a LE sector bitmap; omitted,
-it defaults to `0x01` (protect sector 0 — the bootloader — only).
+it defaults to `0x01` (protect sector 0 — the bootloader — only). **A
+mask requesting any sector other than 0 is refused** (G-B5, #174): the
+dispatcher NACKs it (`BL_NACK_UNSUPPORTED`) and force-ORs bit 0, and
+`bl_obyte_apply_wrp` independently returns a hardware error rather than
+committing — two layers, so a fat-fingered `--sector-mask` can never
+WRP-lock an app or NVM sector and make the unit unflashable over CAN.
 
 **Launch sequencing.** On a valid request the handler ACKs
 synchronously, then **polls the FDCAN TX FIFO until it has fully
@@ -679,7 +820,7 @@ decision on the flag without polling `OB_READ` first.
 
 **RDP policy.** This project deliberately **reads** the RDP level
 but has **no code path that writes it**. RDP is set out-of-band —
-see [PROVISIONING.md § 3](PROVISIONING.md#3-rdp-policy). Dev
+see [PROVISIONING.md § 4](PROVISIONING.md#4-rdp-policy). Dev
 boards stay at Level 0, production units get Level 1 via
 STM32CubeProgrammer at provisioning time, **Level 2 is forbidden**
 (one-way trip that bricks the debug surface permanently). Keeping
@@ -687,7 +828,7 @@ RDP out of the CAN-reachable surface is intentional: a misfiring
 host tool cannot transition a unit into Level 2 because the
 firmware cannot emit the instruction that would do it.
 
-### Session watchdog
+### Session watchdog (CONNECT inactivity timeout)
 
 ```mermaid
 stateDiagram-v2
@@ -705,7 +846,11 @@ stateDiagram-v2
 Once `CONNECT` succeeds the bootloader arms a watchdog that fires
 after `BL_SESSION_TIMEOUT_MS` (default **30 000 ms**, override with
 `-DBL_SESSION_TIMEOUT_MS=…`) of silence. Idle bootloaders that have
-never seen a `CONNECT` are not watchdogged.
+never seen a `CONNECT` are not watchdogged. This is a **software
+inactivity timer**, distinct from the always-on hardware IWDG (≈8 s; see
+*Reliability & brick-safety*): the session watchdog recovers an abandoned
+host by auto-jumping a valid app, while the IWDG recovers a hung CPU by
+reset.
 
 **What counts as activity.** The last-activity timestamp is
 refreshed by (1) any addressed frame passing the FDCAN filter and
@@ -762,6 +907,16 @@ shrinks to 768 KB), `feat/16-wrp-option-bytes` (`OB_READ`,
 data in any of the H7 RAMs; the bootloader's SP sanity check at
 jump time accepts a DTCM or RAM_D1 stack pointer and will be
 extended as new SRAM regions come into use.
+
+A small **`.noinit`** region in RAM_D1 holds the reset-surviving
+breadcrumbs — the ECC-recovery flag (#166) and the CPU-fault reboot
+reason (#135). Startup does **not** zero it, so a value written just
+before a reset is readable by the next boot. It does *not* survive power
+loss, which is the intended scope: a power-cut mid-write is recovered by
+re-validating the image, not by a stale flag. The linker script must
+define this section — which is why the clang build is pinned to the
+sector-0 script (NG-10); the stock whole-flash script omits `.noinit`
+and would orphan the breadcrumbs.
 
 ---
 
