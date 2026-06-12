@@ -8,17 +8,23 @@
 # Bootloader roadmap
 
 Production roadmap for the STM32H733 CAN bootloader. Each phase is a
-cluster of feat branches cut from `dev`; a milestone tag on `main`
+cluster of feat/fix branches cut from `dev`; a milestone tag on `main`
 closes the phase once every branch in it has merged. Branch status
 badges (✅ / 🔄 / 🔜) are derived from each branch's tracking issue
 state in GitHub Issues.
 
-**v1.0.0** is tagged at the end of Phase 4 — the bootloader is
-feature-complete for its intended use (internal tool, closed
-harness). Phase 5 (security) is deferred behind the `⏸ deferred`
-badge; it'll be picked up if scope ever expands to shipping on a
-public or shared network. The planned branch layout for Phase 5 is
-kept below as the on-ramp for when that day comes.
+Phases 1–4 build the bootloader to **v1.0.0** — feature-complete for
+its intended use (internal tool, closed harness). v1.0.0 was the
+*start* of a reliability arc, not the finish: phases 5–10 are the
+six-release hardening run (v1.2.0 → v1.6.2) that turned it into a
+brick-safe field tool — host-test scaffold + audit hardening, node-ID
+provisioning, field-brick prevention, fault-operational recovery
+(IWDG + bus-off + fault-reboot), multi-bus FDCAN, and finally the
+500 kbps revert + ECC-brick recovery that closed the v1.6.0 brick
+crisis. The current release is **v1.6.2** (see
+[CHANGELOG.md](CHANGELOG.md)). Phase 11 (security) stays deferred
+behind the `⏸ deferred` badge — picked up if scope ever expands to a
+public or shared network.
 
 ## Phase summary
 
@@ -28,7 +34,13 @@ kept below as the on-ramp for when that day comes.
 | 2 | Protocol rewrite (classic CAN) | ✅ done `feat/5-frame-layout` · ✅ done `feat/6-isotp` · ✅ done `feat/7-core-opcodes` · ✅ done `feat/8-flash-opcodes` · ✅ done `feat/9-session-timeout` | `v0.2.0-protocol` |
 | 3 | Firmware contract & diagnostics | ✅ done `feat/10-firmware-info` · ✅ done `feat/11-heartbeat-health` · ✅ done `feat/12-dtc` · ✅ done `feat/13-log-stream` · ✅ done `feat/14-live-data` | `v0.3.0-diagnostics` |
 | 4 | Config & option bytes | ✅ done `feat/15-nvm` · ✅ done `feat/16-wrp-option-bytes` | `v0.4.0-config` |
-| 5 | Security _(deferred)_<br><sub>paused — internal tool, physical-perimeter security is sufficient for current scope; reactivate if deployment model changes</sub> | ⏸ deferred `feat/17-ed25519-sign` · ⏸ deferred `feat/18-replay-counter` · ⏸ deferred `feat/19-challenge-response` · ⏸ deferred `feat/20-encrypted-transport` | `—` |
+| 5 | Reliability & observability hardening | ✅ done `feat/18-bl-proto-wire-tests` · ✅ done `feat/19-bl-proto-dispatch-scaffold` · ✅ done `fix/audit-hardening-batch` | `v1.2.0` |
+| 6 | Node-ID provisioning & CI gates | ✅ done `feat/26-nvm-node-id-override` · ✅ done `feat/23-host-coverage` · ✅ done `feat/24-clang-tidy` | `v1.3.1` |
+| 7 | Field-brick prevention | ✅ done `fix/audit-criticals-c2-c4` | `v1.4.0` |
+| 8 | Fault-operational hardening | ✅ done `feat/iwdg-enable` · ✅ done `feat/29-reset-on-spin` · ✅ done `feat/28-busoff-recovery-erase-probe` | `v1.5.0` |
+| 9 | Multi-bus FDCAN & fleet cutover | ✅ done `feat/27-multi-fdcan-phase-a` · ✅ done `fix/154-auto-jump-alias` · ✅ done `fix/145-persist-stay-in-bl` | `v1.6.0` |
+| 10 | 500 kbps & ECC-brick recovery | ✅ done `fix/166-ecc-brick` · ✅ done `fix/174-clock-watchdog` | `v1.6.2` |
+| 11 | Security _(deferred)_<br><sub>paused — internal tool, physical-perimeter security is sufficient for current scope; reactivate if deployment model changes</sub> | ⏸ deferred `feat/17-ed25519-sign` · ⏸ deferred `feat/18-replay-counter` · ⏸ deferred `feat/19-challenge-response` · ⏸ deferred `feat/20-encrypted-transport` | `—` |
 | — | Workflow polish _(sidequest)_ | ✅ done `feat/2-autoclose-on-dev-merge` · ✅ done `fix/1-workflow-titled-branches` · ✅ done `feat/3-roadmap` · ✅ done `feat/4-roadmap-header-config` | — |
 
 ## Branch diagram
@@ -111,6 +123,96 @@ gitGraph
     merge feat/16-wrp-option-bytes
     checkout main
     merge dev tag: "v0.4.0-config"
+    checkout dev
+
+    %% Phase 5 — Reliability & observability hardening
+    branch feat/18-bl-proto-wire-tests
+    commit id: "✔ host Unity suite — wire-format build/parse coverage"
+    checkout dev
+    merge feat/18-bl-proto-wire-tests
+    branch feat/19-bl-proto-dispatch-scaffold
+    commit id: "✔ dispatcher test scaffold + FDCAN TX-capture mock"
+    checkout dev
+    merge feat/19-bl-proto-dispatch-scaffold
+    branch fix/audit-hardening-batch
+    commit id: "✔ audit-driven hardening (ISO-TP deadline, jump barriers, log ring)"
+    checkout dev
+    merge fix/audit-hardening-batch
+    checkout main
+    merge dev tag: "v1.2.0"
+    checkout dev
+
+    %% Phase 6 — Node-ID provisioning & CI gates
+    branch feat/26-nvm-node-id-override
+    commit id: "✔ NVM-backed node-id override — provision over CAN, no reflash"
+    checkout dev
+    merge feat/26-nvm-node-id-override
+    branch feat/23-host-coverage
+    commit id: "✔ host line-coverage gate with a ratcheting floor"
+    checkout dev
+    merge feat/23-host-coverage
+    branch feat/24-clang-tidy
+    commit id: "✔ changed-lines clang-tidy gate"
+    checkout dev
+    merge feat/24-clang-tidy
+    checkout main
+    merge dev tag: "v1.3.1"
+    checkout dev
+
+    %% Phase 7 — Field-brick prevention
+    branch fix/audit-criticals-c2-c4
+    commit id: "✔ session-timeout-no-jump (C2) + WRP self-lock guard (C4)"
+    checkout dev
+    merge fix/audit-criticals-c2-c4
+    checkout main
+    merge dev tag: "v1.4.0"
+    checkout dev
+
+    %% Phase 8 — Fault-operational hardening
+    branch feat/iwdg-enable
+    commit id: "✔ independent watchdog, sized to clear a 128 KB sector erase"
+    checkout dev
+    merge feat/iwdg-enable
+    branch feat/29-reset-on-spin
+    commit id: "✔ reboot-on-CPU-fault via a reset-surviving .noinit breadcrumb"
+    checkout dev
+    merge feat/29-reset-on-spin
+    branch feat/28-busoff-recovery-erase-probe
+    commit id: "✔ FDCAN bus-off auto-recovery + erase-duration probe"
+    checkout dev
+    merge feat/28-busoff-recovery-erase-probe
+    checkout main
+    merge dev tag: "v1.5.0"
+    checkout dev
+
+    %% Phase 9 — Multi-bus FDCAN & fleet cutover
+    branch feat/27-multi-fdcan-phase-a
+    commit id: "✔ serve FDCAN1/2/3 at once, reply on the origin bus"
+    checkout dev
+    merge feat/27-multi-fdcan-phase-a
+    branch fix/154-auto-jump-alias
+    commit id: "✔ only an addressed frame cancels the boot auto-jump"
+    checkout dev
+    merge fix/154-auto-jump-alias
+    branch fix/145-persist-stay-in-bl
+    commit id: "✔ stay-in-BL hold survives a power cycle (persisted in NVM)"
+    checkout dev
+    merge fix/145-persist-stay-in-bl
+    checkout main
+    merge dev tag: "v1.6.0"
+    checkout dev
+
+    %% Phase 10 — 500 kbps & ECC-brick recovery
+    branch fix/166-ecc-brick
+    commit id: "✔ survive an interrupted flash write — reachable + reflashable"
+    checkout dev
+    merge fix/166-ecc-brick
+    branch fix/174-clock-watchdog
+    commit id: "✔ FMEA hardening — IWDG-first, CSS, WRP-mask guard, bus-off un-wedge"
+    checkout dev
+    merge fix/174-clock-watchdog
+    checkout main
+    merge dev tag: "v1.6.2"
     checkout dev
 
 ```

@@ -12,7 +12,7 @@ the PR titles between consecutive tags.
 
 ---
 
-## v1.6.2 — 500 kbps + ECC-brick recovery + reliability hardening
+## v1.6.2 (2026-06-11) — 500 kbps + ECC-brick recovery + reliability hardening
 
 **Wire protocol**: unchanged at `0.2`. **CAN bitrate is 500 kbps on all FDCAN
 buses** (reverted from the v1.6.0 1 Mbps cutover, IFS08-CE-AMS#341), coordinated
@@ -36,8 +36,9 @@ the AMS HIL bench (#178).**
   bit error left a half-written app that tripped #166 → a permanent brick (two
   STM32H733 lost). The doubled bit time + proper sample point restore the margin
   and the mid-write failures disappear. Multi-bus (#120) is unchanged — only the
-  rate. (Also resolves the sample-point concern from #163; its PLL-source /
-  HSE-fallback items remain open in #174.)
+  rate. (Realises the sample-point goal #163 flagged for v1.6.0 — 68.75%, the
+  nearest point achievable at 16 Tq; #163's PLL-source / HSE-fallback items stay
+  tracked in #163, deferred out of the #174 hardening pass.)
 
 ### Fixed — the ECC-brick family
 
@@ -93,7 +94,17 @@ app/NVM-sector WRP masks; #145 (3/3 across POR), #154, #142 regressions green;
 
 ---
 
-## v1.6.0 — Multi-bus FDCAN, 1 Mbps fleet cutover
+## v1.6.1 — RC line (2026-06-04 → 06-07), superseded by v1.6.2
+
+A release-candidate line only — `v1.6.1-rc1` … `v1.6.1-rc4` carried the first
+cut of the #166 ECC-brick recovery while the bus rate was still being decided.
+Once the 500 kbps revert (#171) landed they were folded into **v1.6.2** and no
+`v1.6.1` final was tagged. If you saw a `v1.6.1-rc` tag, its content ships in
+v1.6.2 above.
+
+---
+
+## v1.6.0 (2026-06-02) — Multi-bus FDCAN, 1 Mbps fleet cutover
 
 **Wire protocol**: message format unchanged at `0.2`. **CAN bitrate moves
 500 kbps → 1 Mbps.** This is a *coordinated fleet cutover*, not a drop-in
@@ -187,7 +198,7 @@ power cycle.
 
 ---
 
-## v1.5.0 — Fault-operational hardening
+## v1.5.0 (2026-05-31) — Fault-operational hardening
 
 **Wire protocol**: unchanged at `0.2`. No host upgrade required.
 
@@ -244,7 +255,7 @@ watchdog, and the app↔BL `002` handoff with no boot-loop.
 
 ---
 
-## v1.4.0 — Field-brick prevention
+## v1.4.0 (2026-05-29) — Field-brick prevention
 
 **Wire protocol**: unchanged at `0.2`.
 
@@ -261,7 +272,7 @@ Two field-brick paths surfaced on the HIL bench, both closed (#125):
 
 ---
 
-## v1.3.1 — CI / docs / tests catch-up
+## v1.3.1 (2026-05-18) — CI / docs / tests catch-up
 
 **Wire protocol**: unchanged at `0.2`. No firmware behaviour change —
 required-CI promotion, a documentation sweep, a tighter firmware-size gate,
@@ -269,7 +280,7 @@ and `bl_proto` dispatch tests with a ratcheted coverage floor.
 
 ---
 
-## v1.3.0 — NVM-backed node-id override + CI hardening
+## v1.3.0 (2026-05-17) — NVM-backed node-id override + CI hardening
 
 **Wire protocol**: unchanged at `0.2`. No host upgrade required.
 
@@ -401,7 +412,7 @@ context.
 
 ---
 
-## v1.2.0 — Reliability + observability hardening
+## v1.2.0 (2026-05-15) — Reliability + observability hardening
 
 **Wire protocol**: `0.1` → `0.2` (backward-compatible; v0.1 hosts keep
 working — see *Backward compatibility* below).

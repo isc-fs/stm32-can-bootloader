@@ -12,11 +12,16 @@ or diagnose a brick in the pit, you want
 1. GitHub account + clone this repo:
    - SSH: `git@github.com:isc-fs/stm32-can-bootloader.git`
    - HTTPS: `https://github.com/isc-fs/stm32-can-bootloader.git`
-2. Toolchain: ARM GCC + CMake + Ninja (STM32CubeIDE ships all three;
-   a standalone install works too). Verify with `cmake --preset
-   Debug && cmake --build build/Debug` — should produce
-   `build/Debug/CAN_BL.elf` with no warnings.
-3. First-time Git users: [git-scm.com's official tutorial](https://git-scm.com/docs/gittutorial)
+2. Firmware toolchain: ARM GCC (`arm-none-eabi-gcc`) + CMake + Ninja
+   (STM32CubeIDE ships all three; a standalone install works too). Verify with
+   `cmake --preset Debug && cmake --build build/Debug` — should produce
+   `build/Debug/CAN_BL.elf` with no warnings. (A `cmake/starm-clang.cmake`
+   toolchain exists for the sector-0 build but is **not** CI-exercised — verify
+   the link by hand if you ship from it.)
+3. Host-test toolchain (the faster inner loop, and the actual merge gate): a host
+   C compiler + CMake + Ninja; Unity is auto-fetched on first configure (one-time
+   network). See *Testing* below.
+4. First-time Git users: [git-scm.com's official tutorial](https://git-scm.com/docs/gittutorial)
    covers everything needed below.
 
 ---
@@ -116,6 +121,10 @@ closes the tracking issue automatically.
 
 **Before requesting review**, check:
 - `cmake --build build/Release` is clean (no warnings, no link errors).
+- **Host unit tests pass**: `cmake -B build-tests -S tests/unit && cmake --build
+  build-tests && ctest --test-dir build-tests --output-on-failure` (119 tests, a
+  required check — see *Testing*). Add or update a test for any non-trivial
+  `bl_*` change.
 - You ran the change on bench if it touches anything wire-format,
   flash-programming, or session-state. If hardware was involved,
   say what you tested in the PR body.
@@ -123,15 +132,44 @@ closes the tracking issue automatically.
 
 ## Merging to main (release cut)
 
-Only when `dev` holds a set of validated changes and someone with
-bench access has signed off on a full flash-cycle test. The PR
-from `dev` → `main` is the release cut — tag it and bump the
-version in `bl_proto.h` so host tools see the change.
+Only when `dev` holds a set of validated changes and someone with bench access
+has signed off on a full flash-cycle test (see [RELEASE_BENCH.md](RELEASE_BENCH.md)).
+The PR to `main` is the release cut — tag it, create the GitHub Release (CI
+attaches the binaries), and bump `BL_PROTO_VERSION_MINOR` / `_MAJOR` in
+`bl_proto.h` if the wire surface changed so host tools see it.
 
-After the release is published, `sync-dev-after-release.yml`
-fast-forwards `dev` to match `main` automatically. No need to
-run `git checkout dev && git merge main && git push` by hand;
-the workflow handles it on the `release: published` event.
+`sync-dev-after-release.yml` fast-forwards `dev` to `main` **only when `dev` is
+an ancestor of `main`**. A release cut from a release/fix branch isn't, so
+reconcile `dev` by hand afterward (v1.6.2 did). RELEASE_BENCH.md §
+*After the session* has the full flow.
+
+---
+
+## Testing
+
+The host **unit suite** in `tests/unit/` (Unity via FetchContent) is the merge
+gate — it runs in well under a second with no toolchain or hardware and is a
+**required** status check. Run it:
+
+```sh
+cmake -B build-tests -S tests/unit
+cmake --build build-tests
+ctest --test-dir build-tests --output-on-failure
+```
+
+119 tests must stay green; add or update one for any non-trivial `bl_*` change.
+The per-module table and the mock harness are in
+[`tests/unit/README.md`](tests/unit/README.md).
+
+**CI** (`.github/workflows/build-and-test.yml`) runs six jobs on every push / PR:
+`firmware-build` (Debug + Release), `host-tests` (required), `host-tests-sanitized`
+(ASan + UBSan), `host-coverage` (fails under a 50 % line floor on `bl_*.c`),
+`clang-tidy` (changed lines, PR-only), and `firmware-size` (Release size-delta,
+PR-only) — these are the protections referenced above.
+
+The **silicon** tests live elsewhere: [BENCH_TESTS.md](BENCH_TESTS.md) (standing
+rejection + recovery layers) and [RELEASE_BENCH.md](RELEASE_BENCH.md) (the
+per-release cut).
 
 ---
 
@@ -142,11 +180,19 @@ the workflow handles it on the `release: published` event.
 - `Core/Src/bl_flash.c` — HAL wrapper for erase / program / CRC
   with the range-checks that enforce the bootloader's self-protection.
 - `Core/Src/bl_isotp.c` — ISO-TP reassembler, HAL-free, unit-testable.
-- `Core/Src/bl_*.c` — health, DTC, log, live-data, NVM, option-byte
-  modules. Each with a matching `.h` that's the public surface.
+- `Core/Src/bl_fault.c` — the reset-surviving `.noinit` breadcrumbs: the
+  ECC-brick recovery (#166) and the CPU-fault reboot reason (#135). **Change
+  with care** — this is the unbrick path; bench- and test-gate it under the
+  never-unreachable/unflashable invariant.
+- `Core/Src/bl_iwdg.c` — the independent watchdog, armed first in `main()`
+  (#174). Same caution applies.
+- `Core/Src/bl_*.c` — health, DTC, log, live-data, NVM, node-id, FDCAN,
+  option-byte modules. Each with a matching `.h` that's the public surface.
 - `Core/Src/main.c` — CubeMX-managed init + the main dispatch loop.
   Hand-edited code lives in `USER CODE BEGIN/END` blocks per CubeMX
   convention.
+- `tests/unit/` — the host-side Unity suite for the pure-logic modules +
+  dispatcher; see [`tests/unit/README.md`](tests/unit/README.md).
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full memory map,
 boot flow, and opcode-by-opcode design rationale.
@@ -154,12 +200,11 @@ boot flow, and opcode-by-opcode design rationale.
 ## Wire-format changes
 
 If your change touches the CAN protocol (opcodes, ID layout, ISO-TP
-framing, msg-type byte) you need matching changes in the host tool
-(`isc-fs/can-flasher`) because they share the protocol. Coordinate
-via linked PRs — the flasher side holds the spec
-(`can-flasher/REQUIREMENTS.md`), this side implements it. Bump
-`BL_PROTO_VERSION_MINOR` on backward-compatible changes,
-`BL_PROTO_VERSION_MAJOR` on breaking ones.
+framing, msg-type byte) you need matching changes in the host tool **`cf`**
+(`isc-fs/can-flasher`) because they share the protocol. Coordinate via linked
+PRs — the flasher side holds the spec (`can-flasher/REQUIREMENTS.md`), this side
+implements it. Bump `BL_PROTO_VERSION_MINOR` on backward-compatible changes,
+`BL_PROTO_VERSION_MAJOR` on breaking ones (it's at `0.2` today).
 
 ---
 
