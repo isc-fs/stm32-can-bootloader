@@ -229,22 +229,22 @@ For reference, v1.6.2 was HIL-accepted with **zero firmware defects** in
 
 ## After the session — cutting the release
 
-The actual flow (v1.6.2 shipped this way):
+The release-cut flow (full cherry-pick procedure in
+[CONTRIBUTING.md § Merging to main](CONTRIBUTING.md#merging-to-main-release-cut)):
 
-1. Cut a **release branch off `main`** (e.g. `fix/v1.6.2-complete`) and tag a
-   release candidate (`v1.6.2-rc1`) for the bench to flash.
+1. Cut a **`release/vX.Y.Z` branch off `main`**, populated by cherry-picking
+   `dev`'s commits, and tag a release candidate (`vX.Y.Z-rc1`) for the bench.
 2. Run this checklist against the **CI-built** candidate binary. Paste the §C
    table into the release-cut PR body.
-3. Open the **release-cut PR → `main`** and merge it; the release tag (`v1.6.2`)
+3. Open the **release-cut PR → `main`** and merge it; the release tag (`vX.Y.Z`)
    sits on that merge.
 4. Create the **GitHub Release** for the tag. `attach-release-artifacts.yml`
    (on `release: published`) builds the Release preset from the tag and attaches
    `CAN_BL.{elf,bin,hex}` (~3 min) — the canonical binaries to ship and flash.
-5. **Reconcile `dev` with `main`** manually. `sync-dev-after-release.yml` only
-   fast-forwards when `dev` is an ancestor of `main`; a cut from a fix-branch
-   isn't, so bring `dev` up by hand (v1.6.2 used a `chore: reconcile dev with
-   main` commit). *(That sync workflow is itself slated for removal —
-   `docs/4-retire-sync-workflow`.)*
+5. **Leave `dev` and `main` diverged** — the cut is built from cherry-picks, so
+   the two share no SHAs but their trees stay identical. That's by design; don't
+   reconcile it, and there's no automated sync (the old `sync-dev-after-release`
+   workflow was removed). See CONTRIBUTING.md § *Merging to main*.
 6. Update [BENCH_TESTS.md](BENCH_TESTS.md)'s test-run log with the same outcomes.
 
 If you find tests that should be added (a regression for a new bug, a behaviour

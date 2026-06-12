@@ -52,12 +52,17 @@ gitGraph
     checkout dev
     merge docs/N-refresh tag: "PR merged"
     checkout main
-    merge dev tag: "v1.0.0 release"
+    branch release/vN
+    commit id: "cherry-pick dev"
+    checkout main
+    merge release/vN tag: "v1.0.0 release"
 ```
 
-- **`main`** — production. Only merges from `dev` after full bench
-  validation. Don't work here. Required-status-check protected;
-  `dev → main` is the release-cut PR.
+- **`main`** — production. Carries released, bench-validated firmware
+  only. Don't work here. Required-status-check protected; releases are
+  cut onto a `release/vX.Y.Z` branch off `main` (see [Merging to
+  main](#merging-to-main-release-cut)), never by merging `dev` in
+  directly.
 - **`dev`** — integration. Don't work here either. Required-status-
   check protected; every `feat/fix/docs` branch PRs into it.
 - **Feature / fix / docs branches** are cut from `dev`, PR'd back to
@@ -132,16 +137,56 @@ closes the tracking issue automatically.
 
 ## Merging to main (release cut)
 
-Only when `dev` holds a set of validated changes and someone with bench access
-has signed off on a full flash-cycle test (see [RELEASE_BENCH.md](RELEASE_BENCH.md)).
-The PR to `main` is the release cut — tag it, create the GitHub Release (CI
-attaches the binaries), and bump `BL_PROTO_VERSION_MINOR` / `_MAJOR` in
-`bl_proto.h` if the wire surface changed so host tools see it.
+Only when `dev` holds a set of validated changes and someone with
+bench access has signed off on a full flash-cycle test
+([RELEASE_BENCH.md](RELEASE_BENCH.md) is the checklist).
 
-`sync-dev-after-release.yml` fast-forwards `dev` to `main` **only when `dev` is
-an ancestor of `main`**. A release cut from a release/fix branch isn't, so
-reconcile `dev` by hand afterward (v1.6.2 did). RELEASE_BENCH.md §
-*After the session* has the full flow.
+Releases are **cut onto a dedicated branch off `main` and built from
+cherry-picks** — `dev` is never merged into `main` directly:
+
+```bash
+# 1. Branch off the current main
+git fetch origin
+git checkout -b release/vX.Y.Z origin/main
+
+# 2. List dev's commits that aren't on main yet, then cherry-pick them
+#    (oldest first). Use `git cherry`, NOT a tag range: dev and main
+#    share no SHAs (see below), so `vPREV..dev` would match the whole
+#    branch. `+` marks a commit that still needs a cherry-pick.
+git cherry -v origin/main origin/dev
+git cherry-pick <sha1> <sha2> ...
+
+# 3. Bump the version in bl_proto.h so host tools see the change
+#    (BL_PROTO_VERSION_MINOR for compatible changes, MAJOR for breaking)
+
+# 4. Open the release-cut PR; merge once CI + the bench checklist pass
+gh pr create --base main --head release/vX.Y.Z
+
+# 5. Tag the merge commit and publish the GitHub Release — the
+#    attach-release-artifacts workflow builds the Release preset from the
+#    tag and attaches CAN_BL.{elf,bin,hex}, the canonical binaries to ship.
+git tag vX.Y.Z <merge-commit-sha>
+git push origin vX.Y.Z
+```
+
+### `dev` and `main` diverge on purpose
+
+Because each release is built from cherry-picks, every released commit
+exists twice: the original on `dev` and a re-applied copy on `main`
+with a different SHA. The two branches therefore share no recent
+history — both `git log origin/main..origin/dev` and `git log
+origin/dev..origin/main` are non-empty and grow with every release —
+while their **trees stay identical** (`git diff origin/dev origin/main`
+is empty). This SHA divergence is expected and harmless; **don't try to
+reconcile it.**
+
+There is deliberately **no** automated `dev`↔`main` sync. A former
+`sync-dev-after-release.yml` workflow tried to fast-forward `dev` to
+`main` on every release — it could never succeed (branch protection
+requires a PR into `dev`) and, even if forced through, would have
+pulled `main`'s duplicate cherry-pick commits back into `dev` and
+mangled its history. It was removed. If you're tempted to bring it
+back, re-read this section.
 
 ---
 
