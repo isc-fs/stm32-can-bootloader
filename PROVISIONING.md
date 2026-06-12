@@ -19,15 +19,21 @@ PR it rather than keeping the correction in your head.
 
 ## 📢 In a hurry? Jump to §5 (Recovery)
 
-Most people open this file during an incident. §5 is the single
-most-read section; glance there first.
+Most people open this file during an incident. §5 is the single most-read
+section. The common ones:
+
+- [Board lost power / dropped CAN mid-flash](#board-lost-power-or-dropped-can-mid-flash) — auto-recovered in v1.6.2; re-run `cf flash`
+- [Board answers only at the default node-id](#board-answers-only-at-the-default-node-id-after-a-power-event) — degraded-NVM recovery (G-A2)
+- [CubeProgrammer verify fails at `0x08000004`](#cubeprogrammer-fails-verify-at-0x08000004-after-an-swd-bl-flash) — WRP is on; clear it per §2.1
+- [WRP is stuck on and I need to update the BL](#wrp-is-stuck-on-and-i-need-to-update-the-bl)
 
 ---
 
 ## 0. Prerequisites
 
 - **Hardware**: STM32H733 target + ST-Link V3 (or CMSIS-DAP compatible
-  probe) on SWD + a CAN adapter (CANable or equivalent) on FDCAN2.
+  probe) on SWD + a CAN adapter (CANable or equivalent) on any of FDCAN1/2/3
+  at 500 kbps (the BL serves all three; FDCAN2 is the usual bench tap).
 - **Host tools**:
   - `STM32CubeProgrammer` (friendlier OB UI) or `openocd` +
     `arm-none-eabi-gdb` (scripts better) for SWD.
@@ -40,15 +46,32 @@ most-read section; glance there first.
     ```sh
     cmake --preset Release && cmake --build build/Release
     ```
-    Output lands at `build/Release/CAN_BL.bin`.
+    Output lands at `build/Release/CAN_BL.bin`. For provisioning, prefer the
+    **v1.6.2 `CAN_BL.bin` from the release page** (CI-built; verify it against
+    the release `SHA256SUMS`).
 
 ---
 
 ## 1. Fresh-board provisioning (first time)
 
-A brand-new H733 ships with option bytes at factory defaults: RDP
-Level 0, no WRP, BOR off. Goal: get the BL onto sector 0 and latch
-WRP so a misbehaving app can never overwrite it over CAN.
+A brand-new H733 ships with option bytes at factory defaults: RDP Level 0,
+no WRP, BOR off. The goal: get the bootloader onto sector 0, give the board
+its identity, confirm the whole unit is reachable and correct, and **only
+then** latch WRP — because that last step is one-way over CAN.
+
+> **The WRP contract.** `OB_APPLY_WRP` write-protects **sector 0 (the
+> bootloader) only** — sectors 1–6 (app) and 7 (NVM) stay erasable and
+> reflashable over CAN, so field app updates are unaffected. WRP **cannot be
+> cleared over CAN** — only by an SWD full chip-erase (§2.1), which wipes the
+> board. The BL **refuses any mask other than sector 0** (G-B5), so you can't
+> WRP-lock an app/NVM sector by mistake. Because it is irreversible over CAN,
+> latch it **last** (Step 1.6), after the pre-WRP gate — never on a dev/bench
+> board you still want to iterate the bootloader on.
+
+> **Bus rate.** Everything runs at **500 kbps, 68.75 % sample point** on all
+> three FDCAN buses, matched bit-for-bit to the application — both must match or
+> the bus is deaf. (v1.6.0 briefly ran 1 Mbps; v1.6.2 reverted it, #171. Do not
+> bench a 1 Mbps image.)
 
 ### Step 1.1 — Flash the bootloader via SWD
 
@@ -61,32 +84,86 @@ openocd -f interface/stlink.cfg -f target/stm32h7x.cfg \
         -c "program CAN_BL.bin 0x08000000 verify reset exit"
 ```
 
-Expected: success, MCU resets, LEDs go to "idle BL" pattern (see
-[ARCHITECTURE.md § LED semantics](ARCHITECTURE.md)).
+Use a v1.6.2 `CAN_BL.bin` and verify its checksum against the release
+`SHA256SUMS`. Flash the bootloader over **SWD only** — never over CAN, which
+can corrupt sector 0. Expected: success, MCU resets, LEDs go to the "idle BL"
+pattern (see [ARCHITECTURE.md § LED semantics](ARCHITECTURE.md)).
 
 ### Step 1.2 — Sanity-check CAN comms
 
-Wire the CAN adapter to FDCAN2, then:
+Wire the CAN adapter to any of FDCAN1/2/3 — the BL serves all three at once and
+replies on the bus a request arrived on (FDCAN2 is the usual bench tap) — then:
 
 ```sh
 cf --interface slcan --channel /dev/cu.usbmodem1201 \
    --bitrate 500000 discover
 ```
 
-Expected output — **one row, WRP column reads `✗`** (we haven't
+Expected output — **one row, Proto `0.2`, WRP column reads `✗`** (we haven't
 applied it yet):
 
 ```
 Node  Proto  FW Version        Git Hash  Product  WRP  Reset Cause
 ────  ─────  ────────────────  ────────  ───────  ───  ───────────
-0x01  0.1    no app installed  —         —        ✗    PIN
+0x01  0.2    no app installed  —         —        ✗    PIN
 ```
 
 If this fails, stop — every later step depends on working CAN.
-Check adapter wiring, 120 Ω termination, and that `cf adapters`
-sees the dongle.
+Check adapter wiring, 120 Ω termination, that the bus is at 500 kbps,
+and that `cf adapters` sees the dongle.
 
-### Step 1.3 — Latch WRP on sector 0
+### Step 1.3 — Assign the node ID
+
+Give the board its identity by role — `ecu` → `0x1`, `ams` → `0x2`, `udv` →
+`0x3` — which writes the NVM node-id override and resets the board:
+
+```sh
+cf --interface slcan --channel /dev/cu.usbmodem1201 \
+   --bitrate 500000 --node-id 0xF provision ecu      # ecu | ams | udv
+```
+
+A freshly-flashed board answers at its compile-time default (broadcast `0xF`
+reaches a single bench board; use the current ID if it already has one).
+Re-confirm at the new ID:
+
+```sh
+cf --bitrate 500000 --node-id 0x1 discover
+```
+
+(For the manual NVM-write form and the rationale, see
+[§3](#3-changing-the-node-id-via-nvm-v130).)
+
+### Step 1.4 — Flash + verify the application
+
+```sh
+cf --bitrate 500000 --node-id 0x1 flash app.bin
+```
+
+Confirm it verifies, boots, and its CAN traffic appears:
+
+```sh
+cf --bitrate 500000 --node-id 0x1 diagnose health
+```
+
+(WRP protects only sector 0, so the app can also be flashed after WRP — but
+loading it now is how you confirm the whole unit is good before the
+irreversible step.)
+
+### Step 1.5 — ⛔ Pre-WRP gate (point of no return)
+
+`apply-wrp` is **irreversible over CAN** — the only undo is an SWD full
+chip-erase that wipes the board. Do **not** proceed unless **all** of these
+hold:
+
+- [ ] Bootloader reports the intended version (**v1.6.2**) + git hash in
+      `cf discover` / `cf diagnose health`.
+- [ ] The **node ID / role is correct** for this unit.
+- [ ] The **application verifies and boots** on the bench.
+- [ ] The unit is **reachable over CAN** at 500 kbps.
+- [ ] `discover` shows **WRP `✗`** (this is the first, intended apply).
+- [ ] This is a **final-provisioned** unit — not a dev/bench board.
+
+### Step 1.6 — Latch WRP on sector 0
 
 ```sh
 cf --interface slcan --channel /dev/cu.usbmodem1201 \
@@ -94,11 +171,13 @@ cf --interface slcan --channel /dev/cu.usbmodem1201 \
    config ob apply-wrp --sector-mask 0x01
 ```
 
-Default `--sector-mask 0x01` protects sector 0 only (the bootloader).
-The command auto-supplies the `BL_OB_APPLY_TOKEN` safety token, ACKs
-before the OB launch, then the MCU resets.
+Default `--sector-mask 0x01` protects sector 0 only (the bootloader); the BL
+**refuses any other mask** (G-B5), so a fat-fingered `--sector-mask 0x03`
+cannot lock an app/NVM sector — it NACKs instead of committing. The command
+auto-supplies the `BL_OB_APPLY_TOKEN` safety token, ACKs before the OB launch,
+then the MCU resets. (Add `--yes` to skip the interactive confirmation.)
 
-### Step 1.4 — Verify + checkpoint
+### Step 1.7 — Verify + checkpoint
 
 ```sh
 cf --interface slcan --channel /dev/cu.usbmodem1201 \
@@ -106,29 +185,21 @@ cf --interface slcan --channel /dev/cu.usbmodem1201 \
 ```
 
 **Provisioning done when**:
-- `WRP` column reads `✓` — sector 0 is now write-protected at the
-  flash-controller level.
-- You've recorded the board's serial number in whatever provisioning
-  log the team uses (spreadsheet, sticker, nothing — but pick one
-  and stick to it).
+- `WRP` column reads `✓` — sector 0 is write-protected at the flash-controller
+  level, and the boot-time "sector 0 not write-protected" warning is gone.
+- The application still boots (WRP didn't touch sectors 1–6).
+- You've recorded the board's serial in the team provisioning log (spreadsheet,
+  sticker, whatever — but pick one and stick to it).
 
-The board is now **shipping-ready from the bootloader's perspective**.
-Application firmware can be loaded via `cf flash` afterwards; it
-cannot overwrite the bootloader even with a bad linker script,
-because both the BL's range-check and the flash controller's WRP
-will refuse.
+The board is now **shipping-ready**. Application firmware can still be reflashed
+over CAN with `cf flash`; it can never overwrite the bootloader, because both
+the BL's range-check and the flash-controller WRP refuse.
 
-### Optional Step 1.5 — Enable RDP Level 1 (production units only)
+### Optional Step 1.8 — Enable RDP Level 1 (production units only)
 
-For units that leave the workshop, set RDP Level 1 via
-STM32CubeProgrammer to block firmware readout via SWD:
-
-```sh
-STM32_Programmer_CLI -c port=SWD -ob RDP=0xBB
-```
-
-(`0xBB` is Level 1 on H7; `0xAA` is Level 0. **Never write `0xCC`
-— that's Level 2, which is irreversible.** See §3.)
+For units that leave the workshop, set RDP Level 1 via STM32CubeProgrammer to
+block firmware readout over SWD. RDP is set out of band — see [§4](#4-rdp-policy)
+for the levels, the procedure, and the **never write Level 2** rule.
 
 ---
 
@@ -186,11 +257,12 @@ Same as Step 1.1.
 
 ### Step 2.3 — Re-apply WRP
 
-Same as Step 1.3.
+Same as Step 1.6 — `cf … config ob apply-wrp --sector-mask 0x01` (sector 0
+only; the BL refuses any other mask, G-B5).
 
 ### Step 2.4 — Verify
 
-Same as Step 1.4.
+Same as Step 1.7.
 
 ---
 
@@ -333,6 +405,30 @@ watching.
 
 ## 5. Recovery — when things go wrong
 
+### "Board lost power or dropped CAN mid-flash"
+
+**This is recovered automatically (v1.6.2, #166).** An interrupted flash write
+leaves a partially-programmed word that would ECC-fault the app-validation read;
+the BL guards that read, drops a reset-surviving breadcrumb, and the next boot
+comes up reachable and reflashable instead of reboot-looping.
+
+**Fix**: power-cycle if it isn't already up, then re-run `cf flash` — no SWD.
+Bench-validated 10/10 power-cuts recovered first-try (#178). If it still won't
+answer at its node ID, check the degraded-NVM case below; only if it's truly
+dark fall back to the SWD recovery in [§2](#2-updating-the-bootloader-itself).
+
+### "Board answers only at the default node-id after a power event"
+
+**Likely cause** (G-A2): a corrupt sector-7 word ECC-faulted the pre-CAN NVM
+scan, so the BL came up in degraded-NVM recovery — reads return not-found,
+writes are refused, and the node ID fell back to the compile-time default to
+stay reachable, rather than reboot-looping.
+
+**Fix**: talk to it at the **default** ID, run `cf … config nvm format`
+(token-gated — wipes sector 7), then re-provision the node ID
+([§1.3](#step-13--assign-the-node-id) / [§3](#3-changing-the-node-id-via-nvm-v130)).
+The unit was never bricked; it stayed reachable by design.
+
 ### "Board responds to `cf discover` but refuses CONNECT"
 
 **Likely cause**: a prior `cf` run left the BL's session latch set
@@ -348,8 +444,10 @@ nothing reaches the dispatcher.
 
 **Fix**:
 1. Hit NRST on the board.
-2. Within the 2 s auto-jump window, spam `cf discover` to cancel
-   auto-jump and keep the BL on.
+2. Within the 2 s auto-jump window, send a properly-addressed BL frame —
+   `cf discover` works — to cancel the auto-jump and keep the BL on. (Since
+   #154 only a frame genuinely addressed to the BL cancels it; random bus
+   traffic no longer will, but a `discover` is addressed, so it does.)
 3. Once BL responds, re-flash or debug the application.
 
 ### "CubeProgrammer fails verify at `0x08000004` after an SWD BL flash"
