@@ -44,11 +44,17 @@ extern uint8_t g_fake_flash[1024U * 1024U];
 #define BL_APP_LAST_SECTOR       6U
 #define BL_APP_SIZE              (BL_APP_END - BL_APP_BASE + 1U)
 
-/* ---- NVM + metadata region — sector 7 ---- */
+/* ---- NVM + provisioning-seed + metadata region — sector 7 ----
+ * Mirrors the production bl_memmap.h: KV | seed | metadata. */
 #define BL_NVM_SECTOR            7U
 #define BL_NVM_BASE              (BL_FLASH_BASE + (uintptr_t)0x000E0000U)
-#define BL_NVM_SIZE              (BL_FLASH_SECTOR_SIZE - BL_APP_METADATA_SIZE)
+#define BL_NVM_SIZE              (BL_FLASH_SECTOR_SIZE - BL_APP_METADATA_SIZE - BL_PROVISION_SEED_SIZE)
 #define BL_NVM_END               (BL_NVM_BASE + BL_NVM_SIZE - 1U)
+
+/* #183 provisioning seed — one FLASHWORD below the metadata word. */
+#define BL_PROVISION_SEED_ADDR   (BL_FLASH_BASE + (uintptr_t)0x000FFFC0U)
+#define BL_PROVISION_SEED_SIZE   32U
+#define BL_PROVISION_SEED_MAGIC  0xB0070D1DU
 
 #define BL_APP_METADATA_ADDR     (BL_FLASH_BASE + (uintptr_t)0x000FFFE0U)
 #define BL_APP_METADATA_SIZE     32U

@@ -164,6 +164,18 @@ void test_app_stack_flash_address_rejected(void);
 void test_app_stack_zero_rejected(void);
 void test_app_stack_top_of_address_space_rejected(void);
 
+/* ---- test_bl_provision.c ---- */
+void test_provision_valid_seed_writes_node_id(void);
+void test_provision_seeded_id_resolves_via_node_id(void);
+void test_provision_erased_flash_is_none(void);
+void test_provision_bad_magic_rejected(void);
+void test_provision_bad_check_byte_rejected(void);
+void test_provision_node_id_zero_rejected(void);
+void test_provision_node_id_broadcast_rejected(void);
+void test_provision_bad_crc_rejected(void);
+void test_provision_skipped_when_nvm_already_has_node_id(void);
+void test_provision_is_one_shot_idempotent(void);
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -304,6 +316,18 @@ int main(void)
     RUN_TEST(test_app_stack_flash_address_rejected);
     RUN_TEST(test_app_stack_zero_rejected);
     RUN_TEST(test_app_stack_top_of_address_space_rejected);
+
+    /* test_bl_provision.c */
+    RUN_TEST(test_provision_valid_seed_writes_node_id);
+    RUN_TEST(test_provision_seeded_id_resolves_via_node_id);
+    RUN_TEST(test_provision_erased_flash_is_none);
+    RUN_TEST(test_provision_bad_magic_rejected);
+    RUN_TEST(test_provision_bad_check_byte_rejected);
+    RUN_TEST(test_provision_node_id_zero_rejected);
+    RUN_TEST(test_provision_node_id_broadcast_rejected);
+    RUN_TEST(test_provision_bad_crc_rejected);
+    RUN_TEST(test_provision_skipped_when_nvm_already_has_node_id);
+    RUN_TEST(test_provision_is_one_shot_idempotent);
 
     return UNITY_END();
 }

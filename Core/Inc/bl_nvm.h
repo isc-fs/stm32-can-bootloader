@@ -6,9 +6,13 @@
  *
  * Storage layout:
  *
- *     0x080E0000 .. 0x080FFFDF     (BL_NVM_SIZE bytes = 128 KB − 32 B)
+ *     0x080E0000 .. 0x080FFFBF     (BL_NVM_SIZE bytes = 128 KB − 64 B)
  *         bl_nvm_entry_t[] — 32-byte slots, packed back-to-back.
  *         Writable one slot at a time (one FLASHWORD per slot).
+ *
+ *     0x080FFFC0 .. 0x080FFFDF     (BL_PROVISION_SEED_SIZE = 32 B)
+ *         #183 provisioning-seed FLASHWORD (bl_provision.c). Outside the
+ *         KV range; wiped by a sector-7 erase like everything else here.
  *
  *     0x080FFFE0 .. 0x080FFFFF     (BL_APP_METADATA_SIZE = 32 B)
  *         App metadata FLASHWORD. Owned by bl_flash_write_metadata,

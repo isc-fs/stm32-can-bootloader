@@ -44,11 +44,27 @@
 #define BL_APP_LAST_SECTOR       6U
 #define BL_APP_SIZE              (BL_APP_END - BL_APP_BASE + 1U)  /* 0x000C0000 = 768 KB */
 
-/* ---- NVM + metadata region — sector 7 ---- */
+/* ---- Sector 7: NVM KV | provisioning seed | app metadata ----
+ *
+ * Top-down within sector 7:
+ *   app metadata     0x080FFFE0 .. 0x080FFFFF   32 B  installed-image record
+ *   provision seed   0x080FFFC0 .. 0x080FFFDF   32 B  #183 one-shot SWD node-id seed
+ *   NVM KV store     0x080E0000 .. 0x080FFFBF   rest  log-structured key/value
+ *
+ * BL_NVM_SIZE is reduced by BOTH the metadata and the seed FLASHWORDs so the
+ * KV log can never pack into either. */
 #define BL_NVM_SECTOR            7U
 #define BL_NVM_BASE              0x080E0000U
-#define BL_NVM_SIZE              (BL_FLASH_SECTOR_SIZE - BL_APP_METADATA_SIZE)  /* 128 KB - 32 B */
-#define BL_NVM_END               (BL_NVM_BASE + BL_NVM_SIZE - 1U)               /* 0x080FFFDF */
+#define BL_NVM_SIZE              (BL_FLASH_SECTOR_SIZE - BL_APP_METADATA_SIZE - BL_PROVISION_SEED_SIZE)  /* 128 KB - 64 B */
+#define BL_NVM_END               (BL_NVM_BASE + BL_NVM_SIZE - 1U)               /* 0x080FFFBF */
+
+/* #183 — provisioning seed FLASHWORD, one 256-bit word just below the
+ * metadata. An SWD tool programs it during the bootloader burn; the BL
+ * consumes it into a proper NVM node-id entry on first boot (bl_provision.c).
+ * Reserving it here keeps it out of the KV packing range above. */
+#define BL_PROVISION_SEED_ADDR   0x080FFFC0U
+#define BL_PROVISION_SEED_SIZE   32U
+#define BL_PROVISION_SEED_MAGIC  0xB0070D1DU   /* "boot node-id" — any non-erased value */
 
 /* Metadata FLASHWORD lives in the last 32 bytes of sector 7 (the
  * address is unchanged from earlier phases; only its neighbourhood
@@ -58,6 +74,15 @@
 #define BL_APP_METADATA_ADDR     0x080FFFE0U
 #define BL_APP_METADATA_SIZE     32U
 #define BL_APP_META_MAGIC        0xB007C0DEU
+
+/* Sector 7 is exactly KV | seed | metadata, contiguous + non-overlapping. */
+_Static_assert(BL_PROVISION_SEED_ADDR == BL_NVM_BASE + BL_NVM_SIZE,
+               "provisioning seed must sit immediately above the NVM KV region");
+_Static_assert(BL_APP_METADATA_ADDR == BL_PROVISION_SEED_ADDR + BL_PROVISION_SEED_SIZE,
+               "app metadata must sit immediately above the provisioning seed");
+_Static_assert(BL_APP_METADATA_ADDR + BL_APP_METADATA_SIZE
+                   == BL_FLASH_BASE + ((BL_NVM_SECTOR + 1U) * BL_FLASH_SECTOR_SIZE),
+               "KV + seed + metadata must exactly fill sector 7");
 
 /* ---- Boot-request handshake (RTC->BKP0R) ---- */
 #define BL_BOOT_REQ_MAGIC        0xB00710ADU   /* one-shot: stay in bootloader */
