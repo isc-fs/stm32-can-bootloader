@@ -38,6 +38,7 @@
 #include "bl_log.h"
 #include "bl_node_id.h"
 #include "bl_nvm.h"
+#include "bl_provision.h"
 #include "bl_obyte.h"
 #include "bl_proto.h"
 
@@ -567,6 +568,12 @@ static void Bootloader_Init(void) {
 		/* Scan the NVM sector for the append point + highest seq. Safe even on
 		 * a fully-erased sector (g_write_pos lands at 0). */
 		bl_nvm_init();
+
+		/* #183: consume a one-shot SWD provisioning seed (present + valid +
+		 * no NVM node-id yet) into a proper NVM node-id entry. Inside the guard
+		 * so a corrupt seed word ECC-faults into recovery, not a brick; before
+		 * the node-id resolve below so a freshly-seeded id takes effect now. */
+		(void)bl_provision_consume_seed();
 
 		/* Resolve the effective node ID now that NVM is queryable; must run
 		 * BEFORE the FDCAN filter config (the filter is built from the ID). */

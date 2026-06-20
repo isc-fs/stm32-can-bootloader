@@ -12,6 +12,25 @@ the PR titles between consecutive tags.
 
 ---
 
+## Unreleased
+
+### Added
+
+- **One-step SWD provisioning seed** (#183). An SWD tool can program a single
+  reserved FLASHWORD in sector 7 (`BL_PROVISION_SEED_ADDR = 0x080FFFC0`) during
+  the bootloader burn, carrying the board's node ID; the bootloader validates it
+  (magic + complement check + CRC32 + range) and, if no node-id is stored in NVM
+  yet, translates it into a proper `BL_NVM_KEY_NODE_ID` entry on first boot — so
+  a bare board is commissioned in the same SWD step, with no CAN round-trip. The
+  seed read runs inside the existing ECC guard, so a half-programmed seed
+  recovers like any sector-7 fault rather than bricking; NVM always wins
+  (one-shot — a later `cf provision` over CAN overrides it). `BL_NVM_SIZE`
+  shrinks by one FLASHWORD (now `128 KB − 64 B`). New module
+  `bl_provision.{h,c}`; host-tool support is tracked in `can-flasher`. Wire
+  protocol unchanged at `0.2`.
+
+---
+
 ## v1.6.2 (2026-06-11) — 500 kbps + ECC-brick recovery + reliability hardening
 
 **Wire protocol**: unchanged at `0.2`. **CAN bitrate is 500 kbps on all FDCAN
