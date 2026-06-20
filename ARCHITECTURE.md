@@ -128,7 +128,8 @@ All addresses are in the STM32 flash alias `0x0800_0000`.
 |:------:|--------------|--------------|:------:|------------------------------------------|
 |   0    | `0x08000000` | `0x0801FFFF` | 128 KB | **Bootloader** — WRP-protected           |
 |  1–6   | `0x08020000` | `0x080DFFFF` | 768 KB | **Application**                          |
-|   7    | `0x080E0000` | `0x080FFFDF` | ≈128 KB – 32 B | **NVM** — log-structured KV store |
+|   7    | `0x080E0000` | `0x080FFFBF` | 128 KB – 64 B | **NVM** — log-structured KV store |
+|        | `0x080FFFC0` | `0x080FFFDF` | 32 B   | Provisioning seed (#183 — SWD node-id)   |
 |        | `0x080FFFE0` | `0x080FFFFF` | 32 B   | Application metadata FLASHWORD           |
 
 DTC storage and the log ring live in Backup SRAM (`0x38800000`),
@@ -723,9 +724,10 @@ missing app → `NACK(BL_NACK_NO_VALID_APP)`.
 #### NVM store
 
 **Log-structured key-value store in flash sector 7**, running from
-`0x080E0000` up to (but not including) the app metadata FLASHWORD
-at `0x080FFFE0`. That leaves `BL_NVM_SIZE = 128 KB − 32 B`, enough
-for ≈4095 entries before compaction. Both opcodes are **session-
+`0x080E0000` up to (but not including) the provisioning seed at
+`0x080FFFC0` and the app metadata FLASHWORD at `0x080FFFE0`. That
+leaves `BL_NVM_SIZE = 128 KB − 64 B`, enough for ≈4094 entries before
+compaction. Both opcodes are **session-
 gated**: NVM is bootloader administration, not something random
 hosts should poke.
 

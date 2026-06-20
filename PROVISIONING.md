@@ -133,6 +133,15 @@ cf --bitrate 500000 --node-id 0x1 discover
 (For the manual NVM-write form and the rationale, see
 [§3](#3-changing-the-node-id-via-nvm-v130).)
 
+> **One-step alternative (#183 — SWD seed).** Instead of this separate CAN step,
+> an SWD tool can seed the node-id *during* the bootloader burn (Step 1.1) by
+> programming the reserved seed FLASHWORD at `0x080FFFC0` (magic `0xB0070D1D` +
+> node-id + complement + CRC32). On first boot the bootloader validates it and
+> writes it into NVM, so the board comes up **already provisioned** — no CAN
+> round-trip. A later `cf provision` over CAN still overrides it (NVM wins).
+> Needs host-tool support (`can-flasher` SWD-seed flag); if you seeded this way,
+> skip the `cf provision` call above and continue at Step 1.4.
+
 ### Step 1.4 — Flash + verify the application
 
 ```sh

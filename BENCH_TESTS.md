@@ -233,6 +233,28 @@ IFS08_HIL#81.
 **Proves**: Layer 3 — a transient bus-off doesn't leave a bus permanently deaf
 (NG-9 un-wedges the HAL on a Stop/Start timeout).
 
+## Test 11 — One-step SWD seed provisioning (#183)
+
+**Setup**: on a bare board, in the same SWD session, flash the bootloader AND
+program a valid provisioning seed FLASHWORD at `0x080FFFC0` (magic `0xB0070D1D`,
+node-id, its complement, CRC32) — e.g. `cf swd-flash CAN_BL.bin --seed-node-id
+0x2` once host support lands. Do **not** provision over CAN.
+
+**Command** (after a power-cycle, no `cf provision`):
+```sh
+cf --bitrate 500000 discover
+```
+
+**Expected**: the board answers at the **seeded** node-id (`0x2`), not the
+compile-time default — the bootloader consumed the seed into NVM on first boot.
+A second power-cycle still shows `0x2` (one-shot: NVM holds it now; the seed is
+ignored thereafter). A later `cf provision` over CAN overrides it.
+
+**Proves**: Layer 3 — node-id commissioning with no CAN round-trip. Pair with a
+**negative** check: a deliberately truncated/half-written seed must come up
+reachable at the **default** node-id (the seed read is ECC-guarded), never a
+brick.
+
 ---
 
 ## Test-run log
@@ -251,3 +273,4 @@ Record outcomes here after each bench run, one row per test:
 | 8 — apply-wrp mask reject (G-B5) |  |  |  |  |  |
 | 9 — multi-bus reply-on-origin |  |  |  |  |  |
 | 10 — bus-off recovery (NG-9) |  |  |  |  |  |
+| 11 — SWD seed provisioning (#183) |  |  |  |  |  |
