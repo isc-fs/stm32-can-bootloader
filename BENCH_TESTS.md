@@ -237,8 +237,10 @@ IFS08_HIL#81.
 
 **Setup**: on a bare board, in the same SWD session, flash the bootloader AND
 program a valid provisioning seed FLASHWORD at `0x080FFFC0` (magic `0xB0070D1D`,
-node-id, its complement, CRC32) — e.g. `cf swd-flash CAN_BL.bin --seed-node-id
-0x2` once host support lands. Do **not** provision over CAN.
+node-id, its complement, CRC32) — i.e. `cf swd-flash CAN_BL.elf --provision ams`
+(isc-fs/MingoCAN#336; needs the **`.elf`**, which the host checks for
+`bl_provision_consume_seed` before touching the chip). Do **not** provision over
+CAN.
 
 **Command** (after a power-cycle, no `cf provision`):
 ```sh

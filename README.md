@@ -68,7 +68,7 @@ the memory map, boot flow, and the brick-safety design.
 | The host-side unit-test suite | [`tests/unit/README.md`](tests/unit/README.md) |
 | Phase-by-phase delivery history (auto-generated) | [ROADMAP.md](ROADMAP.md) |
 
-**Current release: v1.6.2** — see [CHANGELOG.md](CHANGELOG.md). Classic CAN,
+**Current release: v1.7.0** — see [CHANGELOG.md](CHANGELOG.md). Classic CAN,
 500 kbps @ 68.75 % on FDCAN1/2/3, wire protocol 0.2.
 
 ---

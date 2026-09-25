@@ -1,8 +1,8 @@
-# Release bench checklist — v1.6.2
+# Release bench checklist — v1.7.0
 
 Mechanical bench session that validates a release cut on real silicon. Runnable
 in ~45 minutes by an operator with a HIL bench, an ST-Link, and a CAN adapter on
-any FDCAN tap. **Set the version once** — this cut is **`v1.6.2`** — then swap
+any FDCAN tap. **Set the version once** — this cut is **`v1.7.0`** — then swap
 that token plus the §B behavioural block each release; everything else
 (prerequisites, §A, the gate, the after-session flow) is the stable skeleton.
 
@@ -17,7 +17,7 @@ that token plus the §B behavioural block each release; everything else
 
 - **Board** provisioned per [PROVISIONING.md §1](PROVISIONING.md#1-fresh-board-provisioning-first-time)
   with the **candidate bootloader** — the **CI-built `CAN_BL.bin`** attached to
-  the `vX.Y.Z` GitHub Release, or built from the RC tag (`v1.6.2-rc1`) / the
+  the `vX.Y.Z` GitHub Release, or built from the RC tag (`v1.7.0-rc1`) / the
   release-branch HEAD. **Not** a local `dev` build: flash exactly what you will
   ship.
 - **Bus**: 500 kbps, 68.75 % sample point. The BL serves **FDCAN1/2/3** at once
@@ -77,11 +77,16 @@ IFS08_HIL#81 trailing items noted in BENCH_TESTS.md.
 
 ---
 
-## B. v1.6.2-specific behavioural checks
+## B. v1.7.0-specific behavioural checks
 
 > **Per-release block.** Replace this whole section each cut with one test per PR
-> that changed observable behaviour. For v1.6.2 the headline is the ECC-brick
-> recovery and the 500 kbps revert.
+> that changed observable behaviour. For v1.7.0 that is one feature: the one-step
+> SWD provisioning seed (#183 / #184), plus its host side (isc-fs/MingoCAN#336).
+> Everything else is unchanged from v1.6.2, so §A is the regression floor.
+
+**Extra prerequisite**: a `can-flasher` build with `swd-flash --provision`
+(MingoCAN#336 or a release that contains it, `--features swd`), and the
+candidate's **`CAN_BL.elf`**, not the `.bin`.
 
 ### B.1 — Candidate identity (the board runs *this* release)
 
@@ -94,99 +99,79 @@ cfb diagnose health
 ```
 
 **Expected**: `discover` shows the board at **Proto 0.2**, **500 kbps**, with the
-intended FW version + git hash. (If the adapter is at 1 Mbps the board won't
-answer at all — a useful 500 k confirmation in itself.)
+intended FW version + git hash.
 
 **Pass**: version + git hash match the RC; the bus is 500 k.
 
 ---
 
-### B.2 — Power-cut mid-write recovers (#166, headline)
+### B.2 — One-step SWD provisioning (#183, headline)
 
-**Why**: the brick this release exists to fix — an interrupted flash write left a
-partial word that ECC-faulted the validation read and bricked the BL past CAN.
+**Why**: the feature this release exists for — a bare board commissioned by the
+debug probe alone, with no CAN round-trip.
 
-**Command**: run [BENCH_TESTS.md Test 6](BENCH_TESTS.md#test-6--power-cut--dropped-can-mid-write-ecc-brick-recovery)
-— start a large `cf flash`, cut power mid-`WRITE_CHUNK`, power up, confirm the BL
-answers and a fresh `cf flash` succeeds. **Destructive** — PSU-cycle (not a
-relay tap) to recover a wedged carrier.
-
-**Repeat 5×.**
-
-**Pass**: 5/5 reachable + reflashable, first-try, no SWD. (#178 saw 10/10.)
-
----
-
-### B.3 — G-A2 corrupt-NVM stays reachable
-
-**Why**: a corrupt sector-7 word must not reboot-loop the BL.
-
-**Command**: [BENCH_TESTS.md Test 7](BENCH_TESTS.md#test-7--corrupt-nvm--reachable-at-default-node-id-g-a2).
-
-**Pass**: BL answers at the **default** node-id after the corruption; recovers
-via `cf … config nvm format` + re-provision.
-
----
-
-### B.4 — G-B5 apply-wrp mask rejection
-
-**Why**: a non-sector-0 WRP mask must be refused — it could self-brick an app or
-NVM sector.
-
-**Command**: [BENCH_TESTS.md Test 8](BENCH_TESTS.md#test-8--apply-wrp-rejects-a-non-sector-0-mask-g-b5).
-
-**Pass**: `--sector-mask 0x02` / `0x03` NACKed with no option-byte change;
-`0x01` still works.
-
----
-
-### B.5 — Multi-bus reply-on-origin (#120)
-
-**Why**: one image must reach every ECU regardless of which FDCAN it taps.
-
-**Command**: [BENCH_TESTS.md Test 9](BENCH_TESTS.md#test-9--multi-bus-reply-on-origin-120) —
-move the adapter across FDCAN1/2/3.
-
-**Pass**: `discover` + a NACK reply come back on the same bus, on each tap.
-
----
-
-### B.6 — Charger `0x101` doesn't cancel the auto-jump (#154)
-
-**Why**: the 5-bit filter aliased the charger's `0x101` onto the node-1 unicast
-id, and any received frame used to cancel the boot-timer auto-jump *before* the
-parser rejected it — so a BL parked in listen mode forever while the charger was
-energised. Now only a frame that parses as genuinely addressed-to-us cancels it.
-
-**Command**: start the bus-load generator emitting `0x101` at ≥ 1 Hz (stand-in
-for the charger), then NRST a board that has a **valid app** installed and watch
-the auto-jump.
-
-**Expected**: with `0x101` traffic present, the board **still auto-jumps** within
-the 2 s window (the foreign frame no longer holds it). A genuinely-addressed
-`cfb discover` *does* still cancel it.
-
-**Pass**: auto-jump fires under `0x101` load; `discover` still cancels.
-
----
-
-### B.7 — Stay-in-BL survives a power cycle (#145)
-
-**Why**: an operator "hold in the BL" used to live only in an RTC backup
-register, which a power-off wipes. It's now persisted in NVM.
-
-**Command**:
+**Command**: [BENCH_TESTS.md Test 11](BENCH_TESTS.md#test-11--one-step-swd-seed-provisioning-183):
 ```sh
-cfb send-raw 0x01 01 00 60 02   # CMD_RESET mode=2 (stay in BL)
-# power-cycle the board (true power-off), then:
-cfb discover
+cf swd-flash CAN_BL.elf --provision ams
+# power-cycle, then (no cf provision):
+cf --bitrate 500000 discover
 ```
 
-**Expected**: after a **true power cycle** the board comes up in the BL (does not
-auto-jump a valid app). The hold clears on an explicit boot or a successful
-`FLASH_VERIFY`.
+**Expected**: the tool reports the seed programmed + verified; the board answers
+at **`0x2`**, not the compile-time default. A second power-cycle still shows `0x2`.
 
-**Pass**: held across the power cycle (#178 saw 3/3 across POR).
+**Pass**: seeded id adopted, and it survives a power cycle.
+
+---
+
+### B.3 — Bad seed is ignored, never a brick
+
+**Why**: a corrupt seed must leave the board reachable at the default id.
+
+**Command**: on a chip-erased board, burn the candidate over SWD, then program a
+seed FLASHWORD with a **wrong CRC** at `0x080FFFC0` (openocd `flash write_image
+<32-byte file> 0x080FFFC0 bin`, no erase). Reset, then `cf --node-id 0x1 discover`.
+
+**Expected**: answers at the **default** id (`0x1`); NVM (`0x080E0000`) stays erased.
+
+**Pass**: default id, reachable, nothing written to NVM.
+
+---
+
+### B.4 — CAN app flash after SWD provisioning (metadata page)
+
+**Why**: the seed sits in the same 1 KiB flash page as the app-metadata word,
+which the BL programs in place on the first `FLASH_VERIFY`. If provisioning had
+programmed that word (probe-rs page fill), this write would double-program it —
+the #166 ECC-brick path. MingoCAN#336 writes the seed as a single flashword to
+prevent this; this test proves it on silicon.
+
+**Command**: straight after B.2, with no erase in between:
+```sh
+cf --bitrate 500000 --node-id 0x2 flash app.bin
+# true power-cycle, then:
+cf --bitrate 500000 --node-id 0x2 discover
+```
+
+**Expected**: flash + verify succeed; after the power cycle the app boots (its
+CAN traffic appears) and the BL is still reachable at `0x2` via the
+reboot-to-BL trigger. No ECC fault, no recovery breadcrumb.
+
+**Pass**: app boots across the power cycle; node-id still `0x2`.
+
+---
+
+### B.5 — CAN `provision` still overrides the seed (NVM wins)
+
+**Why**: the seed is a one-shot; later renumbering over CAN must keep working.
+
+**Command**: on the B.4 board, `cf --node-id 0x2 provision udv`, then power-cycle
+and `cf --node-id 0x3 discover`.
+
+**Expected**: the board answers at `0x3` and stays there across a power cycle
+(the stale seed is ignored because NVM already holds a node-id).
+
+**Pass**: `0x3` after renumbering, and it survives a power cycle.
 
 ---
 
@@ -208,12 +193,10 @@ HW rev: ______________________ · Date: ______________________ · RC tag: ______
 | A.9 — multi-bus reply-on-origin | | |
 | A.10 — bus-off recovery | | |
 | B.1 — candidate identity (proto 0.2 @ 500k) | | |
-| B.2 — power-cut recovery × 5 | | |
-| B.3 — G-A2 corrupt-NVM reachable | | |
-| B.4 — G-B5 mask rejection | | |
-| B.5 — multi-bus reply-on-origin | | |
-| B.6 — `0x101` doesn't cancel auto-jump | | |
-| B.7 — stay-in-BL across power cycle | | |
+| B.2 — SWD `--provision` seeds the node-id | | |
+| B.3 — bad seed → default id, no brick | | |
+| B.4 — CAN app flash after provisioning + power cycle | | |
+| B.5 — CAN `provision` overrides the seed | | |
 
 **Release gate** — the #125 invariant: *the BL can never become unreachable or
 unflashable over CAN.*
