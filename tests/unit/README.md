@@ -33,10 +33,12 @@ tests/unit/
 │   ├── bl_stubs.h           settable knobs paired with bl_stubs.c
 │   ├── hal_stubs.c          simulated flash + tick + FDCAN TX capture
 │   ├── bl_stubs.c           BKPSRAM ring storage + bl_health_uptime_seconds mock
-│   └── bl_peer_stubs.c      no-op stubs for bl_dtc / bl_flash / bl_live / bl_obyte
+│   └── bl_peer_stubs.c      stubs for bl_dtc / bl_flash / bl_health / bl_iwdg / bl_live / bl_obyte (several observable — counters/knobs, not all no-op)
 ├── test_bl_isotp.c          SF/FF/CF framing, reassembly, timeout, wrap-around
 ├── test_bl_fwinfo.c         magic + record-version acceptance
-├── test_bl_nvm.c            dedup, compaction, format, compact_replace_meta
+├── test_bl_node_id.c        NVM node-id override validation + safe fallback (v1.3.0)
+├── test_bl_fdcan.c          multi-bus map + filters/start-all + reply-on-origin (#120)
+├── test_bl_nvm.c            dedup, compaction, format, degraded-mode recovery (G-A2)
 ├── test_bl_log.c            BKPSRAM ring corruption-guard + drain semantics
 ├── test_bl_proto_id.c       wire-format build/parse over every legal ID
 ├── test_bl_proto_dispatch.c dispatcher entry-gate coverage + bad-PCI NACK regression
@@ -45,22 +47,29 @@ tests/unit/
 
 ## What's covered today
 
-**Suite size: 65 PASS / 0 IGNORE** in ~0.4 s wall time.
+**Suite size: 119 PASS / 0 IGNORE** in well under 1 s. (The authoritative count
+lives in `unity_runner.c`'s `RUN_TEST` list — quote that, not this number, if
+they ever drift.)
 
 | Module | Test file | Tests | Notable coverage |
 |---|---|---:|---|
-| `bl_isotp` | `test_bl_isotp.c` | 11 | SF/FF/CF chains, bad-seq, no-FF, overflow, timeout, **tick wrap-around** (#54), **zero-payload CF reject** (#68) |
+| `bl_isotp` | `test_bl_isotp.c` | 12 | SF/FF/CF chains, bad-seq, no-FF, overflow, timeout, **tick wrap-around** (#54), **zero-payload CF reject** (#68) |
 | `bl_fwinfo` | `test_bl_fwinfo.c` | 5 | magic match, `record_version` ≥ 1, future-minor accepted |
-| `bl_nvm` | `test_bl_nvm.c` | 11 | dedup, tombstones, compaction, format, **HAL_ERROR retry via compaction** (#53), `compact_replace_meta` (fix #13) |
-| `bl_log` | `test_bl_log.c` | 5 | drain happy path, severity filter, **corrupt-ent_len clamp** + **undersized-unread guard** (#65) |
+| `bl_node_id` | `test_bl_node_id.c` | 11 | override accepted for `0x1..0xE`; safe fall-back to the compile-time default on empty / `0x00` / `0x0F` / wrong-length, so a bad `cf config nvm write` can't brick a node |
+| `bl_fdcan` | `test_bl_fdcan.c` | 12 | `bus(i)` → hfdcan1/2/3 (+clamp), `configure_filters` / `start_all` cover all three + propagate HAL failure, `set_active` = reply-on-origin + NULL refusal (#120) |
+| `bl_nvm` | `test_bl_nvm.c` | 13 | dedup, tombstones, compaction, format, **HAL_ERROR retry via compaction** (#53), `compact_replace_meta` (#13), **degraded-mode reads-not-found / writes-rejected until format** (G-A2, #166) |
+| `bl_log` | `test_bl_log.c` | 8 | drain happy path, severity filter, **corrupt-ent_len clamp** + **undersized-unread guard** (#65) |
 | `bl_proto_id` | `test_bl_proto_id.c` | 14 | every legal direction × node pair + round-trip + reserved-bit rejection |
-| `bl_proto_dispatch` | `test_bl_proto_dispatch.c` | 5 | direction / dst / length / **bad-PCI NACK** (#60) gates + valid-SF passthrough |
+| `bl_proto_dispatch` | `test_bl_proto_dispatch.c` | 31 | direction / dst / length / **bad-PCI NACK** (#60) gates, valid-SF passthrough, plus apply-wrp mask validation (G-B5), watchdog-kick, and jump / cache-invalidate plumbing |
 | `bl_app_validate` | `test_bl_app_validate.c` | 13 | DTCM + RAM_D1 boundary cases, including the **0x24080000 regression** (#66) |
 
-The pre-#76 plan also called out `bl_health` and `bl_dtc` for host-side
-coverage. Today they ride along via `bl_peer_stubs.c` (no-op linker
-satisfaction) so dispatcher tests can run; a proper test file for each
-is a follow-up when there's a behavioural invariant worth pinning down.
+The suite has nearly doubled since the v1.2.0 baseline (65 → 119) and gained two
+modules (`bl_node_id`, `bl_fdcan`). `bl_health` and `bl_dtc` still have no
+dedicated test file — they ride along via `mocks/bl_peer_stubs.c`, which is
+mostly linker-satisfaction but exposes a few observable knobs (the watchdog-kick
+counter, the apply-wrp mask recorder, the jump counter) that dispatcher tests
+assert against. A dedicated file for each is a follow-up when there's a
+behavioural invariant worth pinning down.
 
 ## How the mocks work
 
@@ -110,23 +119,32 @@ the next one through stale flash content or leftover emitted frames.
 3. Forward-declare + `RUN_TEST(...)` each function in `unity_runner.c`.
 4. Rebuild and run.
 
-If your test needs to call into a `bl_*` module not yet compiled into
-the host build, either link the production source in (add it to
-`CMakeLists.txt`) or write a stub in `mocks/bl_peer_stubs.c`. The
-existing peer stubs are linker-satisfaction only — replace them with
-proper fakes if your test needs observable behaviour.
+If your test needs to call into a `bl_*` module not yet compiled into the host
+build, either link the production source in (add it to `CMakeLists.txt`) or add
+a stub in `mocks/bl_peer_stubs.c`. Most peer stubs are linker-satisfaction with
+neutral return values; a few already expose observable knobs (call counters,
+last-mask recorders) — follow that pattern when your test needs to assert on
+behaviour.
 
 ## CI
 
-Every push and PR runs `.github/workflows/build-and-test.yml`:
+Every push and PR runs `.github/workflows/build-and-test.yml` — six jobs:
 
-- **firmware-build** (×2): cross-compile the BL for Debug and Release
-  with arm-none-eabi-gcc 14.3 + Ninja. Catches warnings as errors,
-  link failures, and uploads `.elf` / `.bin` / `.hex` artifacts.
-- **host-tests**: builds + runs this suite. Required check on `dev`
-  and `main` branch protection — no PR merges without it green.
-
-The two jobs run in parallel. Total wall time should be under 2 minutes.
+- **firmware-build** (matrix Debug + Release): cross-compile the BL with
+  arm-none-eabi-gcc + Ninja. Warnings-as-errors, link failures, and uploads
+  `.elf` / `.bin` / `.hex` artifacts.
+- **host-tests**: builds + runs this suite. **Required check** on `dev` and
+  `main` — no PR merges without it green.
+- **host-tests-sanitized**: the suite again under AddressSanitizer +
+  UndefinedBehaviorSanitizer (`-fno-sanitize-recover=all`) — UAF / OOB /
+  signed-overflow / shift / null-deref caught on every PR.
+- **host-coverage**: runs under `gcovr` and **fails if total line coverage of
+  `Core/Src/bl_*.c` drops below 50 %** — a don't-backslide floor, ratcheted up
+  from the original 40 %.
+- **clang-tidy** (PR-only, changed lines): `bugprone-* / readability-* / cert-* /
+  clang-analyzer-* / misc-*` applied to the lines a PR touches.
+- **firmware-size** (PR-only): Release size-delta vs the base branch, posted to
+  the PR step summary, fails on a text / data / bss regression over threshold.
 
 ## Why this matters
 

@@ -37,17 +37,23 @@ title: Bootloader roadmap
 
 intro: |
   Production roadmap for the STM32H733 CAN bootloader. Each phase is a
-  cluster of feat branches cut from `dev`; a milestone tag on `main`
+  cluster of feat/fix branches cut from `dev`; a milestone tag on `main`
   closes the phase once every branch in it has merged. Branch status
   badges (✅ / 🔄 / 🔜) are derived from each branch's tracking issue
   state in GitHub Issues.
 
-  **v1.0.0** is tagged at the end of Phase 4 — the bootloader is
-  feature-complete for its intended use (internal tool, closed
-  harness). Phase 5 (security) is deferred behind the `⏸ deferred`
-  badge; it'll be picked up if scope ever expands to shipping on a
-  public or shared network. The planned branch layout for Phase 5 is
-  kept below as the on-ramp for when that day comes.
+  Phases 1–4 build the bootloader to **v1.0.0** — feature-complete for
+  its intended use (internal tool, closed harness). v1.0.0 was the
+  *start* of a reliability arc, not the finish: phases 5–10 are the
+  six-release hardening run (v1.2.0 → v1.6.2) that turned it into a
+  brick-safe field tool — host-test scaffold + audit hardening, node-ID
+  provisioning, field-brick prevention, fault-operational recovery
+  (IWDG + bus-off + fault-reboot), multi-bus FDCAN, and finally the
+  500 kbps revert + ECC-brick recovery that closed the v1.6.0 brick
+  crisis. The current release is **v1.6.2** (see
+  [CHANGELOG.md](CHANGELOG.md)). Phase 11 (security) stays deferred
+  behind the `⏸ deferred` badge — picked up if scope ever expands to a
+  public or shared network.
 
 phases:
   - number: 1
@@ -97,6 +103,66 @@ phases:
         scope: OB_READ + OB_APPLY_WRP + WRP self-check on boot
 
   - number: 5
+    title: Reliability & observability hardening
+    tag: v1.2.0
+    branches:
+      - name: feat/18-bl-proto-wire-tests
+        scope: host Unity suite — wire-format build/parse coverage
+      - name: feat/19-bl-proto-dispatch-scaffold
+        scope: dispatcher test scaffold + FDCAN TX-capture mock
+      - name: fix/audit-hardening-batch
+        scope: audit-driven hardening (ISO-TP deadline, jump barriers, log ring)
+
+  - number: 6
+    title: Node-ID provisioning & CI gates
+    tag: v1.3.1
+    branches:
+      - name: feat/26-nvm-node-id-override
+        scope: NVM-backed node-id override — provision over CAN, no reflash
+      - name: feat/23-host-coverage
+        scope: host line-coverage gate with a ratcheting floor
+      - name: feat/24-clang-tidy
+        scope: changed-lines clang-tidy gate
+
+  - number: 7
+    title: Field-brick prevention
+    tag: v1.4.0
+    branches:
+      - name: fix/audit-criticals-c2-c4
+        scope: session-timeout-no-jump (C2) + WRP self-lock guard (C4)
+
+  - number: 8
+    title: Fault-operational hardening
+    tag: v1.5.0
+    branches:
+      - name: feat/iwdg-enable
+        scope: independent watchdog, sized to clear a 128 KB sector erase
+      - name: feat/29-reset-on-spin
+        scope: reboot-on-CPU-fault via a reset-surviving .noinit breadcrumb
+      - name: feat/28-busoff-recovery-erase-probe
+        scope: FDCAN bus-off auto-recovery + erase-duration probe
+
+  - number: 9
+    title: Multi-bus FDCAN & fleet cutover
+    tag: v1.6.0
+    branches:
+      - name: feat/27-multi-fdcan-phase-a
+        scope: serve FDCAN1/2/3 at once, reply on the origin bus
+      - name: fix/154-auto-jump-alias
+        scope: only an addressed frame cancels the boot auto-jump
+      - name: fix/145-persist-stay-in-bl
+        scope: stay-in-BL hold survives a power cycle (persisted in NVM)
+
+  - number: 10
+    title: 500 kbps & ECC-brick recovery
+    tag: v1.6.2
+    branches:
+      - name: fix/166-ecc-brick
+        scope: survive an interrupted flash write — reachable + reflashable
+      - name: fix/174-clock-watchdog
+        scope: FMEA hardening — IWDG-first, CSS, WRP-mask guard, bus-off un-wedge
+
+  - number: 11
     title: Security
     tag: '—'
     deferred: true

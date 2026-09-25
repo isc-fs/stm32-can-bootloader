@@ -12,11 +12,16 @@ or diagnose a brick in the pit, you want
 1. GitHub account + clone this repo:
    - SSH: `git@github.com:isc-fs/stm32-can-bootloader.git`
    - HTTPS: `https://github.com/isc-fs/stm32-can-bootloader.git`
-2. Toolchain: ARM GCC + CMake + Ninja (STM32CubeIDE ships all three;
-   a standalone install works too). Verify with `cmake --preset
-   Debug && cmake --build build/Debug` — should produce
-   `build/Debug/CAN_BL.elf` with no warnings.
-3. First-time Git users: [git-scm.com's official tutorial](https://git-scm.com/docs/gittutorial)
+2. Firmware toolchain: ARM GCC (`arm-none-eabi-gcc`) + CMake + Ninja
+   (STM32CubeIDE ships all three; a standalone install works too). Verify with
+   `cmake --preset Debug && cmake --build build/Debug` — should produce
+   `build/Debug/CAN_BL.elf` with no warnings. (A `cmake/starm-clang.cmake`
+   toolchain exists for the sector-0 build but is **not** CI-exercised — verify
+   the link by hand if you ship from it.)
+3. Host-test toolchain (the faster inner loop, and the actual merge gate): a host
+   C compiler + CMake + Ninja; Unity is auto-fetched on first configure (one-time
+   network). See *Testing* below.
+4. First-time Git users: [git-scm.com's official tutorial](https://git-scm.com/docs/gittutorial)
    covers everything needed below.
 
 ---
@@ -47,12 +52,17 @@ gitGraph
     checkout dev
     merge docs/N-refresh tag: "PR merged"
     checkout main
-    merge dev tag: "v1.0.0 release"
+    branch release/vN
+    commit id: "cherry-pick dev"
+    checkout main
+    merge release/vN tag: "v1.0.0 release"
 ```
 
-- **`main`** — production. Only merges from `dev` after full bench
-  validation. Don't work here. Required-status-check protected;
-  `dev → main` is the release-cut PR.
+- **`main`** — production. Carries released, bench-validated firmware
+  only. Don't work here. Required-status-check protected; releases are
+  cut onto a `release/vX.Y.Z` branch off `main` (see [Merging to
+  main](#merging-to-main-release-cut)), never by merging `dev` in
+  directly.
 - **`dev`** — integration. Don't work here either. Required-status-
   check protected; every `feat/fix/docs` branch PRs into it.
 - **Feature / fix / docs branches** are cut from `dev`, PR'd back to
@@ -116,6 +126,10 @@ closes the tracking issue automatically.
 
 **Before requesting review**, check:
 - `cmake --build build/Release` is clean (no warnings, no link errors).
+- **Host unit tests pass**: `cmake -B build-tests -S tests/unit && cmake --build
+  build-tests && ctest --test-dir build-tests --output-on-failure` (119 tests, a
+  required check — see *Testing*). Add or update a test for any non-trivial
+  `bl_*` change.
 - You ran the change on bench if it touches anything wire-format,
   flash-programming, or session-state. If hardware was involved,
   say what you tested in the PR body.
@@ -124,14 +138,83 @@ closes the tracking issue automatically.
 ## Merging to main (release cut)
 
 Only when `dev` holds a set of validated changes and someone with
-bench access has signed off on a full flash-cycle test. The PR
-from `dev` → `main` is the release cut — tag it and bump the
-version in `bl_proto.h` so host tools see the change.
+bench access has signed off on a full flash-cycle test
+([RELEASE_BENCH.md](RELEASE_BENCH.md) is the checklist).
 
-After the release is published, `sync-dev-after-release.yml`
-fast-forwards `dev` to match `main` automatically. No need to
-run `git checkout dev && git merge main && git push` by hand;
-the workflow handles it on the `release: published` event.
+Releases are **cut onto a dedicated branch off `main` and built from
+cherry-picks** — `dev` is never merged into `main` directly:
+
+```bash
+# 1. Branch off the current main
+git fetch origin
+git checkout -b release/vX.Y.Z origin/main
+
+# 2. List dev's commits that aren't on main yet, then cherry-pick them
+#    (oldest first). Use `git cherry`, NOT a tag range: dev and main
+#    share no SHAs (see below), so `vPREV..dev` would match the whole
+#    branch. `+` marks a commit that still needs a cherry-pick.
+git cherry -v origin/main origin/dev
+git cherry-pick <sha1> <sha2> ...
+
+# 3. Bump the version in bl_proto.h so host tools see the change
+#    (BL_PROTO_VERSION_MINOR for compatible changes, MAJOR for breaking)
+
+# 4. Open the release-cut PR; merge once CI + the bench checklist pass
+gh pr create --base main --head release/vX.Y.Z
+
+# 5. Tag the merge commit and publish the GitHub Release — the
+#    attach-release-artifacts workflow builds the Release preset from the
+#    tag and attaches CAN_BL.{elf,bin,hex}, the canonical binaries to ship.
+git tag vX.Y.Z <merge-commit-sha>
+git push origin vX.Y.Z
+```
+
+### `dev` and `main` diverge on purpose
+
+Because each release is built from cherry-picks, every released commit
+exists twice: the original on `dev` and a re-applied copy on `main`
+with a different SHA. The two branches therefore share no recent
+history — both `git log origin/main..origin/dev` and `git log
+origin/dev..origin/main` are non-empty and grow with every release —
+while their **trees stay identical** (`git diff origin/dev origin/main`
+is empty). This SHA divergence is expected and harmless; **don't try to
+reconcile it.**
+
+There is deliberately **no** automated `dev`↔`main` sync. A former
+`sync-dev-after-release.yml` workflow tried to fast-forward `dev` to
+`main` on every release — it could never succeed (branch protection
+requires a PR into `dev`) and, even if forced through, would have
+pulled `main`'s duplicate cherry-pick commits back into `dev` and
+mangled its history. It was removed. If you're tempted to bring it
+back, re-read this section.
+
+---
+
+## Testing
+
+The host **unit suite** in `tests/unit/` (Unity via FetchContent) is the merge
+gate — it runs in well under a second with no toolchain or hardware and is a
+**required** status check. Run it:
+
+```sh
+cmake -B build-tests -S tests/unit
+cmake --build build-tests
+ctest --test-dir build-tests --output-on-failure
+```
+
+119 tests must stay green; add or update one for any non-trivial `bl_*` change.
+The per-module table and the mock harness are in
+[`tests/unit/README.md`](tests/unit/README.md).
+
+**CI** (`.github/workflows/build-and-test.yml`) runs six jobs on every push / PR:
+`firmware-build` (Debug + Release), `host-tests` (required), `host-tests-sanitized`
+(ASan + UBSan), `host-coverage` (fails under a 50 % line floor on `bl_*.c`),
+`clang-tidy` (changed lines, PR-only), and `firmware-size` (Release size-delta,
+PR-only) — these are the protections referenced above.
+
+The **silicon** tests live elsewhere: [BENCH_TESTS.md](BENCH_TESTS.md) (standing
+rejection + recovery layers) and [RELEASE_BENCH.md](RELEASE_BENCH.md) (the
+per-release cut).
 
 ---
 
@@ -142,11 +225,19 @@ the workflow handles it on the `release: published` event.
 - `Core/Src/bl_flash.c` — HAL wrapper for erase / program / CRC
   with the range-checks that enforce the bootloader's self-protection.
 - `Core/Src/bl_isotp.c` — ISO-TP reassembler, HAL-free, unit-testable.
-- `Core/Src/bl_*.c` — health, DTC, log, live-data, NVM, option-byte
-  modules. Each with a matching `.h` that's the public surface.
+- `Core/Src/bl_fault.c` — the reset-surviving `.noinit` breadcrumbs: the
+  ECC-brick recovery (#166) and the CPU-fault reboot reason (#135). **Change
+  with care** — this is the unbrick path; bench- and test-gate it under the
+  never-unreachable/unflashable invariant.
+- `Core/Src/bl_iwdg.c` — the independent watchdog, armed first in `main()`
+  (#174). Same caution applies.
+- `Core/Src/bl_*.c` — health, DTC, log, live-data, NVM, node-id, FDCAN,
+  option-byte modules. Each with a matching `.h` that's the public surface.
 - `Core/Src/main.c` — CubeMX-managed init + the main dispatch loop.
   Hand-edited code lives in `USER CODE BEGIN/END` blocks per CubeMX
   convention.
+- `tests/unit/` — the host-side Unity suite for the pure-logic modules +
+  dispatcher; see [`tests/unit/README.md`](tests/unit/README.md).
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full memory map,
 boot flow, and opcode-by-opcode design rationale.
@@ -154,12 +245,11 @@ boot flow, and opcode-by-opcode design rationale.
 ## Wire-format changes
 
 If your change touches the CAN protocol (opcodes, ID layout, ISO-TP
-framing, msg-type byte) you need matching changes in the host tool
-(`isc-fs/can-flasher`) because they share the protocol. Coordinate
-via linked PRs — the flasher side holds the spec
-(`can-flasher/REQUIREMENTS.md`), this side implements it. Bump
-`BL_PROTO_VERSION_MINOR` on backward-compatible changes,
-`BL_PROTO_VERSION_MAJOR` on breaking ones.
+framing, msg-type byte) you need matching changes in the host tool **`cf`**
+(`isc-fs/can-flasher`) because they share the protocol. Coordinate via linked
+PRs — the flasher side holds the spec (`can-flasher/REQUIREMENTS.md`), this side
+implements it. Bump `BL_PROTO_VERSION_MINOR` on backward-compatible changes,
+`BL_PROTO_VERSION_MAJOR` on breaking ones (it's at `0.2` today).
 
 ---
 

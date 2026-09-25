@@ -1,357 +1,235 @@
-# v1.2.0 release bench checklist
+# Release bench checklist — v1.7.0
 
-Mechanical bench session that validates the `v1.2.0` release cut. Built
-to be runnable in ~45 minutes by an operator with a HIL bench, a
-ST-Link, and a CAN adapter on FDCAN2. The previous `v1.1.0` baseline
-shipped without bench validation of several behavioural changes; this
-document closes that gap before the next `dev → main` cut.
+Mechanical bench session that validates a release cut on real silicon. Runnable
+in ~45 minutes by an operator with a HIL bench, an ST-Link, and a CAN adapter on
+any FDCAN tap. **Set the version once** — this cut is **`v1.7.0`** — then swap
+that token plus the §B behavioural block each release; everything else
+(prerequisites, §A, the gate, the after-session flow) is the stable skeleton.
 
 > **Companion docs**
-> - [BENCH_TESTS.md](BENCH_TESTS.md) — the *standing* protection-layer
->   bench tests. Run those first (§A below references them). They're
->   the part of this script that doesn't rotate per release.
-> - [PROVISIONING.md](PROVISIONING.md) — operator setup if you've never
->   wired a board.
+> - [BENCH_TESTS.md](BENCH_TESTS.md) — the *standing* rejection- and
+>   recovery-layer bench tests. Run those first (§A references them); they don't
+>   rotate per release.
+> - [PROVISIONING.md](PROVISIONING.md) — operator setup if you've never wired a
+>   board.
 
 ## Prerequisites
 
-- **Board** provisioned per PROVISIONING.md §1 with the `v1.2.0`
-  candidate bootloader (`build/Release/CAN_BL.bin` from the `dev`
-  branch at or after commit `[PASTE_DEV_TIP_SHA_HERE]`).
-- **Adapter + node ID**. Examples below assume:
+- **Board** provisioned per [PROVISIONING.md §1](PROVISIONING.md#1-fresh-board-provisioning-first-time)
+  with the **candidate bootloader** — the **CI-built `CAN_BL.bin`** attached to
+  the `vX.Y.Z` GitHub Release, or built from the RC tag (`v1.7.0-rc1`) / the
+  release-branch HEAD. **Not** a local `dev` build: flash exactly what you will
+  ship.
+- **Bus**: 500 kbps, 68.75 % sample point. The BL serves **FDCAN1/2/3** at once
+  and replies on origin; tap any one (FDCAN2 is the usual bench bus). Every node
+  on the bus must be at 500 k — do **not** bench a 1 Mbps image.
+- **Adapter + node ID** alias (`cfb` is a documented shorthand *over* `cf`, not a
+  separate binary):
   ```sh
   alias cfb='cf --interface slcan --channel /dev/cu.usbmodem1201 \
                 --bitrate 500000 --node-id 0x1'
   ```
-  Adjust `--channel`, `--node-id` to your bench.
-- **Sibling node generator** for the "under load" tests (any second
-  board on the same bus emitting heartbeats at ≥ 100 Hz). If you don't
-  have one, use `cf send-raw` in a tight loop from a second terminal:
+  Adjust `--channel` / `--node-id` to your bench.
+- **Bus-load generator** — referenced as "start the bus-load generator" by the
+  under-load tests. Any second board emitting heartbeats at ≥ 100 Hz works, or:
   ```sh
   while true; do
-    cf --interface slcan --channel … --bitrate 500000 \
+    cf --interface slcan --channel /dev/cu.usbmodem1201 --bitrate 500000 \
        send-raw 0x015 11 22 33 44 55 66 77 88
     sleep 0.01
   done
   ```
-- A built **test application** image — anything that boots and emits
-  a recognisable marker over UART or a status pin. Used for the
-  flash + jump tests.
+- A built **test application** image (boots + emits a recognisable UART/pin
+  marker) for the flash + jump tests, and a **large** app image for the
+  power-cut test.
 
 ## How to use this document
 
 For each test below:
-1. Run the **command** column verbatim.
-2. Compare against the **expected** column.
-3. Tick the **PASS** column in the results table at the bottom.
-4. If anything fails, **stop the script** — don't ship until the
-   regression is understood. File against the relevant PR.
+1. Run the **command** verbatim.
+2. Compare against the **expected** result.
+3. Tick the row in the §C results table.
+4. If anything fails, **stop the script** — don't ship until the regression is
+   understood. File against the relevant PR.
 
 ---
 
 ## A. Standing protection-layer tests (from BENCH_TESTS.md)
 
-Re-run these every release cut. They're the floor: if these regress,
-nothing else matters.
+Re-run every release cut. They're the floor — both halves of the #125
+never-unreachable/unflashable invariant. If these regress, nothing else matters.
 
 | # | Test | Reference | Pass criterion |
 |---|---|---|---|
-| A.1 | Host-side bad-linker rejection | [BENCH_TESTS.md Test 1](BENCH_TESTS.md#test-1--bad-linker-app-targets-bl-sector) | `cf flash` exits non-zero before any CAN frame |
-| A.2 | BL-side range check on FLASH_WRITE | [BENCH_TESTS.md Test 2](BENCH_TESTS.md#test-2--chunk-outside-writable-range) | `NACK(BL_NACK_PROTECTED_ADDR=0x01)` |
-| A.3 | BL-side range check on FLASH_ERASE | [BENCH_TESTS.md Test 3](BENCH_TESTS.md#test-3--erase-sector-0) | `NACK(BL_NACK_PROTECTED_ADDR=0x01)` |
-| A.4 | WRPERR on bypass write | [BENCH_TESTS.md Test 4](BENCH_TESTS.md#test-4--wrperr-flash-controller-blocks-a-bypassed-write) | `HAL_FLASH_Program == HAL_ERROR`, `FLASH_SR1.WRPERR` set |
-| A.5 | Oversize image rejected | [BENCH_TESTS.md Test 5](BENCH_TESTS.md#test-5--oversize-image-rejected) | `NACK(BL_NACK_OUT_OF_BOUNDS=0x02)` |
+| A.1 | Host-side bad-linker rejection | [Test 1](BENCH_TESTS.md#test-1--bad-linker-app-targets-bl-sector) | `cf flash` exits non-zero before any CAN frame |
+| A.2 | BL-side range check on FLASH_WRITE | [Test 2](BENCH_TESTS.md#test-2--chunk-outside-writable-range) | `NACK(BL_NACK_PROTECTED_ADDR=0x01)` |
+| A.3 | BL-side range check on FLASH_ERASE | [Test 3](BENCH_TESTS.md#test-3--erase-sector-0) | `NACK(BL_NACK_PROTECTED_ADDR=0x01)` |
+| A.4 | WRPERR on bypass write (E-02) | [Test 4](BENCH_TESTS.md#test-4--wrperr-flash-controller-blocks-a-bypassed-write) | `HAL_FLASH_Program == HAL_ERROR`, `FLASH_SR1.WRPERR` set |
+| A.5 | Oversize image rejected | [Test 5](BENCH_TESTS.md#test-5--oversize-image-rejected) | `NACK(BL_NACK_OUT_OF_BOUNDS=0x02)` |
+| A.6 | Power-cut mid-write recovery | [Test 6](BENCH_TESTS.md#test-6--power-cut--dropped-can-mid-write-ecc-brick-recovery) | reachable + reflashable after the cut, no SWD |
+| A.7 | Corrupt-NVM → default node-id | [Test 7](BENCH_TESTS.md#test-7--corrupt-nvm--reachable-at-default-node-id-g-a2) | answers at default id, NVM degraded |
+| A.8 | apply-wrp rejects non-sector-0 mask | [Test 8](BENCH_TESTS.md#test-8--apply-wrp-rejects-a-non-sector-0-mask-g-b5) | NACK, no option-byte change |
+| A.9 | Multi-bus reply-on-origin | [Test 9](BENCH_TESTS.md#test-9--multi-bus-reply-on-origin-120) | discover + NACK reply on each FDCAN tap |
+| A.10 | Bus-off recovery | [Test 10](BENCH_TESTS.md#test-10--bus-off-recovery-ng-9) | rejoins + answers discover after a bus-off |
 
-Test A.4 has been outstanding since hardware revision; if you can
-borrow a programmer for 15 minutes during this session, do it now and
-finally tick the row.
+A.4 (WRP-bypass positive), A.9 and A.10 carry method caveats — see the
+IFS08_HIL#81 trailing items noted in BENCH_TESTS.md.
 
 ---
 
-## B. v1.2.0-specific behavioural checks
+## B. v1.7.0-specific behavioural checks
 
-One test per PR that changed observable behaviour. Skip a test only
-if its setup is genuinely impossible on the bench (Test B.7 calls this
-out explicitly).
+> **Per-release block.** Replace this whole section each cut with one test per PR
+> that changed observable behaviour. For v1.7.0 that is one feature: the one-step
+> SWD provisioning seed (#183 / #184), plus its host side (isc-fs/MingoCAN#336).
+> Everything else is unchanged from v1.6.2, so §A is the regression floor.
 
-### B.1 — `dev` matches the firmware on the board (#89)
+**Extra prerequisite**: a `can-flasher` build with `swd-flash --provision`
+(MingoCAN#336 or a release that contains it, `--features swd`), and the
+candidate's **`CAN_BL.elf`**, not the `.bin`.
 
-**Why**: every test below assumes the bootloader is *the candidate
-release*. Confirm before you start.
+### B.1 — Candidate identity (the board runs *this* release)
+
+**Why**: every test below assumes the bootloader is the candidate release.
 
 **Command**:
 ```sh
+cfb discover
 cfb diagnose health
 ```
 
-**Expected**:
-- The health reply includes a protocol version field of **0.2**
-  (was 0.1 in v1.1.0). If `cf` doesn't surface the minor directly,
-  decode the raw CONNECT reply with `cf send-raw … 01` and read byte
-  index [2] (minor) → should be `0x02`.
+**Expected**: `discover` shows the board at **Proto 0.2**, **500 kbps**, with the
+intended FW version + git hash.
 
-**Pass**: protocol minor reads as `2`.
+**Pass**: version + git hash match the RC; the bus is 500 k.
 
 ---
 
-### B.2 — Bad-PCI NACK (PR #63)
+### B.2 — One-step SWD provisioning (#183, headline)
 
-**Why**: pre-v1.2.0 the BL silently dropped malformed PCI bytes. Now
-it NACKs with `BL_NACK_TRANSPORT_ERROR` (0x0A).
+**Why**: the feature this release exists for — a bare board commissioned by the
+debug probe alone, with no CAN round-trip.
 
-**Command** (PCI nibble = 0x4, not SF/FF/CF/FC):
+**Command**: [BENCH_TESTS.md Test 11](BENCH_TESTS.md#test-11--one-step-swd-seed-provisioning-183):
 ```sh
-cfb send-raw 0x01 40 00 00 00 00 00 00 00
+cf swd-flash CAN_BL.elf --provision ams
+# power-cycle, then (no cf provision):
+cf --bitrate 500000 discover
 ```
 
-**Expected** (within ≤ 50 ms):
-- A frame from `id=0x10` (node→host, node 0x1) carrying:
-  `[03 02 00 0A]` → SF-len-3, msg_type=NACK, rejected_opcode=0,
-  code=`BL_NACK_TRANSPORT_ERROR=0x0A`.
+**Expected**: the tool reports the seed programmed + verified; the board answers
+at **`0x2`**, not the compile-time default. A second power-cycle still shows `0x2`.
 
-**Pass**: NACK observed; no 1 s wait.
-
-**Pre-v1.2.0 reproduction note**: if you wired this same command
-against a v1.1.0 board, you'd see **no reply at all**. The new
-diagnostic visibility is the whole point of the fix.
+**Pass**: seeded id adopted, and it survives a power cycle.
 
 ---
 
-### B.3 — Zero-payload CF rejected immediately (PR #78)
+### B.3 — Bad seed is ignored, never a brick
 
-**Why**: pre-v1.2.0 a CF with `length == 1` (PCI only, no data) would
-stall reassembly until the 1 s timeout, then NACK with
-`TRANSPORT_TIMEOUT`. Now it NACKs with `TRANSPORT_ERROR` immediately.
+**Why**: a corrupt seed must leave the board reachable at the default id.
 
-**Command sequence** (first send a valid FF, then a zero-data CF):
-```sh
-# FF with total_len = 14, 6 payload bytes
-cfb send-raw 0x01 10 0E AA BB CC DD EE FF
-# wait for FC(CTS) reply (~10 ms)
+**Command**: on a chip-erased board, burn the candidate over SWD, then program a
+seed FLASHWORD with a **wrong CRC** at `0x080FFFC0` (openocd `flash write_image
+<32-byte file> 0x080FFFC0 bin`, no erase). Reset, then `cf --node-id 0x1 discover`.
 
-# CF with seq=1, length=1 (PCI only, no data)
-cfb send-raw 0x01 21
-```
+**Expected**: answers at the **default** id (`0x1`); NVM (`0x080E0000`) stays erased.
 
-**Expected**:
-- FF → FC(CTS) reply (`30 00 00 …` from `id=0x10`).
-- CF → **immediately** (within ≤ 50 ms): NACK frame `[03 02 00 0A]`
-  (TRANSPORT_ERROR). **Not** a 1-second wait followed by NACK 0x09.
-
-**Pass**: time-from-CF-to-NACK is well under 100 ms.
+**Pass**: default id, reachable, nothing written to NVM.
 
 ---
 
-### B.4 — BL→APP jump under bus load (PRs #62 + #74)
+### B.4 — CAN app flash after SWD provisioning (metadata page)
 
-**Why**: PR #62 stopped re-enabling IRQs on the BL side of the jump
-(could dispatch a queued IRQ through the new VTOR before the app's
-Reset_Handler ran). PR #74 added DSB/ISB barriers around the VTOR +
-MSP writes for Cortex-M7. Both manifest as "rare boot-into-fault under
-high RX activity at jump time" — hard to reproduce, but the test
-builds confidence.
+**Why**: the seed sits in the same 1 KiB flash page as the app-metadata word,
+which the BL programs in place on the first `FLASH_VERIFY`. If provisioning had
+programmed that word (probe-rs page fill), this write would double-program it —
+the #166 ECC-brick path. MingoCAN#336 writes the seed as a single flashword to
+prevent this; this test proves it on silicon.
 
-**Command sequence**:
+**Command**: straight after B.2, with no erase in between:
 ```sh
-# (Terminal 1) Start sibling-node spam (heartbeat-like, ≥ 100 Hz)
-while true; do
-  cf --interface slcan --channel … --bitrate 500000 \
-     send-raw 0x015 11 22 33 44 55 66 77 88
-  sleep 0.01
-done
-
-# (Terminal 2) Flash app, jump
-cfb flash test-app.elf --verify-after --jump
+cf --bitrate 500000 --node-id 0x2 flash app.bin
+# true power-cycle, then:
+cf --bitrate 500000 --node-id 0x2 discover
 ```
 
-**Expected**:
-- `cf flash` reports success and the JUMP ACK is observed.
-- The board boots into the app cleanly (app's UART marker / pin /
-  LED pattern as you configured it).
-- No fault LED, no fault-handler trap, no instant reboot.
+**Expected**: flash + verify succeed; after the power cycle the app boots (its
+CAN traffic appears) and the BL is still reachable at `0x2` via the
+reboot-to-BL trigger. No ECC fault, no recovery breadcrumb.
 
-**Repeat the cycle 10×**. If even one jump faults, the fix didn't
-hold in your operating environment — file against #62 / #74 with the
-fault log (read via SWD if you can, or `cf diagnose log-stream` if
-the BL came back up).
-
-**Pass**: 10/10 clean jumps.
+**Pass**: app boots across the power cycle; node-id still `0x2`.
 
 ---
 
-### B.5 — SP-range divergence fix (PR #72)
+### B.5 — CAN `provision` still overrides the seed (NVM wins)
 
-**Why**: pre-v1.2.0 an app with MSP in `0x24050000..0x240FFFFF`
-silently failed at jump time (CheckApplication approved via the loose
-bitmask, JumpToApplication rejected via the strict range, ERR LED
-solid). v1.2.0 unifies both checks against the strict range so
-CheckApplication rejects with code `0x15`.
+**Why**: the seed is a one-shot; later renumbering over CAN must keep working.
 
-**Setup**: build a tiny test app that places its stack at
-**`0x24080000`** (firmly in the legacy 1 MB window, firmly outside
-the real 320 KB RAM_D1). The simplest way: take any working app's
-linker script, change `_estack = 0x24050000` to `_estack = 0x24080000`,
-rebuild, generate the metadata with `cf` (or by hand with magic +
-size + CRC32).
+**Command**: on the B.4 board, `cf --node-id 0x2 provision udv`, then power-cycle
+and `cf --node-id 0x3 discover`.
 
-**Command**:
-```sh
-cfb flash bad-sp-app.elf --verify-after --jump
-```
+**Expected**: the board answers at `0x3` and stays there across a power cycle
+(the stale seed is ignored because NVM already holds a node-id).
 
-**Expected**:
-- `flash` and `verify` succeed (the image is structurally valid; only
-  the SP is bogus).
-- `--jump` triggers, and the BL responds with the `JUMP` ACK followed
-  by `NACK(BL_NACK_NO_VALID_APP=0x0C)` because `CheckApplication`
-  now correctly rejects. (Pre-v1.2.0: ACK then silent fail, board sits
-  on ERR LED, no NACK.)
-
-**Pass**: NACK code `0x0C` observed *and* the board returns to the
-listen state (responds to a follow-up `cfb diagnose health`).
-
----
-
-### B.6 — Persistent `flash_write_count` (PR #83)
-
-**Why**: pre-v1.2.0 the field in the health record was hard-coded
-zero. Now it counts every `bl_flash_{write,erase}` success and
-persists across reboots via NVM.
-
-**Command sequence**:
-```sh
-# Reset counter baseline by reading current value
-cfb diagnose health | tee /tmp/health-before.json
-N0=$(jq -r .flash_write_count /tmp/health-before.json)
-echo "starting count: $N0"
-
-# Force a few flash ops
-cfb flash test-app.elf --verify-after
-
-# Re-read
-cfb diagnose health | tee /tmp/health-mid.json
-N1=$(jq -r .flash_write_count /tmp/health-mid.json)
-echo "after flash: $N1"
-
-# Reset the board (cycle power or NRST)
-# Re-read after reboot
-cfb diagnose health | tee /tmp/health-after-reboot.json
-N2=$(jq -r .flash_write_count /tmp/health-after-reboot.json)
-echo "after reboot: $N2"
-```
-
-**Expected**:
-- `N1 > N0` (counter rose after flashing — at least one erase + ≥1
-  program op for a non-trivial app).
-- `N2 == N1` (counter persisted; reboot didn't reset it to 0).
-
-**Pass**: both inequalities hold.
-
----
-
-### B.7 — TX-FIFO drain before terminal opcodes (PR #85)
-
-**Why**: pre-v1.2.0 `handle_reset` / `handle_jump` / `handle_ob_apply_wrp`
-used `HAL_Delay(10)` to "let the ACK drain". Under bus load the ACK
-could still be in the FIFO when NVIC_SystemReset fired. PR #85
-replaced the delay with a TX-FIFO-empty poll bounded at 50 ms.
-
-**Command sequence** (sibling spam running in another terminal):
-```sh
-# (Terminal 1) Sibling-node spam as in B.4, but at higher rate to
-# stress the TX path:
-while true; do
-  cf --interface slcan --channel … --bitrate 500000 \
-     send-raw 0x015 11 22 33 44 55 66 77 88
-done
-
-# (Terminal 2) Trigger a hard reset and confirm the ACK arrived
-cfb send-raw 0x01 01 00 60 00  # CMD_RESET mode=0 (hard)
-# Hash the next ~10 frames from the bus:
-candump -L slcan0 -n 10
-```
-
-**Expected**:
-- The ACK frame for `CMD_RESET` (msg_type=ACK, opcode=0x60) appears
-  on the bus **before** the board reboots.
-- After reboot the board comes back and responds to `cfb diagnose
-  health` cleanly.
-
-**Repeat 10×** like B.4. Failure mode pre-v1.2.0: under sufficient
-load the host occasionally sees the reboot before the ACK and
-reports a hung command.
-
-**Pass**: 10/10 ACKs observed before reboot.
-
-**Not covered by this test**: the OB_APPLY_WRP equivalent path. That
-test would require either (a) clearing WRP first via SWD, applying
-again, and verifying ACK→reset (high friction, brick risk if anything
-slips), or (b) trusting the unit test path. The bench-side
-verification here covers the same code path (the `wait_tx_drain`
-helper); accept the OB path as **covered-by-mechanism**.
-
----
-
-### B.8 — Backward compatibility with v0.1 host tooling
-
-**Why**: PR #89 bumps `BL_PROTO_VERSION_MINOR` from 1 to 2. Per the
-project's wire-format-changes section, MINOR bumps must be backward-
-compatible: a v0.1-compliant host must still work against a 0.2 BL.
-
-**Command** (using an explicit v0.1-compatible cf release if you can
-keep one on hand, otherwise spot-check via raw frames):
-```sh
-# CONNECT with host advertising MAJOR=0, MINOR=1
-cfb send-raw 0x01 00 01 00 01     # msg=CMD, opcode=CONNECT, host major=0 minor=1
-```
-
-**Expected**:
-- Positive ACK (msg_type=0x01, opcode=0x01, BL's advertised version
-  `00 02`). No version-mismatch NACK.
-- A subsequent `cfb diagnose health` returns a sensible record.
-
-**Pass**: session opens; no `NACK(BL_NACK_PROTOCOL_VERSION=0x0B)`.
+**Pass**: `0x3` after renumbering, and it survives a power cycle.
 
 ---
 
 ## C. Results — fill in during the session
 
 Operator: ______________________ · Board serial: ______________________
-HW rev: ______________________ · Date: ______________________
+HW rev: ______________________ · Date: ______________________ · RC tag: ______________________
 
 | Test | Pass / Fail / N/A | Notes |
 |------|:-----------------:|-------|
 | A.1 — host-side bad-linker reject | | |
 | A.2 — BL-side range check (write) | | |
 | A.3 — BL-side range check (erase) | | |
-| A.4 — WRPERR on bypass | | |
+| A.4 — WRPERR on bypass (E-02) | | |
 | A.5 — oversize image | | |
-| B.1 — protocol minor == 2 | | |
-| B.2 — bad-PCI NACK | | |
-| B.3 — zero-payload CF immediate NACK | | |
-| B.4 — jump under load × 10 | | |
-| B.5 — SP-range edge case | | |
-| B.6 — flash_write_count persistent | | |
-| B.7 — TX drain × 10 | | |
-| B.8 — v0.1 host compat | | |
+| A.6 — power-cut recovery | | |
+| A.7 — corrupt-NVM default id | | |
+| A.8 — apply-wrp mask reject | | |
+| A.9 — multi-bus reply-on-origin | | |
+| A.10 — bus-off recovery | | |
+| B.1 — candidate identity (proto 0.2 @ 500k) | | |
+| B.2 — SWD `--provision` seeds the node-id | | |
+| B.3 — bad seed → default id, no brick | | |
+| B.4 — CAN app flash after provisioning + power cycle | | |
+| B.5 — CAN `provision` overrides the seed | | |
 
-**Release gate**:
+**Release gate** — the #125 invariant: *the BL can never become unreachable or
+unflashable over CAN.*
 - Every row above ticked **PASS** (or **N/A** with a one-line note).
-- The completed table is pasted into the `dev → main` release-cut PR
-  body before merge.
-- Any **FAIL** blocks the release; file against the relevant PR and
-  re-cut after the regression fix lands.
+- The completed table is pasted into the release-cut PR body before merge.
+- Any **FAIL** blocks the release; file against the relevant PR and re-cut after
+  the fix lands.
+
+For reference, v1.6.2 was HIL-accepted with **zero firmware defects** in
+[#178](https://github.com/isc-fs/stm32-can-bootloader/issues/178).
 
 ---
 
-## After the session
+## After the session — cutting the release
 
-1. Commit the filled-in `RELEASE_BENCH.md` to the release branch (or
-   paste the results table into the release-cut PR body).
-2. Update `BENCH_TESTS.md`'s test-run log row with the same outcomes.
-3. Tag the merge commit `v1.2.0` only after every row above is green.
+The release-cut flow (full cherry-pick procedure in
+[CONTRIBUTING.md § Merging to main](CONTRIBUTING.md#merging-to-main-release-cut)):
 
-If you find tests that should be added (regression for a new bug, a
-behaviour this script missed), edit this file and re-PR. Each future
-release cut copies this template, swaps the version + relevant PR
-list, and runs it again.
+1. Cut a **`release/vX.Y.Z` branch off `main`**, populated by cherry-picking
+   `dev`'s commits, and tag a release candidate (`vX.Y.Z-rc1`) for the bench.
+2. Run this checklist against the **CI-built** candidate binary. Paste the §C
+   table into the release-cut PR body.
+3. Open the **release-cut PR → `main`** and merge it; the release tag (`vX.Y.Z`)
+   sits on that merge.
+4. Create the **GitHub Release** for the tag. `attach-release-artifacts.yml`
+   (on `release: published`) builds the Release preset from the tag and attaches
+   `CAN_BL.{elf,bin,hex}` (~3 min) — the canonical binaries to ship and flash.
+5. **Leave `dev` and `main` diverged** — the cut is built from cherry-picks, so
+   the two share no SHAs but their trees stay identical. That's by design; don't
+   reconcile it, and there's no automated sync (the old `sync-dev-after-release`
+   workflow was removed). See CONTRIBUTING.md § *Merging to main*.
+6. Update [BENCH_TESTS.md](BENCH_TESTS.md)'s test-run log with the same outcomes.
+
+If you find tests that should be added (a regression for a new bug, a behaviour
+this script missed), edit this file and re-PR. Each future cut copies this
+template, swaps the version token + the §B block, and runs it again.
