@@ -9,8 +9,6 @@
 #include "bl_nvm.h"
 #include "bl_proto.h"   /* BL_PROTO_NODE_BROADCAST */
 
-#include <string.h>
-
 /* IEEE-802.3 reflected CRC32 (poly 0xEDB88320, init/xor-out 0xFFFFFFFF) over a
  * RAM buffer. Same algorithm as bl_flash_crc32, reimplemented here so the seed
  * check stays self-contained and host-testable — bl_flash is a linker stub in
@@ -38,8 +36,7 @@ bl_provision_result_t bl_provision_consume_seed(void)
      * on a half-programmed seed; the caller runs us inside the bl_appcheck
      * guard so such a fault recovers (breadcrumb -> next boot skips sector 7)
      * instead of reboot-looping unreachable. */
-    bl_provision_seed_t seed;
-    (void)memcpy(&seed, (const void *)BL_PROVISION_SEED_ADDR, sizeof(seed));
+    const bl_provision_seed_t seed = *(const bl_provision_seed_t *)BL_PROVISION_SEED_ADDR;
 
     /* Magic gate — an erased word (all 0xFF) or any non-seed content bails
      * fast, before the more expensive checks. */
