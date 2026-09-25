@@ -29,6 +29,26 @@ the PR titles between consecutive tags.
   `bl_provision.{h,c}`; host-tool support is tracked in `can-flasher`. Wire
   protocol unchanged at `0.2`.
 
+### Fixed
+
+- **Flash-write counter restarted at 0 every boot** (#187). `bl_health_init()`
+  restored `BL_NVM_KEY_FLASH_WRITE_COUNT` before `bl_nvm_init()` had scanned
+  sector 7, so the read saw zero slots and returned `NOT_FOUND` — after a power
+  cycle `cf diagnose health` showed `Flash writes : 0` while NVM held the real
+  count. The counter now lives in a new `bl_flashcount` module and is restored
+  right after the NVM scan / node-id resolve, inside the existing sector-7 ECC
+  guard (skipped on the degraded-NVM recovery boot). Reset-cause latching stays
+  first in `Bootloader_Init`.
+- **Flash-write counter churned sector 7** (#187). The counter was persisted on
+  every flash op, so one 87,532-byte AMS flash appended 513 NVM records (≈ 12.7 %
+  of the sector) and ~8 flashes forced a full sector-7 compaction erase — extra
+  erase cycles (and power-cut exposure) for the node-id record too. Ops now bump
+  a RAM counter only; it is persisted once per session, at `FLASH_VERIFY` commit,
+  `DISCONNECT`, session timeout and before `RESET` / `JUMP`. A flash now costs one
+  record. No new flash writes on the WRITE_CHUNK / erase path. Both bugs date back
+  to v1.6.2. Wire protocol unchanged at `0.2`; the health record layout is
+  unchanged.
+
 ---
 
 ## v1.6.2 (2026-06-11) — 500 kbps + ECC-brick recovery + reliability hardening
