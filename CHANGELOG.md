@@ -12,7 +12,9 @@ the PR titles between consecutive tags.
 
 ---
 
-## v1.7.0 (unreleased — pending release bench) — one-step SWD provisioning
+## v1.7.0 (2026-09-26) — one-step SWD provisioning
+
+**Release bench**: §B (B.1–B.5) all PASS on an MLC, including CAN app flash + power cycle after SWD provisioning (#186). The §A standing tests are pending on the HIL testbench.
 
 **Wire protocol**: unchanged at `0.2`. Bus unchanged: 500 kbps on FDCAN1/2/3.
 
