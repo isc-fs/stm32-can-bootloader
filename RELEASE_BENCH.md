@@ -175,6 +175,19 @@ and `cf --node-id 0x3 discover`.
 
 ---
 
+### B.6 — Flash-write counter persists, one record per session (#187)
+
+**Why**: the counter used to restart at 0 on every boot and wrote one NVM record
+per WRITE_CHUNK (513 records for an 87 KB app, a sector-7 compaction every ~8
+flashes).
+
+**Command**: [BENCH_TESTS.md Test 12](BENCH_TESTS.md#test-12--flash-write-counter-persists-one-nvm-record-per-session-187).
+
+**Pass**: `diagnose health` shows a non-zero `Flash writes` after a power cycle,
+and one app flash adds exactly one `0x0003` record to sector 7.
+
+---
+
 ## C. Results — fill in during the session
 
 Operator: ______________________ · Board serial: ______________________
@@ -197,6 +210,7 @@ HW rev: ______________________ · Date: ______________________ · RC tag: ______
 | B.3 — bad seed → default id, no brick | | |
 | B.4 — CAN app flash after provisioning + power cycle | | |
 | B.5 — CAN `provision` overrides the seed | | |
+| B.6 — flash-write counter persists, one record/session | | |
 
 **Release gate** — the #125 invariant: *the BL can never become unreachable or
 unflashable over CAN.*
