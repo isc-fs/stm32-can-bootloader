@@ -12,7 +12,11 @@ the PR titles between consecutive tags.
 
 ---
 
-## Unreleased
+## v1.7.0 (2026-09-26) — one-step SWD provisioning
+
+**Release bench**: §B (B.1–B.5) all PASS on an MLC, including CAN app flash + power cycle after SWD provisioning (#186). Those runs used the build before #187. The §A standing tests and the #187 counter-fix check (BENCH_TESTS Test 12) are pending on the HIL testbench.
+
+**Wire protocol**: unchanged at `0.2`. Bus unchanged: 500 kbps on FDCAN1/2/3.
 
 ### Added
 
@@ -26,8 +30,11 @@ the PR titles between consecutive tags.
   recovers like any sector-7 fault rather than bricking; NVM always wins
   (one-shot — a later `cf provision` over CAN overrides it). `BL_NVM_SIZE`
   shrinks by one FLASHWORD (now `128 KB − 64 B`). New module
-  `bl_provision.{h,c}`; host-tool support is tracked in `can-flasher`. Wire
-  protocol unchanged at `0.2`.
+  `bl_provision.{h,c}`. Host side: `can-flasher swd-flash CAN_BL.elf --provision
+  <role>` (isc-fs/MingoCAN#336), which refuses any bootloader ELF without
+  `bl_provision_consume_seed` — so provisioning over SWD needs **v1.7.0 or
+  later**. Bench-validated on an MLC 2026-09-26 (valid seed adopted, bad-CRC seed
+  rejected at the default id, one-shot across resets).
 
 ### Fixed
 

@@ -47,8 +47,9 @@ section. The common ones:
     cmake --preset Release && cmake --build build/Release
     ```
     Output lands at `build/Release/CAN_BL.bin`. For provisioning, prefer the
-    **v1.6.2 `CAN_BL.bin` from the release page** (CI-built; verify it against
-    the release `SHA256SUMS`).
+    **v1.7.0 `CAN_BL.bin` / `CAN_BL.elf` from the release page** (CI-built;
+    verify it against the release `SHA256SUMS`). One-step SWD provisioning needs
+    the `.elf`.
 
 ---
 
@@ -84,7 +85,7 @@ openocd -f interface/stlink.cfg -f target/stm32h7x.cfg \
         -c "program CAN_BL.bin 0x08000000 verify reset exit"
 ```
 
-Use a v1.6.2 `CAN_BL.bin` and verify its checksum against the release
+Use a v1.7.0 `CAN_BL.bin` and verify its checksum against the release
 `SHA256SUMS`. Flash the bootloader over **SWD only** — never over CAN, which
 can corrupt sector 0. Expected: success, MCU resets, LEDs go to the "idle BL"
 pattern (see [ARCHITECTURE.md § LED semantics](ARCHITECTURE.md)).
@@ -139,7 +140,10 @@ cf --bitrate 500000 --node-id 0x1 discover
 > node-id + complement + CRC32). On first boot the bootloader validates it and
 > writes it into NVM, so the board comes up **already provisioned** — no CAN
 > round-trip. A later `cf provision` over CAN still overrides it (NVM wins).
-> Needs host-tool support (`can-flasher` SWD-seed flag); if you seeded this way,
+> Host side: `can-flasher swd-flash CAN_BL.elf --provision <ecu|ams|udv|0xN>`
+> (isc-fs/MingoCAN#336) burns the bootloader, programs the seed and resets in
+> one run. It needs the **`.elf`** (it refuses a bootloader without seed support,
+> e.g. v1.6.2) and chip-erases the board, so it is fresh-board only. If you seeded this way,
 > skip the `cf provision` call above and continue at Step 1.4.
 
 ### Step 1.4 — Flash + verify the application
@@ -164,7 +168,7 @@ irreversible step.)
 chip-erase that wipes the board. Do **not** proceed unless **all** of these
 hold:
 
-- [ ] Bootloader reports the intended version (**v1.6.2**) + git hash in
+- [ ] Bootloader reports the intended version (**v1.7.0**) + git hash in
       `cf discover` / `cf diagnose health`.
 - [ ] The **node ID / role is correct** for this unit.
 - [ ] The **application verifies and boots** on the bench.
