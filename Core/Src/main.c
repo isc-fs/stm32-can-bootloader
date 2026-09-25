@@ -32,6 +32,7 @@
 #include "bl_dtc.h"
 #include "bl_fault.h"
 #include "bl_fdcan.h"
+#include "bl_flashcount.h"
 #include "bl_health.h"
 #include "bl_iwdg.h"
 #include "bl_live.h"
@@ -491,7 +492,8 @@ static void Bootloader_Init(void) {
 
 	/* Latch the reset cause before anything else has a chance to clear
 	 * RCC->RSR. Health reporting depends on this surviving the rest of
-	 * the boot sequence. */
+	 * the boot sequence. (The persistent flash-op counter is restored
+	 * later, after bl_nvm_init — see bl_flashcount_restore below.) */
 	bl_health_init();
 
 	/* Bring up the DTC table in Backup SRAM. Runs after bl_health_init
@@ -578,6 +580,13 @@ static void Bootloader_Init(void) {
 		/* Resolve the effective node ID now that NVM is queryable; must run
 		 * BEFORE the FDCAN filter config (the filter is built from the ID). */
 		bl_node_id_init_from_nvm();
+
+		/* #187: restore the persistent flash-op counter. Must follow
+		 * bl_nvm_init (before it the read scans zero slots and returns
+		 * NOT_FOUND -> the counter restarted at 0 every boot) and sits inside
+		 * the guard like every other sector-7 read. Skipped on the degraded
+		 * path above: the counter starts at 0 for a recovery boot. */
+		bl_flashcount_restore();
 
 		__DSB();
 		__ISB();

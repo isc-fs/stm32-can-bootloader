@@ -25,6 +25,7 @@
 #include "bl_config.h"
 #include "bl_dtc.h"
 #include "bl_flash.h"
+#include "bl_flashcount.h"
 #include "bl_fwinfo.h"
 #include "bl_health.h"
 #include "bl_isotp.h"
@@ -97,6 +98,11 @@ static void session_timeout(void)
      * right "was in session" semantics. */
     bl_dtc_log(BL_DTC_SESSION_TIMEOUT, BL_DTC_SEV_WARN, 0U);
     bl_log_warn("session timeout, tearing down");
+
+    /* #187: session boundary — persist the flash-op counter (no-op if
+     * nothing was flashed). Covers a host that died mid-reflash too:
+     * the BL parks below, and a later power-cut keeps the count. */
+    bl_flashcount_flush();
 
     bool was_flash_dirty = g_session_flash_dirty;
 
@@ -423,6 +429,7 @@ static void handle_disconnect(uint8_t peer, uint16_t args_len)
     (void)args_len;
     g_session_active = false;
     g_session_flash_dirty = false;  /* clean teardown: clear flash-dirty latch (#125 C2) */
+    bl_flashcount_flush();          /* #187: session boundary — persist the op counter */
     uint8_t resp[1] = { BL_CMD_DISCONNECT };
     send_ack(resp, (uint16_t)sizeof(resp));
 }
@@ -719,6 +726,7 @@ static void boot_application(void)
     /* #145: an explicit boot (JUMP / RESET mode 3) releases the persistent
      * stay-in-BL hold — the operator is deliberately booting the app. */
     (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);
+    bl_flashcount_flush();   /* #187: persist the op counter before leaving the BL */
 
     if (g_flash_written_this_boot) {
         HAL_PWR_EnableBkUpAccess();
@@ -770,6 +778,11 @@ static void handle_reset(uint8_t peer, const uint8_t *args, uint16_t args_len)
      * 125 kbps (the slowest classic-CAN rate we're likely to see)
      * with 16 frames already queued ahead. */
     wait_tx_drain(50U);
+
+    /* #187: about to reset or boot the app — persist the flash-op counter
+     * (one NVM record at most; no-op if nothing was flashed). Mode 3's
+     * boot_application() flushes too, harmlessly. */
+    bl_flashcount_flush();
 
     switch (mode) {
         case 0U:
@@ -1004,6 +1017,10 @@ static void handle_flash_verify(uint8_t peer, const uint8_t *args, uint16_t args
     /* #145: a verified new image clears any persistent stay-in-BL hold — the
      * reason to park in the BL (a bad app) is resolved, so resume auto-boot. */
     (void)bl_nvm_write(BL_NVM_KEY_STAY_IN_BL, (const uint8_t *)0, 0U);
+
+    /* #187: the image is committed — persist the flash-op counter here, once
+     * per flash, rather than on every WRITE_CHUNK / erase. */
+    bl_flashcount_flush();
 
     uint8_t resp[1] = { BL_CMD_FLASH_VERIFY };
     send_ack(resp, (uint16_t)sizeof(resp));

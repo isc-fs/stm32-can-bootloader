@@ -16,9 +16,8 @@
  *      many nodes is not flooded with heartbeats going nowhere.
  *
  *   3. Provide a fixed-layout 32-byte health record for the
- *      CMD_GET_HEALTH opcode. Fields belonging to future phases
- *      (flash-write count, DTC counters) are wired in as zeros today
- *      and flipped to real values as feat/12+ land.
+ *      CMD_GET_HEALTH opcode. The flash-write count comes from
+ *      bl_flashcount (persisted in NVM), the DTC fields from bl_dtc.
  *
  * The reset-cause latch has to run early — ideally as the first thing
  * in Bootloader_Init — so nothing accidentally clears RCC->RSR before
@@ -52,7 +51,7 @@ typedef struct {
     uint32_t uptime_seconds;    /* offset 0  — seconds since boot     */
     uint32_t reset_cause;       /* offset 4  — BL_RESET_* value        */
     uint32_t flags;             /* offset 8  — BL_HEALTH_FLAG_* bitmask */
-    uint32_t flash_write_count; /* offset 12 — 0 until Phase 4 NVM     */
+    uint32_t flash_write_count; /* offset 12 — lifetime flash ops (bl_flashcount) */
     uint32_t dtc_count;         /* offset 16 — 0 until feat/12-dtc     */
     uint32_t last_dtc_code;     /* offset 20 — 0 until feat/12-dtc     */
     uint32_t fdcan_recovery_count; /* offset 24 — FDCAN bus-off Stop/Start
@@ -106,15 +105,5 @@ uint32_t bl_health_max_flash_op_ms(void);
  * NOTIFY_HEARTBEAT once per second while a session is active; no-op
  * otherwise. */
 void bl_health_tick(uint32_t now_ms);
-
-/* Record one bootloader-initiated flash operation (program or erase
- * via bl_flash_*). Bumps the in-RAM counter immediately and persists
- * it to NVM under BL_NVM_KEY_FLASH_WRITE_COUNT so the next boot's
- * counter starts where this one left off. The persisted value is
- * what bl_health_fill_record reports as `flash_write_count`. NVM
- * writes are themselves coalesced via the log-structured store's
- * own compaction, so calling this per-op is not flash-pathological
- * — every ~4000 ops triggers a single compaction-erase. */
-void bl_health_record_flash_write(void);
 
 #endif /* BL_HEALTH_H */

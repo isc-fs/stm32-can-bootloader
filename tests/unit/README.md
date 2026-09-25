@@ -39,6 +39,8 @@ tests/unit/
 ├── test_bl_node_id.c        NVM node-id override validation + safe fallback (v1.3.0)
 ├── test_bl_fdcan.c          multi-bus map + filters/start-all + reply-on-origin (#120)
 ├── test_bl_nvm.c            dedup, compaction, format, degraded-mode recovery (G-A2)
+├── test_bl_flashcount.c     flash-op counter: reboot round-trip + RAM-only bump / O(1) flush (#187)
+├── test_bl_provision.c      SWD provisioning-seed validation + one-shot consume (#183)
 ├── test_bl_log.c            BKPSRAM ring corruption-guard + drain semantics
 ├── test_bl_proto_id.c       wire-format build/parse over every legal ID
 ├── test_bl_proto_dispatch.c dispatcher entry-gate coverage + bad-PCI NACK regression
@@ -47,7 +49,7 @@ tests/unit/
 
 ## What's covered today
 
-**Suite size: 119 PASS / 0 IGNORE** in well under 1 s. (The authoritative count
+**Suite size: 137 PASS / 0 IGNORE** in well under 1 s. (The authoritative count
 lives in `unity_runner.c`'s `RUN_TEST` list — quote that, not this number, if
 they ever drift.)
 
@@ -60,10 +62,12 @@ they ever drift.)
 | `bl_nvm` | `test_bl_nvm.c` | 13 | dedup, tombstones, compaction, format, **HAL_ERROR retry via compaction** (#53), `compact_replace_meta` (#13), **degraded-mode reads-not-found / writes-rejected until format** (G-A2, #166) |
 | `bl_log` | `test_bl_log.c` | 8 | drain happy path, severity filter, **corrupt-ent_len clamp** + **undersized-unread guard** (#65) |
 | `bl_proto_id` | `test_bl_proto_id.c` | 14 | every legal direction × node pair + round-trip + reserved-bit rejection |
-| `bl_proto_dispatch` | `test_bl_proto_dispatch.c` | 31 | direction / dst / length / **bad-PCI NACK** (#60) gates, valid-SF passthrough, plus apply-wrp mask validation (G-B5), watchdog-kick, and jump / cache-invalidate plumbing |
+| `bl_provision` | `test_bl_provision.c` | 10 | SWD seed magic / check-byte / CRC / range rejection, NVM-already-set skip, one-shot idempotence (#183) |
+| `bl_flashcount` | `test_bl_flashcount.c` | 6 | counter **survives a simulated reboot** (write → re-init NVM → restore), `bump` is RAM-only, `flush` writes once + is a no-op when clean, failed flush retries after `NVM_FORMAT` (#187) |
+| `bl_proto_dispatch` | `test_bl_proto_dispatch.c` | 33 | direction / dst / length / **bad-PCI NACK** (#60) gates, valid-SF passthrough, plus apply-wrp mask validation (G-B5), watchdog-kick, jump / cache-invalidate plumbing, and **K FLASH_WRITEs + FLASH_VERIFY → 1 counter record** (#187) |
 | `bl_app_validate` | `test_bl_app_validate.c` | 13 | DTCM + RAM_D1 boundary cases, including the **0x24080000 regression** (#66) |
 
-The suite has nearly doubled since the v1.2.0 baseline (65 → 119) and gained two
+The suite has nearly doubled since the v1.2.0 baseline (65 → 137) and gained two
 modules (`bl_node_id`, `bl_fdcan`). `bl_health` and `bl_dtc` still have no
 dedicated test file — they ride along via `mocks/bl_peer_stubs.c`, which is
 mostly linker-satisfaction but exposes a few observable knobs (the watchdog-kick
