@@ -10,6 +10,7 @@
 #include "bl_flash.h"
 
 #include "bl_fault.h"   /* NG-5: bl_appcheck guard around the in-session metadata read */
+#include "bl_flashcount.h"
 #include "bl_health.h"
 #include "bl_iwdg.h"
 #include "bl_memmap.h"
@@ -158,8 +159,9 @@ bl_flash_status_t bl_flash_erase(uint32_t start,
     }
     /* Count successful erases for the persistent flash_write_count
      * field in the health record. Once per call, not per sector —
-     * matches the bl_flash_write convention below. */
-    bl_health_record_flash_write();
+     * matches the bl_flash_write convention below. RAM only (#187):
+     * persisted at the session boundary, never from this path. */
+    bl_flashcount_bump();
     return BL_FLASH_OK;
 }
 
@@ -211,8 +213,8 @@ bl_flash_status_t bl_flash_write(uint32_t addr,
     HAL_FLASH_Lock();
     /* Count one program op for the persistent counter — not per
      * FLASHWORD, so a single host WRITE command of N bytes ticks the
-     * counter once. */
-    bl_health_record_flash_write();
+     * counter once. RAM only — see bl_flashcount.h (#187). */
+    bl_flashcount_bump();
     return BL_FLASH_OK;
 }
 

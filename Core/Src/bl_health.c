@@ -11,9 +11,9 @@
 
 #include "bl_config.h"
 #include "bl_dtc.h"
+#include "bl_flashcount.h"
 #include "bl_memmap.h"
 #include "bl_node_id.h"
-#include "bl_nvm.h"
 #include "bl_obyte.h"
 #include "bl_proto.h"
 #include "main.h"
@@ -27,13 +27,6 @@
 
 static uint8_t  g_reset_cause         = BL_RESET_UNKNOWN;
 static uint32_t g_last_heartbeat_ms   = 0U;
-
-/* Lifetime counter of bl_flash_{write,erase} ops. Loaded from NVM at
- * boot (defaults to 0 if no persisted value yet), bumped + persisted
- * by bl_health_record_flash_write(). Lives in RAM as well so the
- * snapshot path doesn't have to round-trip through NVM on every call
- * to bl_health_fill_record. */
-static uint32_t g_flash_write_count   = 0U;
 
 /* #125 C1/H6 instrumentation, per-boot, RAM-only (not persisted —
  * these are live diagnostics for the bench, surfaced in the health
@@ -71,32 +64,10 @@ void bl_health_init(void)
 
     g_last_heartbeat_ms = HAL_GetTick();
 
-    /* Restore the persistent flash-op counter. NOT_FOUND just means
-     * we've never persisted one yet — start at 0. Anything else
-     * unexpected (truncated value, hardware error) also defaults to
-     * 0 so the field stays well-defined. */
-    uint8_t actual = 0U;
-    uint32_t saved = 0U;
-    bl_nvm_status_t r = bl_nvm_read(BL_NVM_KEY_FLASH_WRITE_COUNT,
-                                    &saved, sizeof(saved), &actual);
-    if (r == BL_NVM_OK && actual == sizeof(saved)) {
-        g_flash_write_count = saved;
-    } else {
-        g_flash_write_count = 0U;
-    }
-}
-
-void bl_health_record_flash_write(void)
-{
-    g_flash_write_count++;
-    /* Best-effort persist. A failed NVM write (sector full + compaction
-     * also full, hardware error) leaves the in-RAM count ahead of the
-     * persisted one — the next successful persist or the next boot's
-     * read closes the gap. We don't surface a failure here because
-     * the caller is in the middle of a real flash op whose own status
-     * is what matters. */
-    (void)bl_nvm_write(BL_NVM_KEY_FLASH_WRITE_COUNT,
-                       &g_flash_write_count, sizeof(g_flash_write_count));
+    /* The persistent flash-op counter is NOT restored here: this runs
+     * before bl_nvm_init(), so an NVM read would scan zero slots and
+     * always return NOT_FOUND (#187). bl_flashcount_restore() runs
+     * later, inside the sector-7 ECC guard in Bootloader_Init. */
 }
 
 uint8_t bl_health_reset_cause(void)
@@ -132,7 +103,7 @@ void bl_health_fill_record(bl_health_record_t *out)
     out->uptime_seconds    = bl_health_uptime_seconds();
     out->reset_cause       = (uint32_t)g_reset_cause;
     out->flags             = bl_health_flags();
-    out->flash_write_count = g_flash_write_count;
+    out->flash_write_count = bl_flashcount_get();
     out->dtc_count            = (uint32_t)bl_dtc_count();
     out->last_dtc_code        = (uint32_t)bl_dtc_last_code();
     out->fdcan_recovery_count = g_fdcan_recovery_count;

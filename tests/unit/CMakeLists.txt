@@ -47,6 +47,7 @@ add_executable(bl_unit_tests
     ${BL_ROOT}/Core/Src/bl_node_id.c
     ${BL_ROOT}/Core/Src/bl_fdcan.c
     ${BL_ROOT}/Core/Src/bl_nvm.c
+    ${BL_ROOT}/Core/Src/bl_flashcount.c
     ${BL_ROOT}/Core/Src/bl_provision.c
     ${BL_ROOT}/Core/Src/bl_log.c
     ${BL_ROOT}/Core/Src/bl_proto.c
@@ -62,6 +63,7 @@ add_executable(bl_unit_tests
     test_bl_node_id.c
     test_bl_fdcan.c
     test_bl_nvm.c
+    test_bl_flashcount.c
     test_bl_provision.c
     test_bl_proto_id.c
     test_bl_log.c

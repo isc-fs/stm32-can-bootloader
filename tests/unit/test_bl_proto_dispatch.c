@@ -27,7 +27,9 @@
  * an empty TX ring.
  */
 
+#include "bl_flashcount.h"
 #include "bl_isotp.h"
+#include "bl_node_id.h"
 #include "bl_nvm.h"          /* bl_nvm_init / bl_nvm_read / bl_nvm_write
                                 for NVM round-trip dispatcher tests   */
 #include "bl_proto.h"
@@ -926,17 +928,18 @@ void test_stay_in_bl_persists_in_nvm_and_clears_on_boot(void)
 
 /* ---- #125 C4: OB_APPLY_WRP sector-bitmap validation ---- */
 
-/* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + one CF and
- * dispatch both. Covers 8..13-byte messages (FF carries 6 bytes, CF
- * up to 7) — enough for the 10-byte OB_APPLY_WRP (token + bitmap)
- * which doesn't fit a single SF. Not a general segmenter. */
+/* Frame [BL_MSG_CMD, opcode, args...] as an ISO-TP FF + CFs and
+ * dispatch them. Covers 8..20-byte messages (FF carries 6 bytes, each
+ * CF up to 7) — enough for the 10-byte OB_APPLY_WRP (token + bitmap)
+ * and the 14-byte FLASH_VERIFY, which don't fit a single SF. Not a
+ * general segmenter. */
 static void send_cmd_multiframe(uint8_t opcode, const uint8_t *args, uint8_t args_len)
 {
     bl_proto_id_t id = host_to_us();
     uint8_t total = (uint8_t)(2U + args_len);   /* msg_type + opcode + args */
-    TEST_ASSERT_LESS_OR_EQUAL_UINT8(13U, total);
+    TEST_ASSERT_LESS_OR_EQUAL_UINT8(20U, total);
 
-    uint8_t msg[16] = { 0 };
+    uint8_t msg[20] = { 0 };
     msg[0] = (uint8_t)BL_MSG_CMD;
     msg[1] = opcode;
     for (uint8_t i = 0U; i < args_len; i++) {
@@ -952,14 +955,19 @@ static void send_cmd_multiframe(uint8_t opcode, const uint8_t *args, uint8_t arg
     }
     bl_proto_dispatch(&id, ff, 8U);
 
-    /* CF seq 1: the remaining bytes. */
-    uint8_t rem = (uint8_t)(total - 6U);
-    uint8_t cf[8];
-    cf[0] = (uint8_t)(BL_ISOTP_PCI_CF | 0x01U);
-    for (uint8_t i = 0U; i < rem; i++) {
-        cf[1U + i] = msg[6U + i];
+    /* CFs seq 1, 2, ...: the remaining bytes, 7 per frame. */
+    uint8_t pos = 6U;
+    for (uint8_t seq = 1U; pos < total; seq++) {
+        uint8_t rem = (uint8_t)(total - pos);
+        uint8_t n = (rem > 7U) ? 7U : rem;
+        uint8_t cf[8];
+        cf[0] = (uint8_t)(BL_ISOTP_PCI_CF | (seq & 0x0FU));
+        for (uint8_t i = 0U; i < n; i++) {
+            cf[1U + i] = msg[pos + i];
+        }
+        bl_proto_dispatch(&id, cf, (uint8_t)(1U + n));
+        pos = (uint8_t)(pos + n);
     }
-    bl_proto_dispatch(&id, cf, (uint8_t)(1U + rem));
 }
 
 /* The valid OB_APPLY_WRP token (BL_OB_APPLY_TOKEN = 0x00505257, "WRP\0")
@@ -1031,4 +1039,86 @@ void test_flash_erase_records_op_duration(void)
     send_cmd_multiframe((uint8_t)BL_CMD_FLASH_ERASE, eargs, 8U);
 
     TEST_ASSERT_EQUAL_INT(1, mock_flash_op_ms_calls());
+}
+
+/* ---- #187: the flash-op counter costs O(1) NVM records per flash ---- */
+
+uint32_t flashcount_test_nvm_records_for_key(uint16_t key);   /* test_bl_flashcount.c */
+
+/* Boot NVM + counter on the (setUp-erased) fake flash, and re-resolve the
+ * node id so a value cached by an earlier test (e.g. the provision suite)
+ * doesn't make the BL ignore host_to_us() frames. */
+static void flashcount_boot(void)
+{
+    bl_nvm_init();
+    bl_node_id_init_from_nvm();
+    bl_flashcount_restore();
+}
+
+void test_flash_of_k_chunks_writes_o1_counter_records(void)
+{
+    /* Before #187 every WRITE_CHUNK / erase appended a counter record to
+     * sector 7 (513 records for one 87 KB app flash). Now the count lives
+     * in RAM during the session and is persisted once, at FLASH_VERIFY;
+     * the later session-boundary flushes (DISCONNECT, RESET) are no-ops
+     * because nothing changed. */
+    const uint32_t K = 200U;
+    flashcount_boot();
+    reset_session_and_tx();
+    prime_session();
+
+    uint8_t wargs[5] = { 0x00U, 0x00U, 0x02U, 0x08U, 0xAAU };   /* WRITE +1 byte */
+    for (uint32_t i = 0U; i < K; i++) {
+        send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+    }
+    /* Mid-flash: nothing persisted yet. */
+    TEST_ASSERT_EQUAL_UINT32(0U,
+        flashcount_test_nvm_records_for_key(BL_NVM_KEY_FLASH_WRITE_COUNT));
+    TEST_ASSERT_EQUAL_UINT32(K, bl_flashcount_get());
+
+    /* FLASH_VERIFY [crc, size, version]; the host crc32 stub returns
+     * 0xDEADBEEF, so that's the CRC that verifies. */
+    uint8_t vargs[12] = {
+        0xEFU, 0xBEU, 0xADU, 0xDEU,     /* expected_crc  = 0xDEADBEEF */
+        0x40U, 0x00U, 0x00U, 0x00U,     /* expected_size = 64 */
+        0x01U, 0x00U, 0x00U, 0x00U,     /* version = 1 */
+    };
+    mock_fdcan_reset();
+    send_cmd_multiframe((uint8_t)BL_CMD_FLASH_VERIFY, vargs, 12U);
+    TEST_ASSERT_EQUAL_UINT32(1U,
+        flashcount_test_nvm_records_for_key(BL_NVM_KEY_FLASH_WRITE_COUNT));
+
+    /* DISCONNECT + RESET are flush points too, but nothing changed. */
+    send_cmd_sf((uint8_t)BL_CMD_DISCONNECT, NULL, 0U);
+    prime_session();
+    uint8_t rargs[1] = { 0U };
+    send_cmd_sf((uint8_t)BL_CMD_RESET, rargs, 1U);
+    TEST_ASSERT_EQUAL_UINT32(1U,
+        flashcount_test_nvm_records_for_key(BL_NVM_KEY_FLASH_WRITE_COUNT));
+
+    /* And the persisted value is the full count — survives a reboot. */
+    bl_nvm_init();
+    bl_flashcount_restore();
+    TEST_ASSERT_EQUAL_UINT32(K, bl_flashcount_get());
+}
+
+void test_abandoned_flash_persists_counter_on_disconnect(void)
+{
+    /* A host that stops mid-flash (no FLASH_VERIFY) still gets its ops
+     * counted at the next session boundary — DISCONNECT here. */
+    flashcount_boot();
+    reset_session_and_tx();
+    prime_session();
+
+    uint8_t wargs[5] = { 0x00U, 0x00U, 0x02U, 0x08U, 0xAAU };
+    for (int i = 0; i < 10; i++) {
+        send_cmd_sf((uint8_t)BL_CMD_FLASH_WRITE, wargs, 5U);
+    }
+    send_cmd_sf((uint8_t)BL_CMD_DISCONNECT, NULL, 0U);
+    TEST_ASSERT_EQUAL_UINT32(1U,
+        flashcount_test_nvm_records_for_key(BL_NVM_KEY_FLASH_WRITE_COUNT));
+
+    bl_nvm_init();
+    bl_flashcount_restore();
+    TEST_ASSERT_EQUAL_UINT32(10U, bl_flashcount_get());
 }
