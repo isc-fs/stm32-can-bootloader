@@ -164,6 +164,16 @@ void test_app_stack_flash_address_rejected(void);
 void test_app_stack_zero_rejected(void);
 void test_app_stack_top_of_address_space_rejected(void);
 
+/* ---- test_bl_flashcount.c (#187) ---- */
+void test_flashcount_starts_at_zero_on_blank_nvm(void);
+void test_flashcount_survives_simulated_reboot(void);
+void test_flashcount_bump_does_not_write_nvm(void);
+void test_flashcount_flush_writes_once_and_is_noop_when_clean(void);
+void test_flashcount_flush_with_nothing_flashed_writes_nothing(void);
+void test_flashcount_failed_flush_retries_at_next_boundary(void);
+void test_flash_of_k_chunks_writes_o1_counter_records(void);
+void test_abandoned_flash_persists_counter_on_disconnect(void);
+
 /* ---- test_bl_provision.c ---- */
 void test_provision_valid_seed_writes_node_id(void);
 void test_provision_seeded_id_resolves_via_node_id(void);
@@ -328,6 +338,16 @@ int main(void)
     RUN_TEST(test_provision_bad_crc_rejected);
     RUN_TEST(test_provision_skipped_when_nvm_already_has_node_id);
     RUN_TEST(test_provision_is_one_shot_idempotent);
+
+    /* test_bl_flashcount.c + the dispatcher-level #187 checks */
+    RUN_TEST(test_flashcount_starts_at_zero_on_blank_nvm);
+    RUN_TEST(test_flashcount_survives_simulated_reboot);
+    RUN_TEST(test_flashcount_bump_does_not_write_nvm);
+    RUN_TEST(test_flashcount_flush_writes_once_and_is_noop_when_clean);
+    RUN_TEST(test_flashcount_flush_with_nothing_flashed_writes_nothing);
+    RUN_TEST(test_flashcount_failed_flush_retries_at_next_boundary);
+    RUN_TEST(test_flash_of_k_chunks_writes_o1_counter_records);
+    RUN_TEST(test_abandoned_flash_persists_counter_on_disconnect);
 
     return UNITY_END();
 }

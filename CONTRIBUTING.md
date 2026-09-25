@@ -127,7 +127,7 @@ closes the tracking issue automatically.
 **Before requesting review**, check:
 - `cmake --build build/Release` is clean (no warnings, no link errors).
 - **Host unit tests pass**: `cmake -B build-tests -S tests/unit && cmake --build
-  build-tests && ctest --test-dir build-tests --output-on-failure` (119 tests, a
+  build-tests && ctest --test-dir build-tests --output-on-failure` (137 tests, a
   required check — see *Testing*). Add or update a test for any non-trivial
   `bl_*` change.
 - You ran the change on bench if it touches anything wire-format,
@@ -202,7 +202,7 @@ cmake --build build-tests
 ctest --test-dir build-tests --output-on-failure
 ```
 
-119 tests must stay green; add or update one for any non-trivial `bl_*` change.
+137 tests must stay green; add or update one for any non-trivial `bl_*` change.
 The per-module table and the mock harness are in
 [`tests/unit/README.md`](tests/unit/README.md).
 

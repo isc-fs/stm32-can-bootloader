@@ -14,7 +14,7 @@ the PR titles between consecutive tags.
 
 ## v1.7.0 (2026-09-26) — one-step SWD provisioning
 
-**Release bench**: §B (B.1–B.5) all PASS on an MLC, including CAN app flash + power cycle after SWD provisioning (#186). The §A standing tests are pending on the HIL testbench.
+**Release bench**: §B (B.1–B.5) all PASS on an MLC, including CAN app flash + power cycle after SWD provisioning (#186). Those runs used the build before #187. The §A standing tests and the #187 counter-fix check (BENCH_TESTS Test 12) are pending on the HIL testbench.
 
 **Wire protocol**: unchanged at `0.2`. Bus unchanged: 500 kbps on FDCAN1/2/3.
 
@@ -35,6 +35,26 @@ the PR titles between consecutive tags.
   `bl_provision_consume_seed` — so provisioning over SWD needs **v1.7.0 or
   later**. Bench-validated on an MLC 2026-09-26 (valid seed adopted, bad-CRC seed
   rejected at the default id, one-shot across resets).
+
+### Fixed
+
+- **Flash-write counter restarted at 0 every boot** (#187). `bl_health_init()`
+  restored `BL_NVM_KEY_FLASH_WRITE_COUNT` before `bl_nvm_init()` had scanned
+  sector 7, so the read saw zero slots and returned `NOT_FOUND` — after a power
+  cycle `cf diagnose health` showed `Flash writes : 0` while NVM held the real
+  count. The counter now lives in a new `bl_flashcount` module and is restored
+  right after the NVM scan / node-id resolve, inside the existing sector-7 ECC
+  guard (skipped on the degraded-NVM recovery boot). Reset-cause latching stays
+  first in `Bootloader_Init`.
+- **Flash-write counter churned sector 7** (#187). The counter was persisted on
+  every flash op, so one 87,532-byte AMS flash appended 513 NVM records (≈ 12.7 %
+  of the sector) and ~8 flashes forced a full sector-7 compaction erase — extra
+  erase cycles (and power-cut exposure) for the node-id record too. Ops now bump
+  a RAM counter only; it is persisted once per session, at `FLASH_VERIFY` commit,
+  `DISCONNECT`, session timeout and before `RESET` / `JUMP`. A flash now costs one
+  record. No new flash writes on the WRITE_CHUNK / erase path. Both bugs date back
+  to v1.6.2. Wire protocol unchanged at `0.2`; the health record layout is
+  unchanged.
 
 ---
 

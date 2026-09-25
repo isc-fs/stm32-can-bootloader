@@ -79,6 +79,7 @@ flowchart TD
 
     isotp["bl_isotp<br/>SF/FF/CF reassembly + segmentation"]:::util
     nvm["bl_nvm<br/>log-structured KV in sector 7"]:::util
+    fcount["bl_flashcount<br/>lifetime flash-op counter"]:::util
     node_id["bl_node_id<br/>NVM-backed node-id override"]:::util
     dtc["bl_dtc<br/>32-entry DTC table in BKPSRAM"]:::util
     obyte["bl_obyte<br/>option-byte read + apply-WRP"]:::util
@@ -99,8 +100,10 @@ flowchart TD
     proto --> live
 
     flash --> nvm
-    flash --> health
-    health --> nvm
+    flash --> fcount
+    proto --> fcount
+    health --> fcount
+    fcount --> nvm
     health --> node_id
     live --> dtc
     live --> obyte
@@ -320,8 +323,9 @@ fault handler is touched:
    while the guard is still armed, so it can't slip through after disarm and miss
    the breadcrumb (which would re-open the loop). Bench: 10/10 power-cuts recovered
    first-try (#178).
-4. **G-A2 — the pre-CAN reads are guarded too.** The NVM scan and node-id read
-   that run before CAN is up sit on the same guard: a corrupt sector-7 word brings
+4. **G-A2 — the pre-CAN reads are guarded too.** The NVM scan, provisioning-seed,
+   node-id and flash-op-counter reads that run before CAN is up sit on the same
+   guard: a corrupt sector-7 word brings
    the BL up in **degraded-NVM recovery** (`bl_nvm_init_degraded` — reads return
    `NOT_FOUND`, writes are refused) with the node ID fallen back to the
    compile-time default, so the unit is **discoverable at the default node-id**
@@ -759,7 +763,21 @@ required.
 |---------:|---------------------------------|------------------------------------------------------|
 | `0x0001` | `BL_NVM_KEY_NODE_ID`            | 1-byte override for compile-time `BL_NODE_ID`        |
 | `0x0002` | `BL_NVM_KEY_CAN_BITRATE`        | reserved — future CAN bitrate preference             |
-| `0x0003` | `BL_NVM_KEY_FLASH_WRITE_COUNT`  | 4-byte lifetime counter of `bl_flash_{write,erase}` ops, persisted across boots and exposed in the `flash_write_count` field of the health record |
+| `0x0003` | `BL_NVM_KEY_FLASH_WRITE_COUNT`  | 4-byte lifetime counter of `bl_flash_{write,erase}` ops, persisted across boots and exposed in the `flash_write_count` field of the health record. Owned by `bl_flashcount`; see *Flash-op counter* below |
+
+**Flash-op counter (`bl_flashcount`, #187).** Every successful
+`bl_flash_write` / `bl_flash_erase` bumps a **RAM-only** counter — no flash
+traffic in the WRITE_CHUNK hot path. It is persisted with one `bl_nvm_write`
+only at **session boundaries**, and only if it changed: `FLASH_VERIFY` commit,
+`DISCONNECT`, session timeout, and just before `RESET` / `JUMP` / boot-app. A
+full app flash therefore costs **one** KV record, not one per chunk (pre-#187,
+one 87 KB flash appended 513 records ≈ 12.7 % of sector 7, forcing a
+full-sector compaction erase every ~8 flashes). The count is approximately
+durable by design: ops since the last boundary are lost to a mid-session power
+cut. It is restored by `bl_flashcount_restore()` **after** `bl_nvm_init()`
+(inside the sector-7 ECC guard — reading before the scan found no slots and
+reset the count to 0 every boot, #187) and is skipped on the degraded-NVM
+recovery boot, where it starts at 0.
 
 #### Option bytes (OB_READ, OB_APPLY_WRP)
 

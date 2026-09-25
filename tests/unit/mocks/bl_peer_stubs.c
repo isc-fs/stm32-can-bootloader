@@ -20,6 +20,7 @@
 
 #include "bl_dtc.h"
 #include "bl_flash.h"
+#include "bl_flashcount.h"
 #include "bl_health.h"
 #include "bl_iwdg.h"
 #include "bl_live.h"
@@ -65,6 +66,7 @@ bl_flash_status_t bl_flash_erase(uint32_t start,
      * dispatcher-level plumbing test (FLASH_ERASE → a duration is
      * recorded) still validates against the stubbed flash layer. */
     bl_health_record_flash_op_ms(0U);
+    bl_flashcount_bump();   /* mirrors the real bl_flash_erase (#187) */
     return BL_FLASH_OK;
 }
 
@@ -73,6 +75,7 @@ bl_flash_status_t bl_flash_write(uint32_t addr,
                                  uint32_t length)
 {
     (void)addr; (void)data; (void)length;
+    bl_flashcount_bump();   /* mirrors the real bl_flash_write (#187) */
     return BL_FLASH_OK;
 }
 

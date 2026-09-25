@@ -257,6 +257,74 @@ ignored thereafter). A later `cf provision` over CAN overrides it.
 reachable at the **default** node-id (the seed read is ECC-guarded), never a
 brick.
 
+## Test 12 — Flash-write counter persists, one NVM record per session (#187)
+
+Checks both #187 fixes on real silicon: the `flash_write_count` survives a power
+cycle (it used to restart at 0 every boot), and a flash session appends **one**
+`0x0003` NVM record instead of one per `WRITE_CHUNK` / erase.
+
+**Setup**: the board's bootloader is the #188 build (CI `firmware-build`
+artifact), burned over **SWD** with STM32CubeProgrammer (see PROVISIONING.md
+§1.1; on a WRP'd sector 0, chip-erase first). A valid app is installed. RDP
+level 0, so SWD can read sector 7. `cfb` = `cf --bitrate 500000 --node-id <id>`.
+To land in the BL after a flash (instead of the app), use the RELEASE_BENCH
+B.7 stay-in-BL reset, or the app's own BL-request frame.
+
+A helper to count `0x0003` records in a sector-7 dump. It uses hot-plug, so the
+BL keeps running:
+```sh
+STM32_Programmer_CLI -c port=SWD mode=HOTPLUG -u 0x080E0000 0x1FFC0 s7.bin
+python3 -c "import struct;d=open('s7.bin','rb').read();print(sum(struct.unpack_from('<HH',d,o)==(0xABCD,3) for o in range(0,len(d),32)))"
+```
+
+**12a — the counter survives a power cycle (bug 1)**
+```sh
+cfb diagnose health                  # note "Flash writes" = C0
+cfb config nvm read 0x0003           # persisted value (LE u32) = P0
+# full power-off / power-on (true PSU cycle, not a relay tap)
+cfb diagnose health
+```
+Expected: `Flash writes` after the cycle == **P0**, and non-zero once any flash
+has been committed. A pre-#188 BL shows **0** here. That's the bug, and it makes
+a useful negative control.
+
+**12b — a full flash is counted and persisted**
+```sh
+cfb flash app.bin                    # completes: erase + N WRITE_CHUNKs + FLASH_VERIFY
+# re-enter the BL (stay-in-BL reset or the app's BL-request frame), then:
+cfb diagnose health                  # "Flash writes" = C1
+cfb config nvm read 0x0003           # = C1
+# power-cycle, re-read health: still C1
+```
+Expected: `C1 − C0` ≈ the number of erase + `WRITE_CHUNK` commands in that
+flash. For the 87,532-byte AMS app that's ~513. The NVM value equals the health
+value, and a power cycle keeps it.
+
+**12c — an abandoned flash appends one record, not one per chunk (bug 2)**
+
+Use an **aborted** flash. A completed re-flash compacts sector 7 at
+`FLASH_VERIFY`, which drops superseded records, so it can't tell old firmware
+from new. Stopping before verify avoids that compaction.
+```sh
+# dump + count first -> R0
+cfb flash app.bin                    # Ctrl-C at ~50 %: host dies, no FLASH_VERIFY
+# wait > 30 s (session watchdog, BL_SESSION_TIMEOUT_MS): the timeout flushes the counter
+# dump + count again -> R1
+cfb diagnose health                  # "Flash writes" grew by the chunks sent
+cfb flash app.bin                    # finish a full flash to restore the app
+```
+Expected: **`R1 − R0 == 1`**. A pre-#188 BL gives roughly one record per chunk
+sent (hundreds for a half AMS flash). The BL stays in the BL after the timeout
+(#125 C2 flash-dirty: it doesn't jump into a half-written app). This is a host
+abort, not a power cut, so it isn't destructive.
+
+**Pass**: 12a keeps P0 across the power cycle. 12b counts the flash and the
+value survives a power cycle. 12c appends exactly one record.
+
+**Proves**: #187. The restore runs after `bl_nvm_init` inside the ECC guard,
+and the RAM counter is flushed only at session boundaries (`FLASH_VERIFY`,
+`DISCONNECT`, session timeout, `RESET` / `JUMP`).
+
 ---
 
 ## Test-run log
@@ -276,3 +344,4 @@ Record outcomes here after each bench run, one row per test:
 | 9 — multi-bus reply-on-origin |  |  |  |  |  |
 | 10 — bus-off recovery (NG-9) |  |  |  |  |  |
 | 11 — SWD seed provisioning (#183) |  |  |  |  |  |
+| 12 — flash-write counter persistence / churn (#187) |  |  |  |  |  |
